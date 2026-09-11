@@ -1,0 +1,9 @@
+/* Self-hosted fonts (bundled by Vite, no CDN, works offline).
+ * Latin subsets only — keeps the PWA precache small.
+ * Epilogue  -> headings   (600, 700)
+ * Plus Jakarta Sans -> body/labels (400, 600, 700) */
+@import '@fontsource/epilogue/latin-600.css';
+@import '@fontsource/epilogue/latin-700.css';
+@import '@fontsource/plus-jakarta-sans/latin-400.css';
+@import '@fontsource/plus-jakarta-sans/latin-600.css';
+@import '@fontsource/plus-jakarta-sans/latin-700.css';
