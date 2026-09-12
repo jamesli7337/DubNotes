@@ -83,17 +83,9 @@ const TAPE_MIN = 12;
 const SHAPE_MIN = 12;
 /** An inserted image is fitted into this fraction of the page width. */
 const IMAGE_FIT = 0.6;
-/**
- * How long a pointercancel mid-draw-stroke is held as "maybe interrupted,
- * not really over" before falling back to committing the ink as-is (see
- * `strokeGrace`). iOS/WebKit's touch arbitration can send a spurious
- * pointercancel for the Apple Pencil's own pointerId when a palm lands on the
- * glass mid-write, even though the physical tip never lifted, and sometimes
- * resumes delivering events for that same contact under a fresh pointerId.
- */
-const STROKE_GRACE_MS = 120;
-/** How close (page units) a resuming pen-down must land to the interrupted stroke's last point to count as the same stroke. */
-const STROKE_GRACE_DIST = 40;
+
+/** A `Touch` carries this on WebKit (stylus vs finger); not in the standard Touch Events types. */
+type WebKitTouch = Touch & { touchType?: 'direct' | 'stylus' };
 
 interface TextEditor {
   /** the element being edited — for a new box this is not in the store yet */
@@ -158,16 +150,6 @@ export class PageCanvas {
   private tapeHit: string | null = null;
   /** shape under a Shapes-tool press: a tap selects it, a drag places a new shape over it */
   private shapeHit: string | null = null;
-  /**
-   * Set while a pointercancel mid-draw-stroke might be the palm-triggered
-   * iOS/WebKit bug (see `STROKE_GRACE_MS`): `mode` and `live` are left exactly
-   * as they were, so the ink stays on screen and touch-action stays 'none' —
-   * nothing about the gesture is finalized. The timer commits the stroke as
-   * genuinely interrupted if nothing resumes; a same-pointerType pen-down
-   * nearby, arriving first (in onDown), cancels the timer and continues the
-   * same stroke instead of starting a new one.
-   */
-  private strokeGrace: { timer: ReturnType<typeof setTimeout>; lastPt: number[] } | null = null;
   /** a finger resting on a tape: becomes a peel/cover tap if it lifts without moving */
   private touchTap: { id: string; pointerId: number; x: number; y: number } | null = null;
   private pointerId = -1;
@@ -265,6 +247,14 @@ export class PageCanvas {
     view.addEventListener('pointermove', this.onMove);
     view.addEventListener('pointerup', this.onUp);
     view.addEventListener('pointercancel', this.onUp);
+    // non-passive Touch Event listeners, purely to veto the native pan/scroll
+    // gesture recognizer while a pen stroke is live — see blockNativeGesture's
+    // doc comment. Pointer Events remain the only source of ink data (position,
+    // pressure, getCoalescedEvents); these never touch `live`/store state.
+    view.addEventListener('touchstart', this.blockNativeGesture, { passive: false });
+    view.addEventListener('touchmove', this.blockNativeGesture, { passive: false });
+    host.addEventListener('touchstart', this.blockNativeGesture, { passive: false });
+    host.addEventListener('touchmove', this.blockNativeGesture, { passive: false });
 
     this.isMounted = true;
     this.rebuild();
@@ -280,8 +270,12 @@ export class PageCanvas {
       v.removeEventListener('pointermove', this.onMove);
       v.removeEventListener('pointerup', this.onUp);
       v.removeEventListener('pointercancel', this.onUp);
+      v.removeEventListener('touchstart', this.blockNativeGesture);
+      v.removeEventListener('touchmove', this.blockNativeGesture);
       v.remove();
     }
+    this.host?.removeEventListener('touchstart', this.blockNativeGesture);
+    this.host?.removeEventListener('touchmove', this.blockNativeGesture);
     this.overlay?.destroy();
     this.overlay = null;
     this.guide?.destroy();
@@ -460,36 +454,40 @@ export class PageCanvas {
   }
 
   // ------------------------------------------------------------- pointer
-  private onDown = (e: PointerEvent): void => {
-    // a pointercancel mid-draw-stroke is being held in its grace window (see
-    // `strokeGrace`): a press nearby continues that same stroke — whatever
-    // pointerType it reports. This must come before the touch branch below:
-    // after the spurious cancel, iOS delivers the Pencil's own continuing
-    // contact as a *touch* pointer, which is the very case the window exists
-    // for. Anything else means the interruption was real, so finish it right
-    // away instead of leaving it to the timer, then fall through to handle
-    // this press as whatever it actually is.
-    if (this.strokeGrace) {
-      const g = this.strokeGrace;
-      const pt = this.toLocal(e);
-      if (Math.hypot(pt[0] - g.lastPt[0], pt[1] - g.lastPt[1]) <= STROKE_GRACE_DIST) {
-        e.preventDefault();
-        this.endGrace();
-        this.live.push(this.snapped(pt));
-        this.capture(e);
-        this.schedule();
-        return;
-      }
-      this.endGrace();
-      this.clearCapturing();
-      this.commitDrawStroke();
-    }
+  /**
+   * Vetoes iOS's native pan/scroll gesture recognizer, which can otherwise win
+   * a race against our own pointer stream and steal an in-progress pen stroke
+   * (surfacing as a stray pointercancel partway through — the "pencil drops to
+   * touch" bug). `touch-action` alone doesn't reliably govern this for a
+   * WebKit-classified stylus contact (see WebKit bug 217430); the documented,
+   * production fix (used by e.g. Excalidraw) is a non-passive Touch Event
+   * listener that calls preventDefault() synchronously, which iOS is
+   * guaranteed to honor before any gesture recognizer acts — unlike `touch-
+   * action`, whose effective value a recognizer may already have sampled
+   * before our JS runs. This exists purely to block that competition; actual
+   * ink data (position, pressure, coalesced points) still comes from the
+   * Pointer Event handlers below, untouched.
+   *
+   * Blocks unconditionally while a stroke is live (`mode === 'draw'`) so a
+   * palm or anything else landing mid-stroke can't trigger a native gesture
+   * either. Also blocks a stylus's own touchstart even before `mode` updates
+   * (WebKit tags a `Touch` with `touchType: 'stylus'`) so the very first
+   * contact of a new stroke is covered too, not just the ones after — a
+   * finger's touchstart (`touchType: 'direct'`) is never matched by this, so
+   * finger-scrolling between strokes is untouched.
+   */
+  private blockNativeGesture = (e: TouchEvent): void => {
+    const stylus = Array.from(e.changedTouches).some((t) => (t as WebKitTouch).touchType === 'stylus');
+    if (this.mode === 'draw' || stylus) e.preventDefault();
+  };
 
+  private onDown = (e: PointerEvent): void => {
     if (e.pointerType === 'touch') {
-      // finger drags scroll; a finger *tap* on a tape strip still peels / covers it.
-      // Exception: mid-draw a touch might be the Pencil's own contact,
-      // reclassified by iOS; block the native scroll/pan it would trigger, on
-      // top of touch-action already doing so, in case that's ever bypassed.
+      // finger drags scroll; a finger *tap* on a tape strip still peels /
+      // covers it. blockNativeGesture (above) is what actually keeps a
+      // mid-stroke touch (a palm, or a stylus contact WebKit hands us as
+      // 'touch') from triggering a native pan; this preventDefault is just
+      // cheap, harmless, redundant insurance on top of that.
       if (this.mode === 'draw') e.preventDefault();
       const pt = this.toLocal(e);
       const tape = this.topTapeAt(pt[0], pt[1]);
@@ -743,9 +741,7 @@ export class PageCanvas {
   };
 
   private onUp = (e: PointerEvent): void => {
-    // a touch pointer that resumed an interrupted stroke (see onDown) is the
-    // captured drawing pointer now: its lift ends the stroke like any pen lift
-    if (e.pointerType === 'touch' && e.pointerId !== this.pointerId) {
+    if (e.pointerType === 'touch') {
       const tap = this.touchTap;
       this.touchTap = null;
       if (tap && tap.pointerId === e.pointerId && e.type === 'pointerup') {
@@ -757,18 +753,6 @@ export class PageCanvas {
     if (e.pointerId !== this.pointerId || !this.mode) return;
     e.preventDefault();
     const cancelled = e.type === 'pointercancel';
-
-    // a pointercancel mid-draw-stroke might be the palm-triggered iOS/WebKit
-    // bug (see `STROKE_GRACE_MS`): hold off on finishing anything — touch-
-    // action stays 'none' and `mode`/`live` stay exactly as they are, so a
-    // resuming pen-down (in onDown) can pick the same stroke back up, and a
-    // stray native gesture can't sneak in during the gap either way
-    if (cancelled && this.mode === 'draw' && this.live.length) {
-      this.disarmHold();
-      if (this.lineEdit) this.lineEdit = null; // pointer lost mid-snap — keep the ink it started as (once committed)
-      this.beginGrace(this.live[this.live.length - 1]);
-      return;
-    }
 
     try {
       this.view!.releasePointerCapture(e.pointerId);
@@ -924,32 +908,9 @@ export class PageCanvas {
     this.adjustEnd = null; // lineEdit itself outlives the press: it stays until something commits it
     this.shapeMode = false;
     this.disarmHold();
-    this.endGrace(); // defensive: every real call site already clears this itself first
   }
 
-  /** Starts the grace window after a pointercancel mid-draw (see `strokeGrace`). */
-  private beginGrace(lastPt: number[]): void {
-    this.strokeGrace = {
-      lastPt,
-      timer: setTimeout(() => {
-        this.strokeGrace = null;
-        this.clearCapturing(); // the interruption is real now: release the hold on native gestures
-        this.commitDrawStroke();
-      }, STROKE_GRACE_MS),
-    };
-  }
-
-  /** Cancels a pending grace timer, if any — a resume claimed the stroke, or it's being finished outright instead. */
-  private endGrace(): void {
-    if (this.strokeGrace) clearTimeout(this.strokeGrace.timer);
-    this.strokeGrace = null;
-  }
-
-  /**
-   * Builds a Stroke from `this.live` and commits it — the ordinary end of a
-   * draw gesture, whether by lifting the pen or by the grace window (see
-   * `strokeGrace`) timing out with nothing resuming it.
-   */
+  /** Builds a Stroke from `this.live` and commits it — the ordinary end of a draw gesture. */
   private commitDrawStroke(): void {
     if (this.live.length === 1) {
       const [x, y, p] = this.live[0];
