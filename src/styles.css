@@ -1180,7 +1180,7 @@ select {
   background: #fff;
   border-radius: var(--r-lg);
   box-shadow: var(--sh-3), inset 0 0 0 1px rgba(4, 21, 52, 0.06);
-  touch-action: pan-x pan-y;
+  touch-action: pan-x pan-y; /* default: a finger drag scrolls the notebook — see .page--capturing below */
   -webkit-user-select: none;
   user-select: none;
 }
@@ -1198,7 +1198,35 @@ select {
   width: 820px;
   height: 1060px;
   display: block;
-  touch-action: pan-x pan-y;
+  touch-action: pan-x pan-y; /* matches .page's default; overridden together by .page--capturing below */
+}
+/*
+ * While the page canvas has an active pointer capture (a stroke, a lasso drag,
+ * a shape drag, ...), touch-action is forced off statically via this class
+ * (page-canvas.ts toggles it, in capture() / clearCapturing()) instead of a
+ * JS-toggled inline style. A native pan/scroll gesture recognizer can decide a
+ * touch's eligibility using whatever touch-action was in effect right at
+ * contact — before a same-task inline style write is guaranteed to have been
+ * incorporated — so an inline `element.style.touchAction = 'none'` set inside
+ * the pointerdown handler can lose a race against that recognizer, which
+ * (once armed) runs to its own fixed recognition window and then sends us a
+ * stray pointercancel: the "pencil drops to touch" bug. A statically-declared
+ * class rule is what's actually static in the *stylesheet* (only its
+ * presence on the element is toggled), which is what this fix is really
+ * about — this file's cascade already resolves the value, so there's no
+ * separate style recalculation contending with the recognizer's own read of
+ * the property, just a class-list mutation.
+ *
+ * `.nb-scroll` (the real scrollable ancestor) is deliberately left untouched
+ * and always pan-x pan-y: `.page`'s own touch-action already governs any
+ * touch landing on a page (touch-action is the intersection of an element and
+ * all its ancestors — a nearer, more-restrictive value always wins), so
+ * `.nb-scroll` doesn't need — and for touches landing on its own background
+ * outside any page, must keep — its scrolling permission.
+ */
+.page--capturing,
+.page--capturing canvas {
+  touch-action: none;
 }
 
 /* ---------------------------------------------------------- selection box

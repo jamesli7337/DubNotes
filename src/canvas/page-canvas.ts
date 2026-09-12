@@ -47,8 +47,6 @@ import {
 } from './geom';
 import { SelectionOverlay } from './selection';
 import { drawTemplate } from './templates';
-// TEMPORARY (pencil-drops-to-touch investigation) — see src/pen-debug.ts
-import { penDebug, penDebugNote } from '../pen-debug';
 
 /** Undo-able edits a page can produce. Page add/delete is handled by NotebookView. */
 export type Op =
@@ -169,7 +167,7 @@ export class PageCanvas {
    * nearby, arriving first (in onDown), cancels the timer and continues the
    * same stroke instead of starting a new one.
    */
-  private strokeGrace: { timer: ReturnType<typeof setTimeout>; lastPt: number[]; startedAt: number } | null = null;
+  private strokeGrace: { timer: ReturnType<typeof setTimeout>; lastPt: number[] } | null = null;
   /** a finger resting on a tape: becomes a peel/cover tap if it lifts without moving */
   private touchTap: { id: string; pointerId: number; x: number; y: number } | null = null;
   private pointerId = -1;
@@ -463,9 +461,6 @@ export class PageCanvas {
 
   // ------------------------------------------------------------- pointer
   private onDown = (e: PointerEvent): void => {
-    // TEMPORARY: full state at the moment this event arrives, before anything below reacts to it
-    penDebug('down:enter', e, { mode: this.mode, capturedId: this.pointerId, ...this.graceDebugInfo() });
-
     // a pointercancel mid-draw-stroke is being held in its grace window (see
     // `strokeGrace`): a press nearby continues that same stroke — whatever
     // pointerType it reports. This must come before the touch branch below:
@@ -477,19 +472,16 @@ export class PageCanvas {
     if (this.strokeGrace) {
       const g = this.strokeGrace;
       const pt = this.toLocal(e);
-      const dist = Math.hypot(pt[0] - g.lastPt[0], pt[1] - g.lastPt[1]);
-      if (dist <= STROKE_GRACE_DIST) {
-        penDebugNote('grace:resume-matched', { id: e.pointerId, type: e.pointerType, dist });
+      if (Math.hypot(pt[0] - g.lastPt[0], pt[1] - g.lastPt[1]) <= STROKE_GRACE_DIST) {
         e.preventDefault();
         this.endGrace();
         this.live.push(this.snapped(pt));
-        this.capture(e, 'onDown:grace-resume');
+        this.capture(e);
         this.schedule();
         return;
       }
-      penDebugNote('grace:resume-rejected-commit', { id: e.pointerId, type: e.pointerType, dist });
       this.endGrace();
-      this.clearTouchAction('onDown:grace-reject');
+      this.clearCapturing();
       this.commitDrawStroke();
     }
 
@@ -498,10 +490,7 @@ export class PageCanvas {
       // Exception: mid-draw a touch might be the Pencil's own contact,
       // reclassified by iOS; block the native scroll/pan it would trigger, on
       // top of touch-action already doing so, in case that's ever bypassed.
-      if (this.mode === 'draw') {
-        e.preventDefault();
-        penDebugNote('touch:preventDefault(mode=draw)', { id: e.pointerId });
-      }
+      if (this.mode === 'draw') e.preventDefault();
       const pt = this.toLocal(e);
       const tape = this.topTapeAt(pt[0], pt[1]);
       this.touchTap = tape ? { id: tape.id, pointerId: e.pointerId, x: pt[0], y: pt[1] } : null;
@@ -521,7 +510,7 @@ export class PageCanvas {
       if (end) {
         this.mode = 'line-adjust';
         this.adjustEnd = end;
-        this.capture(e, 'onDown:line-adjust');
+        this.capture(e);
         this.schedule();
         return;
       }
@@ -535,7 +524,7 @@ export class PageCanvas {
       this.mode = 'tape-tap';
       this.tapeHit = tape.id;
       this.pressPt = pt;
-      this.capture(e, 'onDown:tape-tap');
+      this.capture(e);
       return;
     }
 
@@ -544,7 +533,7 @@ export class PageCanvas {
       this.mode = 'tape';
       this.live = [pt];
       this.pressPt = pt;
-      this.capture(e, 'onDown:tape');
+      this.capture(e);
       this.schedule();
       return;
     }
@@ -558,12 +547,12 @@ export class PageCanvas {
         this.mode = 'shape-press';
         this.shapeHit = hit.id;
         this.pressPt = pt;
-        this.capture(e, 'onDown:shape-press');
+        this.capture(e);
         return;
       }
       this.clearSelection(); // the last placed shape's handles go; a press inside them never reaches here
       this.beginShapeDrag(pt);
-      this.capture(e, 'onDown:shapes-drag');
+      this.capture(e);
       this.schedule();
       return;
     }
@@ -571,7 +560,7 @@ export class PageCanvas {
     if (kind === 'laser') {
       this.mode = 'laser';
       this.laser.push([[pt[0], pt[1], performance.now()]]); // a fresh, disconnected stroke
-      this.capture(e, 'onDown:laser');
+      this.capture(e);
       this.schedule();
       return;
     }
@@ -615,53 +604,35 @@ export class PageCanvas {
       if (this.shapeMode) this.armHold();
     }
 
-    this.capture(e, `onDown:${this.mode}`);
+    this.capture(e);
     if (this.mode === 'erase') this.eraseAt(pt);
     this.schedule();
   };
 
-  // TEMPORARY: `tag` identifies which call site triggered the capture, for the pencil-drops-to-touch log
-  private capture(e: PointerEvent, tag: string): void {
-    this.view!.style.touchAction = 'none'; // hard-stop scrolling for the pen contact
-    penDebugNote('touchAction:none', { via: tag, id: e.pointerId });
+  /**
+   * Blocks native pan/scroll for this contact via the `.page--capturing` class
+   * (see styles.css) rather than a JS-toggled inline style — a native gesture
+   * recognizer can decide eligibility using whatever touch-action was in
+   * effect right at contact, before a same-task style write is guaranteed to
+   * be incorporated, so a reactive inline style can lose that race. The class
+   * rule itself is static in the stylesheet; only its presence is toggled.
+   */
+  private capture(e: PointerEvent): void {
+    this.host!.classList.add('page--capturing');
     try {
       this.view!.setPointerCapture(e.pointerId);
-      penDebugNote('setPointerCapture', { via: tag, id: e.pointerId });
-    } catch (err) {
-      penDebugNote('setPointerCapture:FAILED', { via: tag, id: e.pointerId, err: String(err) });
+    } catch {
+      /* ignore */
     }
     this.pointerId = e.pointerId;
   }
 
-  // TEMPORARY: mirrors capture()'s logging for the release side — see src/pen-debug.ts
-  private releaseCapture(id: number, tag: string): void {
-    try {
-      this.view!.releasePointerCapture(id);
-      penDebugNote('releasePointerCapture', { via: tag, id });
-    } catch (err) {
-      penDebugNote('releasePointerCapture:FAILED', { via: tag, id, err: String(err) });
-    }
-  }
-
-  // TEMPORARY: wraps every touch-action reset so it's logged with what triggered it — see src/pen-debug.ts
-  private clearTouchAction(tag: string): void {
-    if (this.view) this.view.style.touchAction = '';
-    penDebugNote('touchAction:reset', { via: tag });
-  }
-
-  // TEMPORARY: strokeGrace state for the per-event debug log — see src/pen-debug.ts
-  private graceDebugInfo(): Record<string, unknown> {
-    if (!this.strokeGrace) return { graceActive: false };
-    return {
-      graceActive: true,
-      graceAgeMs: Math.round(performance.now() - this.strokeGrace.startedAt),
-      graceLastPt: this.strokeGrace.lastPt,
-    };
+  /** The other half of `capture()`: releases the class hold on native pan/scroll. */
+  private clearCapturing(): void {
+    this.host!.classList.remove('page--capturing');
   }
 
   private onMove = (e: PointerEvent): void => {
-    // TEMPORARY: full state at the moment this event arrives, before the id/mode gate below reacts to it
-    penDebug('move:enter', e, { mode: this.mode, capturedId: this.pointerId, ...this.graceDebugInfo() });
     if (e.pointerId !== this.pointerId || !this.mode) return;
     e.preventDefault();
     const src = e as CoalescingEvent;
@@ -772,9 +743,6 @@ export class PageCanvas {
   };
 
   private onUp = (e: PointerEvent): void => {
-    // TEMPORARY: full state at the moment this event arrives, before anything below reacts to it
-    penDebug(`${e.type}:enter`, e, { mode: this.mode, capturedId: this.pointerId, ...this.graceDebugInfo() });
-
     // a touch pointer that resumed an interrupted stroke (see onDown) is the
     // captured drawing pointer now: its lift ends the stroke like any pen lift
     if (e.pointerType === 'touch' && e.pointerId !== this.pointerId) {
@@ -802,8 +770,12 @@ export class PageCanvas {
       return;
     }
 
-    this.releaseCapture(e.pointerId, `onUp:${e.type}`);
-    this.clearTouchAction(`onUp:${e.type}`);
+    try {
+      this.view!.releasePointerCapture(e.pointerId);
+    } catch {
+      /* ignore */
+    }
+    this.clearCapturing();
 
     if (this.mode === 'line-adjust') {
       this.reset();
@@ -957,14 +929,11 @@ export class PageCanvas {
 
   /** Starts the grace window after a pointercancel mid-draw (see `strokeGrace`). */
   private beginGrace(lastPt: number[]): void {
-    penDebugNote('grace:begin', { lastPt }); // TEMPORARY
     this.strokeGrace = {
       lastPt,
-      startedAt: performance.now(),
       timer: setTimeout(() => {
-        penDebugNote('grace:timeout-expired', { lastPt }); // TEMPORARY
         this.strokeGrace = null;
-        this.clearTouchAction('beginGrace:timeout');
+        this.clearCapturing(); // the interruption is real now: release the hold on native gestures
         this.commitDrawStroke();
       }, STROKE_GRACE_MS),
     };
@@ -972,10 +941,7 @@ export class PageCanvas {
 
   /** Cancels a pending grace timer, if any — a resume claimed the stroke, or it's being finished outright instead. */
   private endGrace(): void {
-    if (this.strokeGrace) {
-      clearTimeout(this.strokeGrace.timer);
-      penDebugNote('grace:end', { ageMs: Math.round(performance.now() - this.strokeGrace.startedAt) }); // TEMPORARY
-    }
+    if (this.strokeGrace) clearTimeout(this.strokeGrace.timer);
     this.strokeGrace = null;
   }
 
