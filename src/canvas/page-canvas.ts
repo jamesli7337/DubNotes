@@ -461,40 +461,40 @@ export class PageCanvas {
 
   // ------------------------------------------------------------- pointer
   private onDown = (e: PointerEvent): void => {
+    // a pointercancel mid-draw-stroke is being held in its grace window (see
+    // `strokeGrace`): a press nearby continues that same stroke — whatever
+    // pointerType it reports. This must come before the touch branch below:
+    // after the spurious cancel, iOS delivers the Pencil's own continuing
+    // contact as a *touch* pointer, which is the very case the window exists
+    // for. Anything else means the interruption was real, so finish it right
+    // away instead of leaving it to the timer, then fall through to handle
+    // this press as whatever it actually is.
+    if (this.strokeGrace) {
+      const g = this.strokeGrace;
+      const pt = this.toLocal(e);
+      if (Math.hypot(pt[0] - g.lastPt[0], pt[1] - g.lastPt[1]) <= STROKE_GRACE_DIST) {
+        e.preventDefault();
+        this.endGrace();
+        this.live.push(this.snapped(pt));
+        this.capture(e);
+        this.schedule();
+        return;
+      }
+      this.endGrace();
+      if (this.view) this.view.style.touchAction = '';
+      this.commitDrawStroke();
+    }
+
     if (e.pointerType === 'touch') {
       // finger drags scroll; a finger *tap* on a tape strip still peels / covers it.
-      // Exception: mid-draw — including a stroke held in the grace window
-      // below, where `mode` is still 'draw' — a touch might be the Pencil's
-      // own contact, reclassified by iOS after a spurious pointercancel; block
-      // the native scroll/pan it would trigger, on top of touch-action
-      // already doing so, in case that's ever bypassed.
+      // Exception: mid-draw a touch might be the Pencil's own contact,
+      // reclassified by iOS; block the native scroll/pan it would trigger, on
+      // top of touch-action already doing so, in case that's ever bypassed.
       if (this.mode === 'draw') e.preventDefault();
       const pt = this.toLocal(e);
       const tape = this.topTapeAt(pt[0], pt[1]);
       this.touchTap = tape ? { id: tape.id, pointerId: e.pointerId, x: pt[0], y: pt[1] } : null;
       return;
-    }
-
-    // a pointercancel mid-draw-stroke is being held in its grace window (see
-    // `strokeGrace`): a pen-down nearby continues that same stroke; anything
-    // else means the interruption was real, so finish it right away instead
-    // of leaving it to the timer, then fall through below to start this press
-    if (this.strokeGrace) {
-      const g = this.strokeGrace;
-      if (e.pointerType === 'pen') {
-        const pt = this.toLocal(e);
-        if (Math.hypot(pt[0] - g.lastPt[0], pt[1] - g.lastPt[1]) <= STROKE_GRACE_DIST) {
-          e.preventDefault();
-          this.endGrace();
-          this.live.push(this.snapped(pt));
-          this.capture(e);
-          this.schedule();
-          return;
-        }
-      }
-      this.endGrace();
-      if (this.view) this.view.style.touchAction = '';
-      this.commitDrawStroke();
     }
 
     e.preventDefault();
@@ -730,7 +730,9 @@ export class PageCanvas {
   };
 
   private onUp = (e: PointerEvent): void => {
-    if (e.pointerType === 'touch') {
+    // a touch pointer that resumed an interrupted stroke (see onDown) is the
+    // captured drawing pointer now: its lift ends the stroke like any pen lift
+    if (e.pointerType === 'touch' && e.pointerId !== this.pointerId) {
       const tap = this.touchTap;
       this.touchTap = null;
       if (tap && tap.pointerId === e.pointerId && e.type === 'pointerup') {
