@@ -97,6 +97,9 @@ class NotebookView {
   private readonly wrapById = new Map<string, HTMLElement>();
   private readonly mounted = new Set<string>();
   private sizePopover: Modal | null = null;
+  /** Options row auto-collapses after this long with no dock interaction — see expandDock/collapseDock. */
+  private static readonly DOCK_IDLE_MS = 3000;
+  private dockCollapseTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Tracks which page is most visible, for the "auto" ink swatch/dot preview. */
   private viewObserver: IntersectionObserver;
@@ -179,6 +182,7 @@ class NotebookView {
     this.onLeave = () => {
       window.removeEventListener('keydown', this.onKey);
       window.removeEventListener('hashchange', this.onLeave);
+      if (this.dockCollapseTimer != null) clearTimeout(this.dockCollapseTimer);
       this.deactivateAll(); // commit an open text edit before the canvases go away
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
       this.observer.disconnect();
@@ -239,7 +243,7 @@ class NotebookView {
 
     this.aiToggleBtn = el('button', {
       class: 'iconbtn ai-toggle',
-      title: 'AI Assistant — read this page and reply with Gemini',
+      title: 'AI Assistant — read this page and reply with NoteApp AI',
       'aria-label': 'AI Assistant',
       'aria-pressed': 'false',
     }) as HTMLButtonElement;
@@ -251,8 +255,8 @@ class NotebookView {
 
     this.aiSendBtn = el('button', {
       class: 'iconbtn ai-send',
-      title: 'Send this turn to Gemini now',
-      'aria-label': 'Send this turn to Gemini now',
+      title: 'Send this turn to NoteApp AI now',
+      'aria-label': 'Send this turn to NoteApp AI now',
       hidden: true,
     }) as HTMLButtonElement;
     this.aiSendBtn.append(icon('send'));
@@ -286,10 +290,16 @@ class NotebookView {
     // Notability-style dock: a fixed top row (tools + undo/redo, never reflows)
     // and a fixed-height options row below it for the active tool's own
     // controls, so switching tools never shifts the top row or the page below.
-    this.toolsEl = el('div', { class: 'nb-dock' });
+    this.toolsEl = el('div', { class: 'nb-dock nb-dock--collapsed' });
     this.toolsTopEl = el('div', { class: 'nb-dock__row nb-dock__row--tools' });
     this.toolsOptionsEl = el('div', { class: 'nb-dock__row nb-dock__row--options' });
     this.toolsEl.append(this.toolsTopEl, this.toolsOptionsEl);
+    // idle by default (icon row only); any tap inside the dock — a tool
+    // switch, a swatch, the size button, even re-tapping the already-active
+    // tool — reopens the options row and restarts the idle timer, so it stays
+    // open while actually being used. pointerdown (not click) so it fires
+    // ahead of whatever the specific control's own handler does.
+    this.toolsEl.addEventListener('pointerdown', () => this.expandDock());
     this.scrollEl = el('div', { class: 'nb-scroll' });
     blockGestures(this.scrollEl);
     this.bindZoomGestures();
@@ -440,6 +450,30 @@ class NotebookView {
     } finally {
       progress.close();
     }
+  }
+
+  /**
+   * Opens the dock's options row (if collapsed) and (re)arms the idle timer
+   * that collapses it back down. Called on every pointerdown anywhere inside
+   * the dock — see the listener in mountNotebook. Deferred while the size
+   * popover is open so its anchor button doesn't vanish out from under it
+   * mid-drag.
+   */
+  private expandDock(): void {
+    if (this.dockCollapseTimer != null) clearTimeout(this.dockCollapseTimer);
+    this.toolsEl.classList.remove('nb-dock--collapsed');
+    this.dockCollapseTimer = setTimeout(() => this.collapseDock(), NotebookView.DOCK_IDLE_MS);
+  }
+
+  private collapseDock(): void {
+    this.dockCollapseTimer = null;
+    if (this.sizePopover) {
+      // still being adjusted via the popover — check back rather than
+      // collapsing the row its anchor button lives in out from under it
+      this.dockCollapseTimer = setTimeout(() => this.collapseDock(), NotebookView.DOCK_IDLE_MS);
+      return;
+    }
+    this.toolsEl.classList.add('nb-dock--collapsed');
   }
 
   private renderTools(): void {
@@ -891,7 +925,7 @@ class NotebookView {
     btn.append(dot);
 
     const paintDot = (v: number): void => {
-      const d = Math.min(v * this.pageScale(), 22); // 22px = the .size-btn box; bigger reads from the number
+      const d = Math.min(v * this.pageScale(), 18); // 18px caps the dot inside the (now 32px) .size-btn box; bigger reads from the number
       dot.style.width = `${d}px`;
       dot.style.height = isPen ? `${d}px` : `${Math.max(3, d * 0.5)}px`;
       dot.style.borderRadius = isPen ? '50%' : '2px';

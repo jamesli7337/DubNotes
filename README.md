@@ -340,7 +340,7 @@ that distinction matters to you.
 ### AI mode
 
 A per-page toggle (the bot icon in a page's header) turns that page into a
-live handwritten conversation with Gemini. While it's on (an active page gets
+live handwritten conversation with NoteApp AI. While it's on (an active page gets
 a violet border), writing below the last exchange and then pausing for ~2s
 rasterizes just that region and sends it to `/api/gemini`; a send icon next
 to the toggle submits the current turn immediately instead of waiting. The
@@ -357,7 +357,7 @@ written stays as normal page content.
 
 - Everything is stored locally in IndexedDB database **`noteapp`** — with one
   exception: while AI mode is on for a page (see above), a rasterized image of
-  what you write there is sent to the Gemini endpoint to get a reply. Nothing
+  what you write there is sent to NoteApp AI to get a reply. Nothing
   else leaves the device, and AI mode is off by default on every page.
 - Clearing Safari website data, or removing the Home Screen app, can delete your notes.
   Use **Export** on the Library screen regularly; **Import** restores a backup

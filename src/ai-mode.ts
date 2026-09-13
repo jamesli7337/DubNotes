@@ -264,7 +264,7 @@ export class AiMode {
     if (!st) return;
     st.pageEl.classList.toggle('page--ai-active', st.active);
     st.statusEl.classList.toggle('ai-status--busy', st.sending);
-    st.statusEl.textContent = st.sending ? 'Gemini is thinking…' : st.active ? 'AI mode' : '';
+    st.statusEl.textContent = st.sending ? 'NoteApp AI is thinking…' : st.active ? 'AI mode' : '';
   }
 
   private async submitTurn(pageId: string): Promise<void> {
@@ -328,11 +328,11 @@ export class AiMode {
         text = stripMarkdown(data.text);
       } else {
         const reason = typeof data?.error === 'string' ? data.error : `request failed (${res.status})`;
-        text = `Gemini error: ${reason}`;
+        text = `NoteApp AI error: ${reason}`;
         isError = true;
       }
     } catch (err) {
-      text = `Gemini error: could not reach the endpoint (${err instanceof Error ? err.message : 'network error'}).`;
+      text = `NoteApp AI error: could not reach the endpoint (${err instanceof Error ? err.message : 'network error'}).`;
       isError = true;
     }
 
@@ -366,7 +366,7 @@ export class AiMode {
       }
       const cls =
         'ai-panel__reply' + (entry.isError ? ' ai-panel__reply--error' : '') + (entry.pending ? ' ai-panel__reply--pending' : '');
-      row.append(el('div', { class: cls, text: entry.pending ? 'Gemini is thinking…' : entry.text }));
+      row.append(el('div', { class: cls, text: entry.pending ? 'NoteApp AI is thinking…' : entry.text }));
       body.append(row);
     }
     body.scrollTop = body.scrollHeight;

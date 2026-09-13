@@ -776,39 +776,40 @@ select {
   height: 17px;
 }
 
-/* floating tool dock — two fixed-size rows stacked (Notability-style): a top
-   row of tool icons + undo/redo that's always the same content, and an
-   options row below it whose content changes per tool but whose height (see
+/* floating tool dock — two rows stacked (Notability-style): a top row of tool
+   icons + undo/redo that's always the same content, and an options row below
+   it whose content changes per tool but whose height (see
    .nb-dock__row--options) does not, so neither row ever shifts on tool switch.
    `position: fixed` (same recipe as `.fab-dock` in the library view) floats it
    over the page/canvas at a constant viewport position — it no longer takes a
    reserved row out of `.nb`'s flex column, so `.nb-scroll` now fills the full
    height below the app bar and page content can scroll/zoom underneath the
-   dock rather than being pushed down by it. That does mean whatever page
+   dock rather than being pushed down by it. That still means whatever page
    content ends up positioned under the dock's own footprint (10px below the
-   app bar, full width) isn't reachable for drawing while it's there. The AI
-   side panel took the other option this codebase has on file - shifting
-   .nb-scroll out from under it via margin - but that only works for a side
-   panel with room to push content sideways; doing the same here (reserving
-   vertical space below the app bar permanently) would just recreate the
-   fixed strip this change removes. The dead zone is narrow in practice: only
-   whatever page content is scrolled to exactly this screen position at a
-   given moment - scrolling moves it out from under the dock, same as
-   anything else underneath it. */
+   app bar, full width) isn't reachable for drawing while it's there — kept
+   deliberately small two ways: the controls themselves are sized down from
+   their original 38px (see .tool/.size-btn below), and `.nb-dock--collapsed`
+   (toggled from notebook.ts on a short idle timer — see expandDock there)
+   hides the options row entirely, leaving just the icon row, whenever the
+   user isn't actively picking a tool or adjusting one's colour/size. */
 .nb-dock {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  top: calc(var(--header-h) + env(safe-area-inset-top) + 10px);
+  top: calc(var(--header-h) + env(safe-area-inset-top) + 8px);
   z-index: 40;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   max-width: calc(100% - 20px);
-  padding: 8px 12px;
+  padding: 6px 10px;
   background: var(--surface-c-lowest);
   border-radius: var(--r-xl);
   box-shadow: var(--sh-3);
+  transition: gap 0.16s ease;
+}
+.nb-dock--collapsed {
+  gap: 0;
 }
 /* each row is a single line — never wraps to a second line — so a row's
    height stays constant regardless of its content; a row too wide for the
@@ -820,16 +821,17 @@ select {
    box-shadow doesn't count toward a scroll container's content size, so
    with zero padding here that ring (and the active swatch's `scale(1.12)`)
    bled past the row's edge and got clipped instead of scrolling into view:
-   top/bottom for anything whose height meets the row's (the 38px size dot,
-   with no vertical slack to spare), left/right for whichever swatch sits
-   flush against the row's own start/end. The padding below is slack for
-   that bleed, not visual spacing — sized to clear the worst case (the
-   active swatch's ring *and* its scale enlargement together, ~3.6px). */
+   top/bottom for anything whose height meets the row's (the size dot, with
+   no vertical slack to spare), left/right for whichever swatch sits flush
+   against the row's own start/end. The padding below is slack for that
+   bleed, not visual spacing — sized to clear the worst case (the active
+   swatch's ring *and* its scale enlargement together, ~3.3px — 4px measured
+   too close to that for comfort across zoom/DPI rounding, hence 5px). */
 .nb-dock__row {
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
-  gap: 6px;
+  gap: 5px;
   padding: 5px;
   overflow-x: auto;
   scrollbar-width: none;
@@ -837,26 +839,46 @@ select {
 .nb-dock__row::-webkit-scrollbar {
   display: none;
 }
-/* reserves the tallest control's height plus the row's own padding (the 38px
+/* reserves the tallest control's height plus the row's own padding (the 32px
    tool/size buttons + the 5px top/bottom padding above) so a tool with only a
    short hint (or no options at all) still gets a full-height row, not a
    collapsed one. This has to track that padding exactly: a shorter min-height
    would let a short-content tool (e.g. the laser, just a hint) settle back to
    a smaller box than a swatch/size-dot tool (whose content alone already
-   meets the old 38px floor, then gains the padding on top) — the two options
+   meets the 32px floor, then gains the padding on top) — the two options
    states would then differ in height and the page beneath would visibly jump
    on every tool switch. `width: 0; min-width: 100%` keeps this row's own
    (per-tool, variable) content from setting `.nb-dock`'s auto width — without
    it, a wide options row (e.g. Shapes) would widen the whole dock and shift
-   the fixed top row along with it; overflow-x above scrolls any excess instead. */
+   the fixed top row along with it; overflow-x above scrolls any excess instead.
+   `.nb-dock--collapsed` zeroes both height bounds and clips/fades it out —
+   see expandDock/collapseDock in notebook.ts for when that class applies. */
 .nb-dock__row--options {
   width: 0;
   min-width: 100%;
-  min-height: 48px;
+  min-height: 42px;
+  max-height: 42px;
+  opacity: 1;
+  transition: max-height 0.16s ease, opacity 0.12s ease;
 }
-.nb-dock .tool {
-  width: 38px;
-  height: 38px;
+.nb-dock--collapsed .nb-dock__row--options {
+  min-height: 0;
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.nb-dock .tool,
+/* undo/redo are plain .iconbtn (40px, the app-bar size) — match them to the
+   dock's own 32px so they don't end up the tallest thing in the row, quietly
+   widening it back out (this is exactly how the row ended up 50px tall
+   instead of the expected 48px before this pass — .iconbtn, not .tool, was
+   the actual tallest content). */
+.nb-dock__row--tools .iconbtn {
+  width: 32px;
+  height: 32px;
   padding: 0;
   border-radius: var(--r-full);
   border-color: transparent;
@@ -864,33 +886,34 @@ select {
   color: var(--on-surface-variant);
   flex: none;
 }
-.nb-dock .tool .icon {
-  width: 19px;
-  height: 19px;
+.nb-dock .tool .icon,
+.nb-dock__row--tools .iconbtn .icon {
+  width: 16px;
+  height: 16px;
 }
 /* Below this width the top row's full-size buttons (8 tools + insert-image +
-   ruler/protractor + undo/redo) no longer reliably fit; shrink them (button
-   box, icon, and the row's own gaps/divider margins) so everything stays
-   visible with no scrolling on typical phone-width screens. The row's height
-   still doesn't change per tool at this size — only once, for the viewport.
-   overflow-x on .nb-dock__row (above) remains the fallback for anything
-   narrower than even this shrunk size fits. */
+   ruler/protractor + undo/redo) no longer reliably fit; shrink them further
+   (button box, icon, and the row's own gaps/divider margins) so everything
+   stays visible with no scrolling on typical phone-width screens. The row's
+   height still doesn't change per tool at this size — only once, for the
+   viewport. overflow-x on .nb-dock__row (above) remains the fallback for
+   anything narrower than even this shrunk size fits. */
 @media (max-width: 700px) {
   .nb-dock__row--tools {
-    gap: 3px;
+    gap: 2px;
   }
   .nb-dock__row--tools .tool,
   .nb-dock__row--tools .iconbtn {
-    width: 32px;
-    height: 32px;
+    width: 28px;
+    height: 28px;
   }
   .nb-dock__row--tools .tool .icon,
   .nb-dock__row--tools .iconbtn .icon {
-    width: 16px;
-    height: 16px;
+    width: 14px;
+    height: 14px;
   }
   .nb-dock__row--tools .divider {
-    margin: 4px 0;
+    margin: 3px 0;
   }
 }
 .nb-dock .tool.active {
@@ -906,8 +929,8 @@ select {
 .nb-dock .divider {
   width: 1px;
   align-self: stretch;
-  min-height: 30px;
-  margin: 4px 2px;
+  min-height: 22px;
+  margin: 2px;
   background: var(--surface-c-highest);
   flex: none;
 }
@@ -919,11 +942,11 @@ select {
 }
 
 .swatch {
-  width: 22px;
-  height: 22px;
+  width: 18px;
+  height: 18px;
   padding: 0;
   border-radius: var(--r-full);
-  border: 2px solid var(--surface-c-lowest);
+  border: 1.5px solid var(--surface-c-lowest);
   box-shadow: 0 0 0 1px var(--outline-variant);
   flex: none;
 }
@@ -949,8 +972,8 @@ select {
   justify-content: center;
 }
 .swatch--add .icon {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
 }
 .cpick {
   display: flex;
@@ -1082,8 +1105,8 @@ select {
    (not just on hover) so the button stays findable even when the dot itself
    is a light colour that would otherwise blend into the dock. */
 .size-btn {
-  width: 38px;
-  height: 38px;
+  width: 32px;
+  height: 32px;
   padding: 0;
   border: none;
   border-radius: var(--r-full);
