@@ -3,36 +3,32 @@
  *
  * Deliberately decoupled from `PageCanvas` — it never touches pointer/canvas
  * internals. It listens to the same `Op` stream `NotebookView` already uses
- * for undo/redo (an `add-stroke` op is "new ink"), reads page content through
- * `store` (which works whether or not the page is currently mounted), and
- * writes replies back the same way the text tool commits a new text box:
- * `store.addItems` + the same `pushOp` undo tracking. Visual feedback (the
- * toggle/send buttons, the "thinking" status, the active-page border) is the
- * one place this does own its own small bit of DOM, via elements handed to it
- * once by `NotebookView.buildPageWrap`.
+ * for undo/redo (an `add-stroke` op is "new ink") and reads page content
+ * through `store` (which works whether or not the page is currently
+ * mounted). Capture/send is per-page (the region below the last turn on
+ * *that* page); the reply, though, is notebook-wide: it renders in a single
+ * slide-out chat panel (`mountPanel`/`renderConversation`) rather than as
+ * page content, so the conversation reads the same regardless of which page
+ * you're looking at or scroll to.
  */
 import { el } from './ui/dom';
+import { icon } from './ui/icon';
+import { confirmDialog } from './ui/dialog';
 import { renderPageRegionImage } from './export/raster';
-import { layoutText } from './canvas/elements';
 import { itemBounds, unionRects } from './canvas/geom';
-import { PAGE_H, PAGE_W } from './const';
+import { PAGE_H } from './const';
 import { store } from './store';
+import { clearAiEntries, getAiEntries, putAiEntry } from './db';
+import { stripMarkdown } from './text-clean';
 import type { Op } from './canvas/page-canvas';
-import type { Page, TextElement } from './types';
+import type { AiConversationEntry, Page } from './types';
 import { isStroke, uid } from './util';
 
 /** How long a page must sit idle after new ink before a turn auto-submits. */
 const IDLE_MS = 2000;
-/** Vertical gap (page units) kept between the user's ink, a reply, and the next turn. */
-const MARGIN = 24;
-/** Reply text box: left/right inset from the page edges, and font size. */
-const FONT_SIZE = 18;
-/** The one AI accent colour — the page border, in-progress ink, and a reply's
- * text all use exactly this, so "AI mode" reads as one consistent identity. */
+/** The one AI accent colour — the page border and in-progress ink both use
+ * exactly this, so "AI mode" reads as one consistent identity. */
 export const AI_COLOR = '#6d28d9';
-const AI_BG = 'rgba(109, 40, 217, 0.10)';
-const ERROR_COLOR = '#ba1a1a';
-const ERROR_BG = 'rgba(186, 26, 26, 0.10)';
 
 /** Where the built-in Gemini endpoint lives. Same-origin `/api/gemini` by
  * default (set if the static site itself is ever served from the Vercel
@@ -40,6 +36,13 @@ const ERROR_BG = 'rgba(186, 26, 26, 0.10)';
  * site is hosted elsewhere (e.g. GitHub Pages) and the function is not. */
 const GEMINI_ENDPOINT = import.meta.env.VITE_GEMINI_ENDPOINT?.trim() || '/api/gemini';
 const PROXY_SECRET = import.meta.env.VITE_GEMINI_PROXY_SECRET ?? '';
+
+/** One turn's worth of conversation, shown in the panel. The persisted shape
+ * (`AiConversationEntry`) plus a transient in-memory-only flag — an entry is
+ * never written to IndexedDB while still pending; only once resolved. */
+interface ConversationEntry extends AiConversationEntry {
+  pending: boolean;
+}
 
 interface AiPageState {
   pageEl: HTMLElement;
@@ -58,21 +61,30 @@ interface AiPageState {
 
 /** What `AiMode` needs from `NotebookView`, injected rather than imported to avoid a cycle. */
 export interface AiModeHost {
-  /** Same undo/redo tracking every other page edit goes through. */
-  pushOp(op: Op): void;
-  /** Rebuilds the page list from the store (after inserting a continuation page). */
-  syncPages(): void;
   /** Repaints a page's canvas from the store, if it's currently mounted. */
   refreshPage(pageId: string): void;
-  /** A page's active flag changed (toggle, or the conversation moving to a continuation page) —
-   * lets the single app-bar toggle button refresh if it's currently showing this page. */
+  /** A page's active flag changed — lets the app-bar toggle/send buttons refresh if it's the current page. */
   onActiveChanged(pageId: string, active: boolean): void;
 }
 
 export class AiMode {
   private readonly pages = new Map<string, AiPageState>();
+  private conversation: ConversationEntry[] = [];
+  private panelEl: HTMLElement | null = null;
+  private panelBody: HTMLElement | null = null;
+  private panelOpen = false;
 
-  constructor(private readonly host: AiModeHost) {}
+  constructor(
+    private readonly notebookId: string,
+    private readonly host: AiModeHost
+  ) {}
+
+  /** Loads this notebook's persisted chat history, then repaints the panel if it's already mounted. */
+  async loadConversation(): Promise<void> {
+    const rows = await getAiEntries(this.notebookId);
+    this.conversation = rows.map((r) => ({ ...r, pending: false }));
+    this.renderConversation();
+  }
 
   /**
    * Called once per page, when its `.page-head`/`.page` DOM is first built.
@@ -94,6 +106,62 @@ export class AiMode {
       idleTimer: null,
       inkIds: new Set(),
     });
+  }
+
+  /** Builds the slide-out chat panel once and appends it to `container`. */
+  mountPanel(container: HTMLElement): void {
+    const panel = el('div', { class: 'ai-panel' });
+    const header = el('div', { class: 'ai-panel__header' });
+    header.append(el('span', { class: 'ai-panel__title', text: 'AI Assistant' }));
+
+    const actions = el('div', { class: 'ai-panel__header-actions' });
+    const clearBtn = el('button', { class: 'iconbtn', title: 'Clear conversation', 'aria-label': 'Clear conversation' });
+    clearBtn.append(icon('delete'));
+    clearBtn.addEventListener('click', () => void this.clearConversation());
+    const closeBtn = el('button', { class: 'iconbtn', title: 'Close', 'aria-label': 'Close AI panel' });
+    closeBtn.append(icon('close'));
+    closeBtn.addEventListener('click', () => this.setPanelOpen(false));
+    actions.append(clearBtn, closeBtn);
+    header.append(actions);
+
+    const body = el('div', { class: 'ai-panel__body' });
+
+    panel.append(header, body);
+    container.append(panel);
+    this.panelEl = panel;
+    this.panelBody = body;
+    this.renderConversation();
+  }
+
+  /** Confirms, then permanently deletes this notebook's whole chat history. */
+  private async clearConversation(): Promise<void> {
+    if (!this.conversation.length) return;
+    const ok = await confirmDialog({
+      title: 'Clear conversation?',
+      message: 'Deletes this notebook’s AI chat history. The pages themselves are not affected. This can’t be undone.',
+      confirmText: 'Clear',
+      danger: true,
+    });
+    if (!ok) return;
+    this.conversation = [];
+    await clearAiEntries(this.notebookId);
+    this.renderConversation();
+  }
+
+  /** Removes the panel from the DOM (called when the notebook view is torn down). */
+  destroyPanel(): void {
+    this.panelEl?.remove();
+    this.panelEl = null;
+    this.panelBody = null;
+  }
+
+  openPanel(): void {
+    this.setPanelOpen(true);
+  }
+
+  private setPanelOpen(open: boolean): void {
+    this.panelOpen = open;
+    this.panelEl?.classList.toggle('ai-panel--open', open);
   }
 
   /** Whether AI mode is on for this page — the app-bar toggle button reflects this for the current page. */
@@ -193,10 +261,28 @@ export class AiMode {
     st.sending = true;
     this.applyVisual(pageId);
 
+    // a placeholder entry shows immediately — opening the panel is how a
+    // sent turn becomes visible at all now that nothing lands on the page.
+    const entry: ConversationEntry = {
+      id: uid(),
+      notebookId: this.notebookId,
+      pageId,
+      thumbnail: '',
+      text: '',
+      isError: false,
+      createdAt: Date.now(),
+      pending: true,
+    };
+    this.conversation.push(entry);
+    this.openPanel();
+    this.renderConversation();
+
     let text: string;
     let isError = false;
+    let thumbnail = '';
     try {
-      const { base64, mimeType } = await renderPageRegionImage(page, { top, bottom });
+      const rendered = await renderPageRegionImage(page, { top, bottom });
+      thumbnail = `data:${rendered.mimeType};base64,${rendered.base64}`;
 
       // the image is captured — this ink's job is done. Discard the strokes
       // that were part of this turn (only ones we ourselves marked ephemeral;
@@ -212,11 +298,11 @@ export class AiMode {
       const res = await fetch(GEMINI_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-NoteApp-Secret': PROXY_SECRET },
-        body: JSON.stringify({ image: base64, mimeType }),
+        body: JSON.stringify({ image: rendered.base64, mimeType: rendered.mimeType }),
       });
       const data: { text?: unknown; error?: unknown } | null = await res.json().catch(() => null);
       if (res.ok && typeof data?.text === 'string' && data.text) {
-        text = data.text;
+        text = stripMarkdown(data.text);
       } else {
         const reason = typeof data?.error === 'string' ? data.error : `request failed (${res.status})`;
         text = `Gemini error: ${reason}`;
@@ -227,69 +313,39 @@ export class AiMode {
       isError = true;
     }
 
-    // re-check: the page could have been deleted while the request was in flight
-    if (!this.pages.has(pageId)) return;
     st.sending = false;
-    const freshPage = store.pageById(pageId) ?? page;
-    this.insertReply(pageId, freshPage, bottom, text, isError);
+    st.turnTop = bottom; // next turn starts below whatever was just captured, same as before
+    this.applyVisual(pageId);
+
+    entry.pending = false;
+    entry.text = text;
+    entry.isError = isError;
+    entry.thumbnail = thumbnail;
+    this.renderConversation();
+    // written once, resolved — never while pending (see ConversationEntry's doc
+    // comment); `pending` itself is transient UI state, left out of storage.
+    const { pending: _pending, ...persisted } = entry;
+    void putAiEntry(persisted);
   }
 
-  /** Places the reply below `afterY`; continues on a fresh page first if it wouldn't fit. */
-  private insertReply(pageId: string, page: Page, afterY: number, text: string, isError: boolean): void {
-    const width = PAGE_W - MARGIN * 2;
-    const boxH = layoutText(text, FONT_SIZE, width).height;
-
-    let targetPageId = pageId;
-    let targetPage = page;
-    let y = afterY + MARGIN;
-
-    if (y + boxH + 12 + MARGIN > PAGE_H) {
-      const next = store.addPage(page.notebookId, page.index + 1);
-      this.host.syncPages(); // builds the new page's DOM, including its AiMode state
-      targetPageId = next.id;
-      targetPage = next;
-      y = MARGIN;
-
-      const oldSt = this.pages.get(pageId);
-      if (oldSt) {
-        oldSt.active = false;
-        if (oldSt.idleTimer != null) {
-          clearTimeout(oldSt.idleTimer);
-          oldSt.idleTimer = null;
-        }
-        this.discardInk(pageId, oldSt); // anything left over (e.g. drawn above the line) doesn't carry over
-        this.applyVisual(pageId);
-        this.host.onActiveChanged(pageId, false);
+  private renderConversation(): void {
+    const body = this.panelBody;
+    if (!body) return;
+    body.replaceChildren();
+    for (const entry of this.conversation) {
+      const row = el('div', { class: 'ai-panel__entry' });
+      // live lookup, not a stored snapshot — stays right if pages are reordered
+      // later; falls back gracefully if the page itself was since deleted.
+      const page = store.pageById(entry.pageId);
+      row.append(el('span', { class: 'ai-panel__page', text: page ? `Page ${page.index + 1}` : 'Page removed' }));
+      if (entry.thumbnail) {
+        row.append(el('img', { class: 'ai-panel__thumb', src: entry.thumbnail, alt: 'Captured handwriting' }));
       }
-      const newSt = this.pages.get(targetPageId);
-      if (newSt) {
-        newSt.active = true;
-        this.host.onActiveChanged(targetPageId, true);
-      }
+      const cls =
+        'ai-panel__reply' + (entry.isError ? ' ai-panel__reply--error' : '') + (entry.pending ? ' ai-panel__reply--pending' : '');
+      row.append(el('div', { class: cls, text: entry.pending ? 'Gemini is thinking…' : entry.text }));
+      body.append(row);
     }
-
-    const reply: TextElement = {
-      id: uid(),
-      kind: 'text',
-      pageId: targetPageId,
-      notebookId: targetPage.notebookId,
-      x: MARGIN,
-      y,
-      w: width,
-      h: boxH,
-      rotation: 0,
-      text,
-      color: isError ? ERROR_COLOR : AI_COLOR,
-      bg: isError ? ERROR_BG : AI_BG,
-      fontSize: FONT_SIZE,
-      createdAt: Date.now(),
-    };
-    store.addItems([reply]);
-    this.host.pushOp({ kind: 'add-items', pageId: targetPageId, items: [reply] });
-    this.host.refreshPage(targetPageId);
-
-    const targetSt = this.pages.get(targetPageId);
-    if (targetSt) targetSt.turnTop = y + boxH + MARGIN;
-    this.applyVisual(targetPageId);
+    body.scrollTop = body.scrollHeight;
   }
 }

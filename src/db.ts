@@ -1,5 +1,6 @@
 import { AUTO_COLOR } from './canvas/freehand';
 import type {
+  AiConversationEntry,
   Backup,
   BackupAsset,
   Divider,
@@ -14,8 +15,10 @@ import type {
 } from './types';
 
 const DB_NAME = 'noteapp';
-/** IndexedDB schema version: 2 added `elements`; 3 added `folders` + `dividers`; 4 added `assets`. */
-const DB_VERSION = 4;
+/** IndexedDB schema version: 2 added `elements`; 3 added `folders` + `dividers`; 4 added `assets`;
+ * 5 added `aiConversations` (AI-mode chat history — deliberately outside the
+ * backup format's store list, see ALL_STORES below). */
+const DB_VERSION = 5;
 
 /**
  * Logical data-format version, independent of the IndexedDB schema version.
@@ -179,6 +182,9 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('assets')) {
         db.createObjectStore('assets', { keyPath: 'id' }).createIndex('notebookId', 'notebookId');
       }
+      if (!db.objectStoreNames.contains('aiConversations')) {
+        db.createObjectStore('aiConversations', { keyPath: 'id' }).createIndex('notebookId', 'notebookId');
+      }
       if (!db.objectStoreNames.contains('meta')) {
         db.createObjectStore('meta', { keyPath: 'key' });
       }
@@ -305,6 +311,35 @@ export async function getAsset(id: string): Promise<PdfAsset | undefined> {
   return reqP(t.objectStore('assets').get(id) as IDBRequest<PdfAsset | undefined>);
 }
 
+// ------------------------------------------------------------ AI conversation
+/** Writes one AI-mode chat entry immediately — same reasoning as putAsset: it carries an image, written once, not through the debounced autosave. */
+export async function putAiEntry(e: AiConversationEntry): Promise<void> {
+  const db = await openDB();
+  const t = db.transaction('aiConversations', 'readwrite');
+  t.objectStore('aiConversations').put(e);
+  return txDone(t);
+}
+
+/** A notebook's AI-mode chat history, oldest first. */
+export async function getAiEntries(notebookId: string): Promise<AiConversationEntry[]> {
+  const db = await openDB();
+  const t = db.transaction('aiConversations', 'readonly');
+  const rows = await reqP(
+    t.objectStore('aiConversations').index('notebookId').getAll(IDBKeyRange.only(notebookId)) as IDBRequest<
+      AiConversationEntry[]
+    >
+  );
+  return rows.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/** Clears one notebook's AI-mode chat history ("clear conversation" in the panel). */
+export async function clearAiEntries(notebookId: string): Promise<void> {
+  const db = await openDB();
+  const t = db.transaction('aiConversations', 'readwrite');
+  await deleteByIndex(t.objectStore('aiConversations'), 'notebookId', notebookId);
+  return txDone(t);
+}
+
 function bytesToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   let s = '';
@@ -382,7 +417,9 @@ export async function deleteNotebookCascade(notebookId: string): Promise<void> {
     cur.onerror = () => rej(cur.error);
   });
 
-  const t = db.transaction([...ALL_STORES], 'readwrite');
+  // aiConversations is deliberately not in ALL_STORES (kept out of backups/import-clear),
+  // so it's added explicitly here — a deleted notebook must still take its chat history with it.
+  const t = db.transaction([...ALL_STORES, 'aiConversations'], 'readwrite');
   t.objectStore('notebooks').delete(notebookId);
   const pages = t.objectStore('pages');
   const strokes = t.objectStore('strokes');
@@ -394,6 +431,7 @@ export async function deleteNotebookCascade(notebookId: string): Promise<void> {
     void deleteByIndex(elements, 'pageId', pid);
   }
   void deleteByIndex(t.objectStore('assets'), 'notebookId', notebookId);
+  void deleteByIndex(t.objectStore('aiConversations'), 'notebookId', notebookId);
   return txDone(t);
 }
 

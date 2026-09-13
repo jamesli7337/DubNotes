@@ -124,14 +124,13 @@ class NotebookView {
   constructor(root: HTMLElement, nb: Notebook) {
     this.root = root;
     this.nb = nb;
-    this.aiMode = new AiMode({
-      pushOp: (op) => this.pushOp(op),
-      syncPages: () => this.syncPages(),
+    this.aiMode = new AiMode(nb.id, {
       refreshPage: (pageId) => this.rebuildIfMounted(pageId),
       onActiveChanged: (pageId) => {
         if (pageId === this.currentPageId) this.refreshAiControls();
       },
     });
+    void this.aiMode.loadConversation(); // async; resolves after buildChrome's mountPanel has run
 
     this.buildChrome();
 
@@ -184,6 +183,7 @@ class NotebookView {
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
       this.observer.disconnect();
       this.viewObserver.disconnect();
+      this.aiMode.destroyPanel();
       store.flushNow();
     };
     window.addEventListener('keydown', this.onKey);
@@ -246,6 +246,7 @@ class NotebookView {
     this.aiToggleBtn.append(icon('ai'));
     this.aiToggleBtn.addEventListener('click', () => {
       if (this.currentPageId) this.aiMode.toggle(this.currentPageId);
+      this.aiMode.openPanel(); // manual way to (re)open it, per the existing AI controls
     });
 
     this.aiSendBtn = el('button', {
@@ -295,6 +296,7 @@ class NotebookView {
     });
 
     view.append(bar, this.toolsEl, this.scrollEl, this.imageInput);
+    this.aiMode.mountPanel(view); // fixed-position, so it overlays regardless of where it sits in the DOM
     this.root.replaceChildren(view);
 
     this.renderTools();

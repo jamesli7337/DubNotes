@@ -111,6 +111,24 @@ export interface BackupAsset extends Omit<PdfAsset, 'data'> {
   dataBase64: string;
 }
 
+/**
+ * One resolved turn of an AI-mode conversation — the captured region (as a
+ * thumbnail) and Gemini's cleaned-up reply, or an error in its place. Stored
+ * per notebook, independent of any page's content; not part of the backup
+ * format (see DATA_FORMAT.md) since it's chat history, not page data.
+ */
+export interface AiConversationEntry {
+  id: string;
+  notebookId: string;
+  /** the page the turn was captured from — only used to label the entry; the page itself is untouched */
+  pageId: string;
+  /** data: URL of the captured region, reused as-is from what was sent to Gemini */
+  thumbnail: string;
+  text: string;
+  isError: boolean;
+  createdAt: number;
+}
+
 export interface Page {
   id: string;
   notebookId: string;

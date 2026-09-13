@@ -33,7 +33,9 @@ const SYSTEM_INSTRUCTION =
   'handwritten text, math, questions, and drawings in the image — including ' +
   'anything circled or annotated — and respond helpfully and concisely, as if ' +
   "replying to the page's author. Keep the reply short enough to fit on the " +
-  'same page: a few sentences, or a short worked answer, not an essay.';
+  'same page: a few sentences, or a short worked answer, not an essay. ' +
+  'Never use LaTeX or markdown math notation ($, \\frac, \\sqrt, ^, _, etc.) — ' +
+  "write math in plain words instead, e.g. \"the square root of 16\" or \"3 squared\".";
 
 /** Every response carries this — the app is a static site on another origin. */
 function setCors(res: ApiResponse, origin: string | string[] | undefined): void {
