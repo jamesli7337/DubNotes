@@ -36,7 +36,7 @@ import type {
 } from '../types';
 import { clamp, isStroke } from '../util';
 import { loadImageFile } from '../media';
-import { alertDialog, confirmDialog, openAnchoredModal, openModal, textPrompt, type Modal } from './dialog';
+import { alertDialog, openAnchoredModal, openModal, textPrompt, type Modal } from './dialog';
 import { blockGestures, el } from './dom';
 import { icon, type IconName } from './icon';
 
@@ -97,9 +97,6 @@ class NotebookView {
   private readonly wrapById = new Map<string, HTMLElement>();
   private readonly mounted = new Set<string>();
   private sizePopover: Modal | null = null;
-  /** Options row auto-collapses after this long with no dock interaction — see expandDock/collapseDock. */
-  private static readonly DOCK_IDLE_MS = 3000;
-  private dockCollapseTimer: ReturnType<typeof setTimeout> | null = null;
 
   /** Tracks which page is most visible, for the "auto" ink swatch/dot preview. */
   private viewObserver: IntersectionObserver;
@@ -182,7 +179,6 @@ class NotebookView {
     this.onLeave = () => {
       window.removeEventListener('keydown', this.onKey);
       window.removeEventListener('hashchange', this.onLeave);
-      if (this.dockCollapseTimer != null) clearTimeout(this.dockCollapseTimer);
       this.deactivateAll(); // commit an open text edit before the canvases go away
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
       this.observer.disconnect();
@@ -301,12 +297,6 @@ class NotebookView {
     this.toolsTopEl = el('div', { class: 'nb-dock__row nb-dock__row--tools' });
     this.toolsOptionsEl = el('div', { class: 'nb-dock__row nb-dock__row--options' });
     this.toolsEl.append(this.toolsTopEl, this.toolsOptionsEl);
-    // idle by default (icon row only); any tap inside the dock — a tool
-    // switch, a swatch, the size button, even re-tapping the already-active
-    // tool — reopens the options row and restarts the idle timer, so it stays
-    // open while actually being used. pointerdown (not click) so it fires
-    // ahead of whatever the specific control's own handler does.
-    this.toolsEl.addEventListener('pointerdown', () => this.expandDock());
     this.scrollEl = el('div', { class: 'nb-scroll' });
     blockGestures(this.scrollEl);
     this.bindZoomGestures();
@@ -460,27 +450,25 @@ class NotebookView {
   }
 
   /**
-   * Opens the dock's options row (if collapsed) and (re)arms the idle timer
-   * that collapses it back down. Called on every pointerdown anywhere inside
-   * the dock — see the listener in mountNotebook. Deferred while the size
-   * popover is open so its anchor button doesn't vanish out from under it
-   * mid-drag.
+   * Shows the dock's options row. Called when a tool is first selected (its
+   * colour/size/etc. controls are probably what you tapped it for) — never on
+   * a timer, an outside tap, or starting to draw, so once open it stays open
+   * until you explicitly close it (see closeDockOptions/toggleDockOptions).
    */
-  private expandDock(): void {
-    if (this.dockCollapseTimer != null) clearTimeout(this.dockCollapseTimer);
+  private openDockOptions(): void {
     this.toolsEl.classList.remove('nb-dock--collapsed');
-    this.dockCollapseTimer = setTimeout(() => this.collapseDock(), NotebookView.DOCK_IDLE_MS);
   }
 
-  private collapseDock(): void {
-    this.dockCollapseTimer = null;
-    if (this.sizePopover) {
-      // still being adjusted via the popover — check back rather than
-      // collapsing the row its anchor button lives in out from under it
-      this.dockCollapseTimer = setTimeout(() => this.collapseDock(), NotebookView.DOCK_IDLE_MS);
-      return;
-    }
+  /** Hides the options row; also drops the size popover, whose anchor button lives in it. */
+  private closeDockOptions(): void {
+    this.sizePopover?.close();
     this.toolsEl.classList.add('nb-dock--collapsed');
+  }
+
+  /** Re-tapping the already-active tool's icon toggles the options row, the only way it closes. */
+  private toggleDockOptions(): void {
+    if (this.toolsEl.classList.contains('nb-dock--collapsed')) this.openDockOptions();
+    else this.closeDockOptions();
   }
 
   private renderTools(): void {
@@ -504,13 +492,18 @@ class NotebookView {
       b.append(icon(name));
       b.addEventListener('click', () => {
         if (toolState.kind === kind) {
-          if (kind === 'eraser') this.openEraserMenu(b); // the eraser button doubles as its mode dropdown
+          // re-tapping the already-active tool: eraser's icon doubles as its
+          // mode dropdown (its own anchored popover, toggled the same way);
+          // every other tool toggles its options row closed/open again.
+          if (kind === 'eraser') this.openEraserMenu(b);
+          else this.toggleDockOptions();
           return;
         }
         this.deactivateAll(); // finish any text edit, drop any selection
         toolState.kind = kind;
         saveToolState();
         this.renderTools();
+        this.openDockOptions(); // a freshly selected tool's own options are worth surfacing
       });
       return b;
     };
@@ -1182,33 +1175,38 @@ class NotebookView {
   }
 
   // ----------------------------------------------------------- paper menu
+  /**
+   * Template/spacing/colour/scope are all staged in `draft`/`scope` — picking
+   * an option only updates the segmented control's own selected-state (see
+   * segmented()) and this local state, nothing is written to the store or
+   * rendered onto the page until Confirm. Closing the menu any other way
+   * (outside tap, Escape, navigating away) discards the draft with no effect,
+   * since nothing was ever applied to discard.
+   */
   private openPaperMenu(page: Page): void {
     const TEMPLATES: PaperTemplate[] = ['blank', 'ruled', 'grid', 'dot'];
     const SPACINGS: PaperSpacing[] = ['narrow', 'medium', 'wide'];
     const COLORS: PaperColor[] = ['white', 'cream', 'dark'];
 
     let scope: 'page' | 'all' = 'page';
-    const apply = (patch: Partial<Paper>): void => {
-      store.setPaper(page.id, patch, scope);
-      if (scope === 'all') for (const p of store.pagesOf(this.nb.id)) this.refreshPagePaper(p);
-      else this.refreshPagePaper(page);
-      this.refreshAutoColors();
-    };
+    let draft: Paper = { ...page.paper };
 
     // spacing only means something once there's ruling to space — dim it for
     // blank, but keep the stored value so it comes back for ruled/grid/dot
     const spacingRow = segmented(
       ['Narrow', 'Medium', 'Wide'],
-      SPACINGS.indexOf(page.paper.spacing),
-      (i) => apply({ spacing: SPACINGS[i] })
+      SPACINGS.indexOf(draft.spacing),
+      (i) => {
+        draft = { ...draft, spacing: SPACINGS[i] };
+      }
     );
-    setSegmentedDisabled(spacingRow, page.paper.template === 'blank');
+    setSegmentedDisabled(spacingRow, draft.template === 'blank');
 
     const templateRow = segmented(
       ['Blank', 'Ruled', 'Grid', 'Dot'],
-      TEMPLATES.indexOf(page.paper.template),
+      TEMPLATES.indexOf(draft.template),
       (i) => {
-        apply({ template: TEMPLATES[i] });
+        draft = { ...draft, template: TEMPLATES[i] };
         setSegmentedDisabled(spacingRow, TEMPLATES[i] === 'blank');
       }
     );
@@ -1220,37 +1218,38 @@ class NotebookView {
       field('Line spacing', spacingRow),
       field(
         'Paper color',
-        segmented(['White', 'Cream', 'Dark'], COLORS.indexOf(page.paper.color), (i) =>
-          apply({ color: COLORS[i] })
-        )
+        segmented(['White', 'Cream', 'Dark'], COLORS.indexOf(draft.color), (i) => {
+          draft = { ...draft, color: COLORS[i] };
+        })
       ),
       field(
         'Apply to',
         segmented(['This page', 'All pages'], 0, (i) => {
           scope = i === 0 ? 'page' : 'all';
-          // "All pages" acts on its own: this page's paper (template, spacing,
-          // colour) goes to every page right away, and later picks follow suit
-          if (scope === 'all') apply({ ...page.paper });
         })
       )
     );
 
-    const delBtn = el('button', { class: 'danger dlg__wide', text: 'Delete page' });
-    wrap.append(delBtn);
+    const confirmBtn = el('button', { class: 'primary dlg__wide', text: 'Confirm' });
+    wrap.append(confirmBtn);
 
     const modal = openModal(wrap);
-    delBtn.addEventListener('click', async () => {
+    confirmBtn.addEventListener('click', () => {
+      store.setPaper(page.id, draft, scope);
+      if (scope === 'all') for (const p of store.pagesOf(this.nb.id)) this.refreshPagePaper(p);
+      else this.refreshPagePaper(page);
+      this.refreshAutoColors();
       modal.close();
-      const ok = await confirmDialog({
-        title: `Delete page ${page.index + 1}?`,
-        message: 'Everything drawn on it will be removed.',
-        confirmText: 'Delete',
-        danger: true,
-      });
-      if (ok) this.removePage(page);
     });
   }
 
+  /**
+   * Deletes a page (undo-tracked). Currently unreferenced: this used to be
+   * wired to a "Delete page" button in openPaperMenu, removed from there on
+   * request. Left in place, not deleted, so it's ready to wire to wherever
+   * page deletion should live instead (e.g. a per-page context menu) — there
+   * is presently no UI path to it at all.
+   */
   private removePage(page: Page): void {
     const strokes = store.strokesOf(page.id).map((s) => ({ ...s }));
     const elements = store.elementsOf(page.id).map((e) => ({ ...e }));
