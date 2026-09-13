@@ -1,6 +1,6 @@
 import { el } from './dom';
 import { icon } from './icon';
-import { openModal, type Modal } from './dialog';
+import { openAnchoredModal, type Modal } from './dialog';
 
 // ------------------------------------------------------------ conversions
 export function hexToRgb(hex: string): [number, number, number] | null {
@@ -168,9 +168,11 @@ export function pickColor(anchor: HTMLElement, initial: string): Promise<string 
     panel.append(svWrap, hue, row, add);
     paintSquare();
     sync();
-    modal = openModal(panel, {
-      anchor,
-      onClose: () => finish(null),
-    });
+    modal = openAnchoredModal(anchor, panel, { onClose: () => finish(null) });
+    // a repeat tap on the same "add colour" button while its picker is open
+    // closes the existing one (openAnchoredModal above) rather than opening a
+    // second — that existing picker's own onClose settles its promise, but
+    // *this* call's promise still needs settling since nothing opened for it.
+    if (!modal) finish(null);
   });
 }

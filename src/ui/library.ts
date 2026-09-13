@@ -4,7 +4,7 @@ import { store, type FolderItem } from '../store';
 import type { Backup, Divider, Folder, Notebook, NotebookCover, PaperTemplate } from '../types';
 import { download, timestamp } from '../util';
 import { COVER_COLORS, COVER_PATTERNS, coverBackground } from './covers';
-import { alertDialog, confirmDialog, openModal, textPrompt, type Modal } from './dialog';
+import { alertDialog, confirmDialog, openAnchoredModal, openModal, textPrompt, type Modal } from './dialog';
 import { el } from './dom';
 import { icon, type IconName } from './icon';
 import { lazyThumb } from './thumb';
@@ -308,7 +308,7 @@ function openActionMenu(
     });
     menu.append(b);
   }
-  modal = openModal(menu, { anchor });
+  modal = openAnchoredModal(anchor, menu);
 }
 
 // ------------------------------------------------------------------- cards

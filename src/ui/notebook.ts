@@ -36,7 +36,7 @@ import type {
 } from '../types';
 import { clamp, isStroke } from '../util';
 import { loadImageFile } from '../media';
-import { alertDialog, confirmDialog, openModal, textPrompt, type Modal } from './dialog';
+import { alertDialog, confirmDialog, openAnchoredModal, openModal, textPrompt, type Modal } from './dialog';
 import { blockGestures, el } from './dom';
 import { icon, type IconName } from './icon';
 
@@ -264,6 +264,13 @@ class NotebookView {
       if (this.currentPageId) this.aiMode.sendNow(this.currentPageId);
     });
 
+    // formerly a dock button ("insert actions" in the tools row); moved here
+    // so it's reachable regardless of the active tool. Same file input/handler
+    // as before, just relocated — functionality unchanged.
+    const imgBtn = el('button', { class: 'iconbtn', title: 'Insert image', 'aria-label': 'Insert image' });
+    imgBtn.append(icon('image'));
+    imgBtn.addEventListener('click', () => this.imageInput.click());
+
     const exportBtn = el('button', { class: 'iconbtn', title: 'Export', 'aria-label': 'Export' });
     exportBtn.append(icon('export'));
     exportBtn.addEventListener('click', () => this.openExportMenu(exportBtn));
@@ -284,7 +291,7 @@ class NotebookView {
     // — undo/redo used to live in the right zone; now that they're in the
     // dock's top row instead, this keeps the bar from reading lopsided.
     const rightGroup = el('div', { class: 'nb-appbar__right' });
-    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, exportBtn, paperBtn);
+    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, imgBtn, exportBtn, paperBtn);
     bar.append(back, this.titleEl, rightGroup);
 
     // Notability-style dock: a fixed top row (tools + undo/redo, never reflows)
@@ -428,7 +435,7 @@ class NotebookView {
         await exportPageImage(this.nb, page, 'jpeg');
       });
     }
-    modal = openModal(menu, { anchor });
+    modal = openAnchoredModal(anchor, menu);
   }
 
   /** Every page except the automatic trailing blank one (when there is more than one page). */
@@ -640,13 +647,10 @@ class NotebookView {
       }
     }
 
-    // insert actions + drawing aids + undo/redo — independent of the active
-    // tool, so they live in the fixed top row alongside the tool icons (the
-    // divider ending the block above already separates them from the tools).
-    const imgBtn = el('button', { class: 'tool', title: 'Insert image', 'aria-label': 'Insert image' });
-    imgBtn.append(icon('image'));
-    imgBtn.addEventListener('click', () => this.imageInput.click());
-    top.append(imgBtn);
+    // drawing aids + undo/redo — independent of the active tool, so they live
+    // in the fixed top row alongside the tool icons (the divider ending the
+    // block above already separates them from the tools). Insert-image used
+    // to live here too; it's now in the app bar (see buildChrome).
     const guideBtn = (kind: GuideKind, name: IconName, label: string): HTMLElement => {
       const b = el('button', {
         class: 'tool' + (this.guideKind === kind ? ' active' : ''),
@@ -703,7 +707,7 @@ class NotebookView {
       });
       menu.append(item);
     }
-    modal = openModal(menu, { anchor });
+    modal = openAnchoredModal(anchor, menu);
   }
 
   /** Shows the ruler / protractor on the page in view, or hides it if it's already shown. */
@@ -937,13 +941,8 @@ class NotebookView {
     this.colorRefreshers.push(() => paintDot(sizeNow()));
 
     btn.addEventListener('click', () => {
-      if (this.sizePopover) {
-        this.sizePopover.close();
-        return;
-      }
       const { panel, refreshTicks } = this.buildSizePanel(isPen, paintDot);
-      this.sizePopover = openModal(panel, {
-        anchor: btn,
+      this.sizePopover = openAnchoredModal(btn, panel, {
         onReposition: refreshTicks, // build/rebuild ticks once mounted, and on resize/orientation
         onClose: () => {
           this.sizePopover = null;

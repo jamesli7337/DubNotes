@@ -3,7 +3,10 @@
  * card appended to <body>; it closes on outside pointerdown, Escape, route
  * change, or an explicit close() call. By default the card is centred and the
  * backdrop dims + captures. Pass `anchor` for a light-dismiss popover positioned
- * next to an element (transparent, click-through backdrop). */
+ * next to an element (transparent, click-through backdrop). For a trigger
+ * button whose own click handler rebuilds and opens fresh every time (rather
+ * than keeping its own "is my popover open" field), use openAnchoredModal
+ * instead of calling openModal directly — see its own doc comment. */
 
 export interface Modal {
   close: () => void;
@@ -50,7 +53,17 @@ export function openModal(
     }
   };
   const onOutside = (e: Event): void => {
-    if (dismissable && !card.contains(e.target as Node)) close();
+    if (!dismissable || card.contains(e.target as Node)) return;
+    // ignore the anchor itself: this listener runs on `pointerdown` (capture),
+    // which fires before the anchor's own `click` handler — without this, a
+    // repeat tap on the trigger button closes the popover here first, then
+    // immediately reopens it when the button's own click handler runs next
+    // (any toggle check it does, e.g. "if already open, close and return",
+    // finds nothing open by then, since this already closed it). Genuine
+    // outside taps are untouched — this only exempts the one element whose
+    // own click handler is already responsible for this popover's state.
+    if (anchor && anchor.contains(e.target as Node)) return;
+    close();
   };
   const reflow = (): void => {
     if (closed || !anchor) return;
@@ -78,6 +91,43 @@ export function openModal(
   );
 
   return { close };
+}
+
+/** Tracks the currently-open anchored popover per trigger element, for openAnchoredModal. */
+const anchoredModals = new WeakMap<HTMLElement, Modal>();
+
+/**
+ * Opens `content` as a popover anchored to `anchor` — same as
+ * `openModal(content, { ...opts, anchor })` — except a second call for the
+ * *same* anchor while its popover is still open closes it instead of
+ * building and opening another one. Use this (rather than calling
+ * `openModal` directly with `anchor`) for any trigger button whose own click
+ * handler runs unconditionally each time (builds fresh menu content, opens
+ * it) — which is every anchored popover in this codebase except the ones
+ * that already keep their own "is it open" field and check it themselves.
+ * Returns `null` when the call just closed the existing popover rather than
+ * opening a new one.
+ */
+export function openAnchoredModal(
+  anchor: HTMLElement,
+  content: HTMLElement,
+  opts: { onClose?: () => void; onReposition?: () => void } = {}
+): Modal | null {
+  const existing = anchoredModals.get(anchor);
+  if (existing) {
+    existing.close();
+    return null;
+  }
+  const modal = openModal(content, {
+    ...opts,
+    anchor,
+    onClose: () => {
+      anchoredModals.delete(anchor);
+      opts.onClose?.();
+    },
+  });
+  anchoredModals.set(anchor, modal);
+  return modal;
 }
 
 /** Positions `card` (fixed) just below `anchor`, flipping above / clamping to the viewport. */

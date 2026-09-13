@@ -1212,14 +1212,26 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
-/* page scroller */
+/* page scroller. Top padding reserves resting clearance under the floating
+   dock (`.nb-dock`, position: fixed) so the page never rests touching or
+   under it — only overlaps once actually scrolled past this margin, which is
+   the intended trade-off (see the dock's own comment). This lives on
+   `.nb-scroll` itself, which sits *outside* the zoom transform entirely (only
+   .page-wrap/.page-frame/.page below it read `--zoom` — see the zoom comment
+   further down) — so this padding is already real, unzoomed screen pixels
+   and needs no zoom-dependent recalculation: it reserves the same actual
+   on-screen gap under the dock whether the page content above it and below
+   is rendered at 50% or 300%. Sized for the dock's tallest state (options
+   row open, ~100px — see .nb-dock__row--options) plus a clearly-visible
+   gap, not the common collapsed ~54px, since the dock can expand at any
+   moment while still scrolled to the top. */
 .nb-scroll {
   flex: 1;
   overflow: auto;
   -webkit-overflow-scrolling: touch;
   touch-action: pan-x pan-y;
   overscroll-behavior: contain;
-  padding: 16px 0 40vh;
+  padding: 140px 0 40vh;
 }
 .nb-empty {
   text-align: center;
