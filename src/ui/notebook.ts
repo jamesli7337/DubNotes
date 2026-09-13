@@ -264,12 +264,23 @@ class NotebookView {
     exportBtn.append(icon('export'));
     exportBtn.addEventListener('click', () => this.openExportMenu(exportBtn));
 
+    // formerly an inline "Paper" link on each page's own header; moved here
+    // so it's reachable without scrolling to the page, and acts on whichever
+    // page is currently in view (same page this bar's other per-page actions
+    // — AI toggle/send — already target).
+    const paperBtn = el('button', { class: 'iconbtn', title: 'Customize paper', 'aria-label': 'Customize paper' });
+    paperBtn.append(icon('palette'));
+    paperBtn.addEventListener('click', () => {
+      const page = this.currentPageId ? store.pages.get(this.currentPageId) : undefined;
+      if (page) this.openPaperMenu(page);
+    });
+
     // three grid zones (back | title | actions) so the title sits truly
     // centered in the bar regardless of how many buttons end up on each side
     // — undo/redo used to live in the right zone; now that they're in the
     // dock's top row instead, this keeps the bar from reading lopsided.
     const rightGroup = el('div', { class: 'nb-appbar__right' });
-    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, exportBtn);
+    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, exportBtn, paperBtn);
     bar.append(back, this.titleEl, rightGroup);
 
     // Notability-style dock: a fixed top row (tools + undo/redo, never reflows)
@@ -558,9 +569,19 @@ class NotebookView {
             },
             'pen'
           ),
-          this.buildSizeControl(true),
-          el('span', { class: 'hint', text: 'Drag to place a shape sized to the drag. Tap a shape to adjust it.' })
+          this.buildSizeControl(true)
         );
+        // a shape is selected (freshly placed, or tapped to readjust): give it
+        // the same reliable Delete action the Lasso tool's own selection row
+        // has, rather than leaving the on-canvas × as the only way to delete
+        // it — that button can end up rendered under the floating dock (see
+        // the delete-bug report) when the shape sits near the top of the page,
+        // where a lasso-based deletion still has this dock button to fall
+        // back on but a shapes-tool selection previously didn't.
+        if (this.selPc?.hasSelection) {
+          opts.append(el('span', { class: 'divider' }), this.actionBtn('delete', 'Delete', () => this.selPc?.deleteSelection()));
+        }
+        opts.append(el('span', { class: 'hint', text: 'Drag to place a shape sized to the drag. Tap a shape to adjust it.' }));
         break;
       }
       default: {
@@ -667,15 +688,18 @@ class NotebookView {
     this.renderTools();
   }
 
+  /** A single icon button for a dock action row (Delete, Copy, Duplicate, Paste, …). */
+  private actionBtn(name: IconName, label: string, onClick: () => void): HTMLElement {
+    const b = el('button', { class: 'tool', title: label, 'aria-label': label });
+    b.append(icon(name));
+    b.addEventListener('click', onClick);
+    return b;
+  }
+
   /** Lasso dock: selection actions, and recolour swatches for the selected strokes. */
   private renderLassoTools(t: HTMLElement): void {
     const items = this.selPc?.selectedItems() ?? [];
-    const action = (name: IconName, label: string, onClick: () => void): HTMLElement => {
-      const b = el('button', { class: 'tool', title: label, 'aria-label': label });
-      b.append(icon(name));
-      b.addEventListener('click', onClick);
-      return b;
-    };
+    const action = this.actionBtn;
 
     // how the next selection is drawn: freehand, or a box / circle from corner to corner
     const picker = el('div', { class: 'dock-group', role: 'radiogroup', 'aria-label': 'Selection shape' });
@@ -808,7 +832,11 @@ class NotebookView {
     } else if (this.selPc === pc) {
       this.selPc = null;
     }
-    if (toolState.kind === 'lasso') this.renderTools(); // the dock shows selection actions
+    // the dock shows selection actions for both: lasso's own action row, and
+    // the Shapes tool's Delete action (see the 'shapes' case in renderTools) —
+    // a shape select-to-readjust (or a fresh placement) needs its own re-render
+    // to pick up the newly-selected/deselected state.
+    if (toolState.kind === 'lasso' || toolState.kind === 'shapes') this.renderTools();
   }
 
   /** Finishes any text edit and drops any selection on every page. */
@@ -979,10 +1007,8 @@ class NotebookView {
     headEl.append(el('span', { text: `Page ${page.index + 1}` }));
     // grouped so `.page-head`'s space-between only ever sees two children —
     // the label and this group — regardless of how many action buttons live here
+    // (the "Paper" link that used to open here moved to the app bar, top right)
     const headActions = el('div', { class: 'page-head__actions' });
-    const paperBtn = el('button', { class: 'link', text: 'Paper' });
-    paperBtn.addEventListener('click', () => this.openPaperMenu(page));
-    headActions.append(paperBtn);
     headEl.append(headActions);
 
     const pageEl = el('div', { class: 'page' });

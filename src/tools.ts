@@ -5,7 +5,7 @@ export type ToolKind = 'pen' | 'highlighter' | 'eraser' | 'lasso' | 'text' | 'sh
 
 /** What the Shapes tool places on a drag. Lines are the pen's business (hold-to-snap), not this tool's. */
 export type PlacedShape = 'rect' | 'ellipse' | 'arrow' | 'triangle';
-export const PLACED_SHAPES: PlacedShape[] = ['rect', 'ellipse', 'arrow', 'triangle'];
+export const PLACED_SHAPES: PlacedShape[] = ['rect', 'ellipse', 'triangle', 'arrow'];
 
 /** How long a laser-pointer trail takes to fade out completely. */
 export const LASER_FADE_MS = 3500;

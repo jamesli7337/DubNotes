@@ -779,14 +779,32 @@ select {
 /* floating tool dock — two fixed-size rows stacked (Notability-style): a top
    row of tool icons + undo/redo that's always the same content, and an
    options row below it whose content changes per tool but whose height (see
-   .nb-dock__row--options) does not, so neither row ever shifts on tool switch. */
+   .nb-dock__row--options) does not, so neither row ever shifts on tool switch.
+   `position: fixed` (same recipe as `.fab-dock` in the library view) floats it
+   over the page/canvas at a constant viewport position — it no longer takes a
+   reserved row out of `.nb`'s flex column, so `.nb-scroll` now fills the full
+   height below the app bar and page content can scroll/zoom underneath the
+   dock rather than being pushed down by it. That does mean whatever page
+   content ends up positioned under the dock's own footprint (10px below the
+   app bar, full width) isn't reachable for drawing while it's there. The AI
+   side panel took the other option this codebase has on file - shifting
+   .nb-scroll out from under it via margin - but that only works for a side
+   panel with room to push content sideways; doing the same here (reserving
+   vertical space below the app bar permanently) would just recreate the
+   fixed strip this change removes. The dead zone is narrow in practice: only
+   whatever page content is scrolled to exactly this screen position at a
+   given moment - scrolling moves it out from under the dock, same as
+   anything else underneath it. */
 .nb-dock {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  top: calc(var(--header-h) + env(safe-area-inset-top) + 10px);
+  z-index: 40;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  align-self: center;
   max-width: calc(100% - 20px);
-  margin: 10px 0 4px;
   padding: 8px 12px;
   background: var(--surface-c-lowest);
   border-radius: var(--r-xl);
@@ -794,28 +812,47 @@ select {
 }
 /* each row is a single line — never wraps to a second line — so a row's
    height stays constant regardless of its content; a row too wide for the
-   dock scrolls horizontally instead of growing taller or wrapping. */
+   dock scrolls horizontally instead of growing taller or wrapping.
+   `overflow-x: auto` makes this a scroll container — per spec that forces
+   `overflow-y`'s computed value to `auto` too, even though it's never set
+   explicitly, so the row clips on *all four* sides to its own box. Swatches
+   and the size dot draw their ring as `box-shadow`, not `border` — and
+   box-shadow doesn't count toward a scroll container's content size, so
+   with zero padding here that ring (and the active swatch's `scale(1.12)`)
+   bled past the row's edge and got clipped instead of scrolling into view:
+   top/bottom for anything whose height meets the row's (the 38px size dot,
+   with no vertical slack to spare), left/right for whichever swatch sits
+   flush against the row's own start/end. The padding below is slack for
+   that bleed, not visual spacing — sized to clear the worst case (the
+   active swatch's ring *and* its scale enlargement together, ~3.6px). */
 .nb-dock__row {
   display: flex;
   align-items: center;
   flex-wrap: nowrap;
   gap: 6px;
+  padding: 5px;
   overflow-x: auto;
   scrollbar-width: none;
 }
 .nb-dock__row::-webkit-scrollbar {
   display: none;
 }
-/* reserves the tallest control's height (the 38px tool/size buttons) so a
-   tool with only a short hint (or no options at all) still gets a full-height
-   row, not a collapsed one. `width: 0; min-width: 100%` keeps this row's own
+/* reserves the tallest control's height plus the row's own padding (the 38px
+   tool/size buttons + the 5px top/bottom padding above) so a tool with only a
+   short hint (or no options at all) still gets a full-height row, not a
+   collapsed one. This has to track that padding exactly: a shorter min-height
+   would let a short-content tool (e.g. the laser, just a hint) settle back to
+   a smaller box than a swatch/size-dot tool (whose content alone already
+   meets the old 38px floor, then gains the padding on top) — the two options
+   states would then differ in height and the page beneath would visibly jump
+   on every tool switch. `width: 0; min-width: 100%` keeps this row's own
    (per-tool, variable) content from setting `.nb-dock`'s auto width — without
    it, a wide options row (e.g. Shapes) would widen the whole dock and shift
    the fixed top row along with it; overflow-x above scrolls any excess instead. */
 .nb-dock__row--options {
   width: 0;
   min-width: 100%;
-  min-height: 38px;
+  min-height: 48px;
 }
 .nb-dock .tool {
   width: 38px;
