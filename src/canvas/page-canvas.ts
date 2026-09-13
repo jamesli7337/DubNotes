@@ -1,3 +1,4 @@
+import { AI_COLOR } from '../ai-mode';
 import { DPR, PAGE_H, PAGE_W } from '../const';
 import { store } from '../store';
 import {
@@ -62,6 +63,8 @@ export interface PageHooks {
   onOp: (op: Op) => void;
   /** the set of selected items on this page changed; `count` 0 means cleared */
   onSelection: (pc: PageCanvas, count: number) => void;
+  /** true while AI mode is on for this page — a fresh pen/highlighter stroke inks in AI_COLOR instead of the tool's own colour. */
+  isAiActive: () => boolean;
 }
 
 type CoalescingEvent = PointerEvent & { getCoalescedEvents?: () => PointerEvent[] };
@@ -592,7 +595,7 @@ export class PageCanvas {
       this.partial = new Map();
     } else {
       const t = resolveDrawTool()!;
-      this.liveTool = { kind: t.kind, color: t.color, size: t.size };
+      this.liveTool = { kind: t.kind, color: this.aiInkColor(t.color), size: t.size };
       this.mode = 'draw';
       // a pen-down beside the ruler / protractor edge rides along that edge
       this.snapEdge = this.guide?.edgeNear(pt[0], pt[1]) ?? null;
@@ -716,7 +719,7 @@ export class PageCanvas {
             this.laser.push([[this.pressPt[0], this.pressPt[1], performance.now()], [pt[0], pt[1], performance.now()]]);
           } else {
             const t = resolveDrawTool()!;
-            this.liveTool = { kind: t.kind, color: t.color, size: t.size };
+            this.liveTool = { kind: t.kind, color: this.aiInkColor(t.color), size: t.size };
             this.mode = 'draw';
             this.snapEdge = this.guide?.edgeNear(this.pressPt[0], this.pressPt[1]) ?? null;
             this.live = [this.snapped(this.pressPt), this.snapped(pt)];
@@ -908,6 +911,11 @@ export class PageCanvas {
     this.adjustEnd = null; // lineEdit itself outlives the press: it stays until something commits it
     this.shapeMode = false;
     this.disarmHold();
+  }
+
+  /** While AI mode is on, a fresh stroke inks in the AI accent colour instead of the tool's own — it's ephemeral turn ink, not the user's permanent pen colour. */
+  private aiInkColor(base: string): string {
+    return this.hooks.isAiActive() ? AI_COLOR : base;
   }
 
   /** Builds a Stroke from `this.live` and commits it — the ordinary end of a draw gesture. */

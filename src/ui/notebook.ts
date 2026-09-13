@@ -85,10 +85,11 @@ class NotebookView {
   private imageInput!: HTMLInputElement;
   private undoBtn!: HTMLButtonElement;
   private redoBtn!: HTMLButtonElement;
-  private zoomBtn!: HTMLButtonElement;
+  /** Single app-bar AI-mode controls, acting on whichever page is "current" (see setCurrentPage). */
+  private aiToggleBtn!: HTMLButtonElement;
+  private aiSendBtn!: HTMLButtonElement;
   /** View zoom (1 = 100%); pages are CSS-scaled, so pointer maths stays in page units. */
   private zoom = 1;
-  private zoomPopover: Modal | null = null;
   private pinch: { d0: number; z0: number; mx: number; my: number; cx: number; cy: number } | null = null;
 
   private observer: IntersectionObserver;
@@ -127,6 +128,9 @@ class NotebookView {
       pushOp: (op) => this.pushOp(op),
       syncPages: () => this.syncPages(),
       refreshPage: (pageId) => this.rebuildIfMounted(pageId),
+      onActiveChanged: (pageId) => {
+        if (pageId === this.currentPageId) this.refreshAiControls();
+      },
     });
 
     this.buildChrome();
@@ -233,8 +237,27 @@ class NotebookView {
     this.undoBtn.addEventListener('click', () => this.undo());
     this.redoBtn.addEventListener('click', () => this.redo());
 
-    this.zoomBtn = el('button', { class: 'zoom-btn', title: 'Zoom', 'aria-label': 'Zoom' }) as HTMLButtonElement;
-    this.zoomBtn.addEventListener('click', () => this.openZoomPanel());
+    this.aiToggleBtn = el('button', {
+      class: 'iconbtn ai-toggle',
+      title: 'AI Assistant — read this page and reply with Gemini',
+      'aria-label': 'AI Assistant',
+      'aria-pressed': 'false',
+    }) as HTMLButtonElement;
+    this.aiToggleBtn.append(icon('ai'));
+    this.aiToggleBtn.addEventListener('click', () => {
+      if (this.currentPageId) this.aiMode.toggle(this.currentPageId);
+    });
+
+    this.aiSendBtn = el('button', {
+      class: 'iconbtn ai-send',
+      title: 'Send this turn to Gemini now',
+      'aria-label': 'Send this turn to Gemini now',
+      hidden: true,
+    }) as HTMLButtonElement;
+    this.aiSendBtn.append(icon('send'));
+    this.aiSendBtn.addEventListener('click', () => {
+      if (this.currentPageId) this.aiMode.sendNow(this.currentPageId);
+    });
 
     const exportBtn = el('button', { class: 'iconbtn', title: 'Export', 'aria-label': 'Export' });
     exportBtn.append(icon('export'));
@@ -245,7 +268,7 @@ class NotebookView {
     // — undo/redo used to live in the right zone; now that they're in the
     // dock's top row instead, this keeps the bar from reading lopsided.
     const rightGroup = el('div', { class: 'nb-appbar__right' });
-    rightGroup.append(this.zoomBtn, exportBtn);
+    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, exportBtn);
     bar.append(back, this.titleEl, rightGroup);
 
     // Notability-style dock: a fixed top row (tools + undo/redo, never reflows)
@@ -276,6 +299,7 @@ class NotebookView {
 
     this.renderTools();
     this.syncHistory();
+    this.refreshAiControls();
     // start fitted to the width on narrow screens, 100% otherwise
     this.setZoom(Math.min(1, (this.scrollEl.clientWidth - 24) / PAGE_W) || 1);
   }
@@ -294,7 +318,6 @@ class NotebookView {
     s.style.setProperty('--zoom', String(next));
     s.scrollLeft = contentX * next - ax;
     s.scrollTop = contentY * next - ay;
-    this.zoomBtn.textContent = `${Math.round(next * 100)}%`;
     this.refreshAutoColors(); // the size dot previews at the on-screen stroke width
     for (const pc of this.pcByPage.values()) pc.zoomChanged(); // a pending line's handles stay screen-sized
   }
@@ -345,52 +368,6 @@ class NotebookView {
     );
   }
 
-  /** Popover with a zoom slider and quick 100% / fit-width buttons. */
-  private openZoomPanel(): void {
-    if (this.zoomPopover) {
-      this.zoomPopover.close();
-      return;
-    }
-    const panel = el('div', { class: 'zoom-panel' });
-    const input = el('input', {
-      type: 'range',
-      class: 'size-slider__range zoom-panel__range',
-      min: String(ZOOM_MIN * 100),
-      max: String(ZOOM_MAX * 100),
-      step: '1',
-      value: String(Math.round(this.zoom * 100)),
-      'aria-label': 'Zoom',
-    }) as HTMLInputElement;
-    const value = el('span', { class: 'size-slider__value', text: `${Math.round(this.zoom * 100)}%` });
-    input.addEventListener('input', () => {
-      this.setZoom(parseInt(input.value, 10) / 100);
-      value.textContent = `${Math.round(this.zoom * 100)}%`;
-    });
-    const quick = (label: string, z: () => number): HTMLElement => {
-      const b = el('button', { class: 'zoom-panel__quick', text: label });
-      b.addEventListener('click', () => {
-        this.setZoom(z());
-        input.value = String(Math.round(this.zoom * 100));
-        value.textContent = `${Math.round(this.zoom * 100)}%`;
-      });
-      return b;
-    };
-    const row = el('div', { class: 'zoom-panel__row' });
-    row.append(input, value);
-    const quicks = el('div', { class: 'zoom-panel__quicks' });
-    quicks.append(
-      quick('Fit width', () => (this.scrollEl.clientWidth - 24) / PAGE_W),
-      quick('100%', () => 1),
-      quick('200%', () => 2)
-    );
-    panel.append(row, quicks);
-    this.zoomPopover = openModal(panel, {
-      anchor: this.zoomBtn,
-      onClose: () => {
-        this.zoomPopover = null;
-      },
-    });
-  }
 
   // --------------------------------------------------------------- export
   private openExportMenu(anchor: HTMLElement): void {
@@ -1019,10 +996,14 @@ class NotebookView {
 
     const pc = new PageCanvas(page, this.nb, {
       onOp: (op) => {
-        this.pushOp(op);
+        // ink drawn while AI mode is active is ephemeral (see AiMode) — it
+        // never enters undo history, only turn-detection sees it.
+        const isAiInk = op.kind === 'add-stroke' && this.aiMode.isActive(op.pageId);
+        if (!isAiInk) this.pushOp(op);
         this.aiMode.handleOp(op);
       },
       onSelection: (p, n) => this.onSelection(p, n),
+      isAiActive: () => this.aiMode.isActive(page.id),
     });
     this.pcByPage.set(page.id, pc);
     this.wrapById.set(page.id, wrap);
@@ -1117,6 +1098,15 @@ class NotebookView {
     if (id === this.currentPageId) return;
     this.currentPageId = id;
     this.refreshAutoColors();
+    this.refreshAiControls();
+  }
+
+  /** Reflects the current page's AI-mode state on the single app-bar toggle + send buttons. */
+  private refreshAiControls(): void {
+    const active = this.currentPageId ? this.aiMode.isActive(this.currentPageId) : false;
+    this.aiToggleBtn.classList.toggle('active', active);
+    this.aiToggleBtn.setAttribute('aria-pressed', String(active));
+    this.aiSendBtn.hidden = !active;
   }
 
   /** Paper of the page currently in view, for resolving the "auto" ink token. */

@@ -1184,41 +1184,6 @@ select {
   transform-origin: 0 0;
 }
 
-.zoom-btn {
-  height: 34px;
-  padding: 0 10px;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  border-color: transparent;
-  background: transparent;
-  color: var(--on-surface-variant);
-}
-.zoom-btn:hover {
-  background: var(--surface-c);
-}
-.zoom-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 14px 16px;
-}
-.zoom-panel__row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.zoom-panel__range {
-  width: 200px;
-}
-.zoom-panel__quicks {
-  display: flex;
-  gap: 6px;
-}
-.zoom-panel__quick {
-  flex: 1;
-  padding: 6px 8px;
-  font-size: 12px;
-}
 .page-head {
   display: flex;
   justify-content: space-between;
@@ -1243,14 +1208,17 @@ select {
   align-items: center;
   gap: 4px;
 }
-/* AI mode: toggle + manual-send buttons in the page head, and the "thinking"
-   status text between them. Violet is used nowhere else in the dock, so an
-   active AI page reads as unmistakably different at a glance. */
+/* AI mode: both controls (toggle, send) live once in the app bar, as
+   .iconbtns; only the "thinking" status text is per-page, in that page's
+   head. Violet is used nowhere else in the chrome, so an active AI page —
+   and an active toggle — read as unmistakably different at a glance. */
 .ai-toggle.active {
   color: #6d28d9;
 }
-.ai-send {
-  display: flex;
+/* .iconbtn:hover's own colour would otherwise win over .active on hover (equal
+   specificity, declared earlier) and flash the toggle back to the default tint. */
+.ai-toggle.active:hover {
+  color: #6d28d9;
 }
 .ai-status {
   font-size: 10px;
