@@ -288,9 +288,77 @@ Manual alternative: `npm run build && npx gh-pages -d dist`.
 
 CLI alternative: `npm run build && npx wrangler pages deploy dist`.
 
+### The Gemini endpoint (`/api/gemini`)
+
+A Vercel serverless function at [api/gemini.ts](api/gemini.ts) reads a
+handwritten page image and returns Gemini's reply text — the backend for the
+in-app AI mode (see below). It's independent of where the static site itself
+is hosted (GitHub Pages, Cloudflare Pages, wherever); this is the only piece
+that needs Vercel specifically, because that's where its two secrets already
+live as project environment variables.
+
+**Deploy it:**
+```
+npx vercel --prod
+```
+(run from the repo root; `vercel.json` tells it to build `api/gemini.ts` as
+a Node.js function with a 30s timeout — Gemini's response can take a few
+seconds, longer than Vercel's default). This also builds and deploys the
+static `dist` site to the same Vercel project, `base: '/NoteApp/'` and all —
+harmless if you don't use that URL, but see the `base` note above if you
+*do* want Vercel to serve the real site.
+
+**Environment variables** (Vercel project → Settings → Environment Variables):
+
+| Name | Where it's used | Notes |
+|---|---|---|
+| `GEMINI_API_KEY` | server-side only | Already set in this project. |
+| `GEMINI_PROXY_SECRET` | server-side only | Set. Any string; the function rejects requests without a matching `X-NoteApp-Secret` header. |
+| `VITE_GEMINI_PROXY_SECRET` | baked into the client bundle at build time | Set, to the **same value** as `GEMINI_PROXY_SECRET`. |
+| `VITE_GEMINI_ENDPOINT` | baked into the client bundle at build time | Optional. Absolute URL of the function, e.g. `https://<project>.vercel.app/api/gemini` — needed whenever the static site is served from somewhere other than this Vercel project (GitHub Pages, Cloudflare Pages, …), since a relative `/api/gemini` would otherwise resolve against *that* host. Unset defaults to the relative path, which only works if Vercel is also serving the site itself. |
+
+**Request/response contract:**
+```
+POST /api/gemini
+Content-Type: application/json
+X-NoteApp-Secret: <matches GEMINI_PROXY_SECRET>
+
+{ "image": "<base64, no data: prefix>", "mimeType": "image/png" }
+```
+→ `200 { "text": "…" }` on success, or `4xx/5xx { "error": "…" }` — see
+[api/gemini.ts](api/gemini.ts) for the exact status codes.
+
+**On the shared secret**: this is a static site with no server of its own to
+keep a real secret in. `VITE_GEMINI_PROXY_SECRET` gets compiled straight into
+the shipped JS, so anyone who reads the bundle can extract it — it does *not*
+stop a determined person from calling the endpoint directly. What it does
+stop is opportunistic abuse: scanners and bots that hit `/api/*` paths
+blindly, without ever loading or inspecting the app itself. Budget for the
+API key accordingly (Vercel/Google usage alerts, not just this header) if
+that distinction matters to you.
+
+### AI mode
+
+A per-page toggle (the bot icon in a page's header) turns that page into a
+live handwritten conversation with Gemini. While it's on (an active page gets
+a violet border), writing below the last exchange and then pausing for ~2s
+rasterizes just that region and sends it to `/api/gemini`; a send icon next
+to the toggle submits the current turn immediately instead of waiting. The
+reply comes back as an ordinary text box — tinted violet to read as "not your
+ink," but otherwise as editable/undoable/deletable as anything else on the
+page — placed below your writing, so the page reads top-to-bottom like a
+transcript. Running out of room on the page continues the conversation on a
+freshly appended one. A failed request (network, quota, a bad secret) inserts
+a red-tinted error box in place of a reply rather than losing the turn.
+Turning the toggle off just stops sending new turns; everything already
+written stays as normal page content.
+
 ## Data & backups
 
-- Everything is stored locally in IndexedDB database **`noteapp`**. Nothing is sent anywhere.
+- Everything is stored locally in IndexedDB database **`noteapp`** — with one
+  exception: while AI mode is on for a page (see above), a rasterized image of
+  what you write there is sent to the Gemini endpoint to get a reply. Nothing
+  else leaves the device, and AI mode is off by default on every page.
 - Clearing Safari website data, or removing the Home Screen app, can delete your notes.
   Use **Export** on the Library screen regularly; **Import** restores a backup
   (it replaces all current data).

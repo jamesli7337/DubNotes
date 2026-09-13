@@ -322,6 +322,10 @@ class Store {
   }
 
   // -------------------------------------------------------------------- pages
+  pageById(id: string): Page | undefined {
+    return this.pages.get(id);
+  }
+
   pagesOf(notebookId: string): Page[] {
     return [...this.pages.values()]
       .filter((p) => p.notebookId === notebookId)

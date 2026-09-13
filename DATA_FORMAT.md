@@ -3,7 +3,7 @@
 All data lives on-device in IndexedDB database **`noteapp`** (schema version `3`:
 object stores `notebooks`, `pages`, `strokes`, `elements`, `folders`, `dividers`,
 `meta`). The logical **format version** is tracked separately as
-`FORMAT_VERSION` in [`src/db.ts`](src/db.ts) and is currently **`7`** (schema
+`FORMAT_VERSION` in [`src/db.ts`](src/db.ts) and is currently **`8`** (schema
 `4` added the `assets` store).
 
 ## Entities
@@ -178,7 +178,7 @@ fields:
 Per kind:
 
 ```ts
-interface TextElement  { kind: 'text';  text: string; color: string; fontSize: number }
+interface TextElement  { kind: 'text';  text: string; color: string; fontSize: number; bg?: string }
 interface ImageElement { kind: 'image'; src: string /* data: URL, stored inline */ }
 interface ShapeElement { kind: 'shape'; shape: 'line' | 'arrow' | 'rect' | 'ellipse' | 'triangle';
                          color: string; size: number /* outline width */;
@@ -198,6 +198,11 @@ interface TapeElement  { kind: 'tape';  color: string }   // v5
   or `"auto"` — and is resolved through the same `resolveInkColor()`.
 - Text wraps inside `w`; `h` is recomputed from the wrapped text whenever the
   text or the box changes, and `fontSize` scales with the box on a corner drag.
+- `TextElement.bg` (v8) is an optional tint painted as a rounded card behind
+  the text, extending slightly beyond the box. Unlike `color`, it is a literal
+  CSS colour only — never `"auto"`, never resolved per-paper — since it's
+  meant to stand out from the page consistently. Set by AI mode's replies;
+  absent on ordinary user-typed text.
 - A line/arrow runs along the box's horizontal centre-line, from `x` to
   `x + w`; its angle is the box `rotation`.
 - Elements are **selected, moved, resized, copied and deleted** through the
@@ -214,6 +219,9 @@ interface TapeElement  { kind: 'tape';  color: string }   // v5
 >
 > **v6 → v7:** `assets` (stored PDFs), `Page.background = { assetId, page }`,
 > and the `triangle` shape. All additive; nothing to migrate.
+>
+> **v7 → v8:** `TextElement.bg` (optional tint, used by AI-mode replies).
+> Additive; nothing to migrate.
 
 ## Migration
 
@@ -262,7 +270,7 @@ backup (after migrating it).
 ```jsonc
 {
   "app": "noteapp",
-  "version": 7,                 // FORMAT_VERSION at export time
+  "version": 8,                 // FORMAT_VERSION at export time
   "exportedAt": "2026-01-01T00:00:00.000Z",
   "notebooks": [ /* Notebook[] — with folderId, order, maybe cover */ ],
   "pages":     [ /* Page[]  — each includes `paper`, maybe `background` */ ],

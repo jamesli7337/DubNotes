@@ -25,6 +25,9 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build
+        env:
+          VITE_GEMINI_ENDPOINT: ${{ secrets.VITE_GEMINI_ENDPOINT }}
+          VITE_GEMINI_PROXY_SECRET: ${{ secrets.VITE_GEMINI_PROXY_SECRET }}
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

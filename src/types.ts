@@ -46,6 +46,14 @@ export interface TextElement extends ElementBase {
   color: string;
   /** page units; scales with the box */
   fontSize: number;
+  /**
+   * Optional tint painted behind the text (a CSS colour, e.g. `rgba(...)`) —
+   * absent for ordinary user-typed text. Used for AI-mode replies so they read
+   * as "not the user's ink" at a glance; never resolved through
+   * `resolveInkColor` like `color` is, since it's meant to stay constant
+   * regardless of paper colour. (v8)
+   */
+  bg?: string;
 }
 
 export interface ImageElement extends ElementBase {

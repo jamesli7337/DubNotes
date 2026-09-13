@@ -1,3 +1,4 @@
+import { AiMode } from '../ai-mode';
 import { AUTO_COLOR, resolveInkColor } from '../canvas/freehand';
 import type { GuideKind } from '../canvas/guide';
 import { PageCanvas } from '../canvas/page-canvas';
@@ -76,6 +77,10 @@ class NotebookView {
 
   private scrollEl!: HTMLElement;
   private toolsEl!: HTMLElement;
+  /** Fixed-size row of tool icons + undo/redo — never changes with the active tool. */
+  private toolsTopEl!: HTMLElement;
+  /** Fixed-height row below it showing the active tool's own options (swatches, size, hints). */
+  private toolsOptionsEl!: HTMLElement;
   private titleEl!: HTMLElement;
   private imageInput!: HTMLInputElement;
   private undoBtn!: HTMLButtonElement;
@@ -113,9 +118,16 @@ class NotebookView {
   private readonly onKey: (e: KeyboardEvent) => void;
   private readonly onLeave: () => void;
 
+  private readonly aiMode: AiMode;
+
   constructor(root: HTMLElement, nb: Notebook) {
     this.root = root;
     this.nb = nb;
+    this.aiMode = new AiMode({
+      pushOp: (op) => this.pushOp(op),
+      syncPages: () => this.syncPages(),
+      refreshPage: (pageId) => this.rebuildIfMounted(pageId),
+    });
 
     this.buildChrome();
 
@@ -228,9 +240,21 @@ class NotebookView {
     exportBtn.append(icon('export'));
     exportBtn.addEventListener('click', () => this.openExportMenu(exportBtn));
 
-    bar.append(back, this.titleEl, this.zoomBtn, exportBtn, this.undoBtn, this.redoBtn);
+    // three grid zones (back | title | actions) so the title sits truly
+    // centered in the bar regardless of how many buttons end up on each side
+    // — undo/redo used to live in the right zone; now that they're in the
+    // dock's top row instead, this keeps the bar from reading lopsided.
+    const rightGroup = el('div', { class: 'nb-appbar__right' });
+    rightGroup.append(this.zoomBtn, exportBtn);
+    bar.append(back, this.titleEl, rightGroup);
 
+    // Notability-style dock: a fixed top row (tools + undo/redo, never reflows)
+    // and a fixed-height options row below it for the active tool's own
+    // controls, so switching tools never shifts the top row or the page below.
     this.toolsEl = el('div', { class: 'nb-dock' });
+    this.toolsTopEl = el('div', { class: 'nb-dock__row nb-dock__row--tools' });
+    this.toolsOptionsEl = el('div', { class: 'nb-dock__row nb-dock__row--options' });
+    this.toolsEl.append(this.toolsTopEl, this.toolsOptionsEl);
     this.scrollEl = el('div', { class: 'nb-scroll' });
     blockGestures(this.scrollEl);
     this.bindZoomGestures();
@@ -431,8 +455,14 @@ class NotebookView {
   private renderTools(): void {
     this.sizePopover?.close(); // switching tools (or any dock rebuild) dismisses the size popover
     this.colorRefreshers = []; // old closures would target elements this rebuild is about to discard
-    const t = this.toolsEl;
-    t.replaceChildren();
+    // `top`: the fixed row (tool icons + undo/redo) — same content/size no
+    // matter what's selected. `opts`: the fixed-height row below it, whose
+    // *content* changes per tool but whose height (via CSS) never does, so
+    // neither row ever shifts the page below when a tool is switched.
+    const top = this.toolsTopEl;
+    const opts = this.toolsOptionsEl;
+    top.replaceChildren();
+    opts.replaceChildren();
 
     const toolBtn = (kind: ToolKind, name: IconName, label: string) => {
       const b = el('button', {
@@ -453,7 +483,7 @@ class NotebookView {
       });
       return b;
     };
-    t.append(
+    top.append(
       toolBtn('pen', 'pen', 'Pen'),
       toolBtn('highlighter', 'highlighter', 'Highlighter'),
       toolBtn('eraser', 'eraser', 'Eraser'),
@@ -476,7 +506,7 @@ class NotebookView {
         });
         modeBtn.append(ERASER_MODES[toolState.eraserMode].label, icon('chevron-down'));
         modeBtn.addEventListener('click', () => this.openEraserMenu(modeBtn));
-        t.append(
+        opts.append(
           modeBtn,
           el('span', {
             class: 'hint',
@@ -486,10 +516,10 @@ class NotebookView {
         break;
       }
       case 'lasso':
-        this.renderLassoTools(t);
+        this.renderLassoTools(opts);
         break;
       case 'tape':
-        t.append(
+        opts.append(
           el('span', {
             class: 'hint',
             text: 'Drag to cover an area. Tap a strip to peel it back; tap again to cover it.',
@@ -497,10 +527,10 @@ class NotebookView {
         );
         break;
       case 'laser':
-        t.append(el('span', { class: 'hint', text: 'Point and drag: the trail fades and is never saved.' }));
+        opts.append(el('span', { class: 'hint', text: 'Point and drag: the trail fades and is never saved.' }));
         break;
       case 'text':
-        t.append(
+        opts.append(
           this.buildSwatches(
             PEN_COLORS,
             toolState.textColor,
@@ -536,7 +566,7 @@ class NotebookView {
           });
           picker.append(b);
         }
-        t.append(
+        opts.append(
           picker,
           el('span', { class: 'divider' }),
           this.buildSwatches(
@@ -567,21 +597,22 @@ class NotebookView {
           },
           isPen ? 'pen' : 'highlighter'
         );
-        t.append(swatches, this.buildSizeControl(isPen));
+        opts.append(swatches, this.buildSizeControl(isPen));
         // line-snap lives on the pen only: draw a straight-ish stroke, hold
         // still, and it becomes a line you can adjust by its ends
         if (isPen) {
-          t.append(el('span', { class: 'hint', text: 'Hold still at the end of a straight stroke to snap it to a line.' }));
+          opts.append(el('span', { class: 'hint', text: 'Hold still at the end of a straight stroke to snap it to a line.' }));
         }
       }
     }
 
-    // insert actions + drawing aids, independent of the active tool
-    t.append(el('span', { class: 'divider' }));
+    // insert actions + drawing aids + undo/redo — independent of the active
+    // tool, so they live in the fixed top row alongside the tool icons (the
+    // divider ending the block above already separates them from the tools).
     const imgBtn = el('button', { class: 'tool', title: 'Insert image', 'aria-label': 'Insert image' });
     imgBtn.append(icon('image'));
     imgBtn.addEventListener('click', () => this.imageInput.click());
-    t.append(imgBtn);
+    top.append(imgBtn);
     const guideBtn = (kind: GuideKind, name: IconName, label: string): HTMLElement => {
       const b = el('button', {
         class: 'tool' + (this.guideKind === kind ? ' active' : ''),
@@ -593,7 +624,8 @@ class NotebookView {
       b.addEventListener('click', () => this.toggleGuide(kind));
       return b;
     };
-    t.append(guideBtn('ruler', 'ruler', 'Ruler'), guideBtn('protractor', 'protractor', 'Protractor'));
+    top.append(guideBtn('ruler', 'ruler', 'Ruler'), guideBtn('protractor', 'protractor', 'Protractor'));
+    top.append(el('span', { class: 'divider' }), this.undoBtn, this.redoBtn);
   }
 
   /** Reads a picked photo / GIF and drops it on the page in view, selected, with the lasso tool active. */
@@ -966,14 +998,19 @@ class NotebookView {
 
     const headEl = el('div', { class: 'page-head' });
     headEl.append(el('span', { text: `Page ${page.index + 1}` }));
+    // grouped so `.page-head`'s space-between only ever sees two children —
+    // the label and this group — regardless of how many action buttons live here
+    const headActions = el('div', { class: 'page-head__actions' });
     const paperBtn = el('button', { class: 'link', text: 'Paper' });
     paperBtn.addEventListener('click', () => this.openPaperMenu(page));
-    headEl.append(paperBtn);
+    headActions.append(paperBtn);
+    headEl.append(headActions);
 
     const pageEl = el('div', { class: 'page' });
     pageEl.dataset.pageId = page.id;
     pageEl.style.background = paperBg(page.paper);
     blockGestures(pageEl);
+    this.aiMode.attachPage(page, headActions, pageEl);
 
     // the frame takes the zoomed size in layout; the page inside is CSS-scaled
     const frame = el('div', { class: 'page-frame' });
@@ -981,7 +1018,10 @@ class NotebookView {
     wrap.append(headEl, frame);
 
     const pc = new PageCanvas(page, this.nb, {
-      onOp: (op) => this.pushOp(op),
+      onOp: (op) => {
+        this.pushOp(op);
+        this.aiMode.handleOp(op);
+      },
       onSelection: (p, n) => this.onSelection(p, n),
     });
     this.pcByPage.set(page.id, pc);
@@ -992,6 +1032,7 @@ class NotebookView {
   }
 
   private disposePage(id: string): void {
+    this.aiMode.forgetPage(id);
     const wrap = this.wrapById.get(id);
     if (wrap) {
       const pageEl = wrap.querySelector('.page');

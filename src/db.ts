@@ -37,8 +37,10 @@ const DB_VERSION = 4;
  *       bytes as base64) and Page.background may reference it as
  *       `{ assetId, page }`, rendered on demand. v5-style `{ src }` backgrounds
  *       remain valid; nothing to migrate.
+ *   8 — TextElement gained optional `bg` (a tint painted behind the text,
+ *       used by AI-mode replies). Additive; nothing to migrate.
  */
-export const FORMAT_VERSION = 7;
+export const FORMAT_VERSION = 8;
 
 /** The hex value the pen's first swatch used before it became the "auto" token. */
 const OLD_BLACK_SWATCH = '#1f2530';

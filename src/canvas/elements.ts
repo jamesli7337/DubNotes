@@ -207,8 +207,25 @@ function drawTape(ctx: CanvasRenderingContext2D, el: TapeElement, peeled: boolea
   ctx.fillRect(el.x, el.y, el.w, Math.max(2, el.h * 0.3));
 }
 
+/** Padding (page units) the `bg` tint card extends beyond the text's own box. */
+const TEXT_BG_PAD_X = 8;
+const TEXT_BG_PAD_Y = 6;
+
 function drawText(ctx: CanvasRenderingContext2D, el: TextElement, paper: Paper): void {
   const { lines, lineHeight } = layoutText(el.text, el.fontSize, el.w);
+  if (el.bg) {
+    // a fixed tint, not resolved through resolveInkColor — this is meant to
+    // stand out from the page consistently, not blend with the paper.
+    ctx.fillStyle = el.bg;
+    const r = 6;
+    const x = el.x - TEXT_BG_PAD_X;
+    const y = el.y - TEXT_BG_PAD_Y;
+    const w = el.w + TEXT_BG_PAD_X * 2;
+    const h = el.h + TEXT_BG_PAD_Y * 2;
+    ctx.beginPath();
+    ctx.roundRect(x, y, w, h, r);
+    ctx.fill();
+  }
   ctx.font = textFont(el.fontSize);
   ctx.fillStyle = resolveInkColor(el.color, paper);
   ctx.textBaseline = 'top';
