@@ -245,8 +245,8 @@ class NotebookView {
     }) as HTMLButtonElement;
     this.aiToggleBtn.append(icon('ai'));
     this.aiToggleBtn.addEventListener('click', () => {
+      // toggle() itself opens/closes the panel to match the resulting state
       if (this.currentPageId) this.aiMode.toggle(this.currentPageId);
-      this.aiMode.openPanel(); // manual way to (re)open it, per the existing AI controls
     });
 
     this.aiSendBtn = el('button', {

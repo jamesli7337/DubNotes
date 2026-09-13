@@ -1271,6 +1271,16 @@ select {
 .ai-panel--open {
   transform: translateX(0);
 }
+/* the panel is a fixed, full-height overlay — without shifting the notebook's
+   own scroll area out from under it, its left `width` covers whatever page is
+   in view there, both visually and for pointer events (a stroke drawn under
+   it never reaches the canvas). Matches the panel's own transition so the
+   page slides alongside it rather than jumping. The app bar itself is left
+   alone — see the AI-mode report for why that's a separate, smaller residual. */
+.nb.ai-panel-open .nb-scroll {
+  margin-left: min(340px, 88vw);
+  transition: margin-left 0.25s ease;
+}
 .ai-panel__header {
   display: flex;
   align-items: center;

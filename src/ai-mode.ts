@@ -73,6 +73,9 @@ export class AiMode {
   private panelEl: HTMLElement | null = null;
   private panelBody: HTMLElement | null = null;
   private panelOpen = false;
+  /** the notebook chrome root (`.nb`) — gets `.ai-panel-open` toggled on it so
+   * the scroll area can shift out from under the panel; see setPanelOpen. */
+  private hostEl: HTMLElement | null = null;
 
   constructor(
     private readonly notebookId: string,
@@ -130,6 +133,7 @@ export class AiMode {
     container.append(panel);
     this.panelEl = panel;
     this.panelBody = body;
+    this.hostEl = container;
     this.renderConversation();
   }
 
@@ -151,17 +155,31 @@ export class AiMode {
   /** Removes the panel from the DOM (called when the notebook view is torn down). */
   destroyPanel(): void {
     this.panelEl?.remove();
+    this.hostEl?.classList.remove('ai-panel-open');
     this.panelEl = null;
     this.panelBody = null;
+    this.hostEl = null;
   }
 
-  openPanel(): void {
+  private openPanel(): void {
     this.setPanelOpen(true);
   }
 
+  /**
+   * `.ai-panel-open` on the chrome root shifts `.nb-scroll` right by the
+   * panel's width (see styles.css) while it's open. Without this the panel —
+   * `position: fixed`, full height, `z-index` above everything — visually and
+   * interactively covers whatever's underneath at its own width from the left
+   * edge: the drawable canvas for any page in view, once the panel auto-opens
+   * on the first sent turn. A second stroke drawn there never reaches
+   * `PageCanvas` (it hits the panel instead), so nothing arms the next turn
+   * and "Send" finds nothing to send — this looked like a broken button, but
+   * no stroke was ever actually created for it to send.
+   */
   private setPanelOpen(open: boolean): void {
     this.panelOpen = open;
     this.panelEl?.classList.toggle('ai-panel--open', open);
+    this.hostEl?.classList.toggle('ai-panel-open', open);
   }
 
   /** Whether AI mode is on for this page — the app-bar toggle button reflects this for the current page. */
@@ -184,7 +202,11 @@ export class AiMode {
     this.armTimer(op.pageId, st);
   }
 
-  /** Toggles AI mode for one page — called by the single app-bar button, for whichever page is current. */
+  /**
+   * Toggles AI mode for one page — called by the single app-bar button, for
+   * whichever page is current. The panel follows: turning off dismisses it
+   * (same as its own ×, history untouched), turning on reopens it.
+   */
   toggle(pageId: string): void {
     const st = this.pages.get(pageId);
     if (!st) return;
@@ -198,6 +220,7 @@ export class AiMode {
       }
       this.discardInk(pageId, st); // turned off with unsent violet ink still on the page: drop it
     }
+    this.setPanelOpen(st.active);
     this.applyVisual(pageId);
     this.host.onActiveChanged(pageId, st.active);
   }
