@@ -1,4 +1,4 @@
-# NoteApp
+# DubNotes
 
 An installable web app (PWA) for **handwritten notes**, built for iPad + Apple Pencil
 but equally usable with a mouse on the desktop.
@@ -112,7 +112,7 @@ Vite + TypeScript, no UI framework. All data lives on-device in IndexedDB.
   picker (which includes Google Drive and other providers enabled as Files
   locations) and turns the chosen PDF into a new notebook, one page per PDF
   page — PDF is the only type accepted for now. The same import also runs when
-  a PDF is shared *into* NoteApp: the web app manifest declares a
+  a PDF is shared *into* DubNotes: the web app manifest declares a
   `share_target`, so on platforms that support the Web Share Target API the
   installed app appears in the share / "Open in" sheet for a PDF in Files or
   Google Drive; the service worker receives the file and hands it to the
@@ -248,7 +248,7 @@ Once loaded over HTTPS: Safari → Share → **Add to Home Screen**. It launches
 
 ## Deploy for free
 
-`vite.config.ts` sets `base: '/NoteApp/'`, matching this repo's name — GitHub
+`vite.config.ts` sets `base: '/DubNotes/'`, matching this repo's name — GitHub
 Pages serves a project (non-`<user>.github.io`) repo at
 `https://<user>.github.io/<repo>/`, so every built asset URL needs that
 sub-path prefix baked in. Routing is hash-based, so no SPA redirect/404 config
@@ -271,8 +271,8 @@ name in advance, if you'd rather not hardcode it) before deploying.
    push in step 1. Check the **Actions** tab for its progress; the workflow's
    summary and the Pages settings page both show the live URL once it succeeds.
 4. Site URL: `https://<user>.github.io/<repo>/` — for this repo (name
-   `NoteApp`), that's `https://<user>.github.io/NoteApp/`, matching the `base`
-   above. If your repo name differs from `NoteApp`, update `base` first (see
+   `DubNotes`), that's `https://<user>.github.io/DubNotes/`, matching the `base`
+   above. If your repo name differs from `DubNotes`, update `base` first (see
    above) or the deployed asset paths will 404.
 
 Manual alternative: `npm run build && npx gh-pages -d dist`.
@@ -284,7 +284,7 @@ Manual alternative: `npm run build && npx gh-pages -d dist`.
 3. Build command `npm run build`, output directory `dist` (framework preset: Vite).
 4. Deploys on push; each branch gets a preview URL. Custom domains are free.
    Cloudflare Pages serves from the domain root, so set `base` back to `'./'`
-   first (see above) — `/NoteApp/` is GitHub-Pages-specific.
+   first (see above) — `/DubNotes/` is GitHub-Pages-specific.
 
 CLI alternative: `npm run build && npx wrangler pages deploy dist`.
 
@@ -304,7 +304,7 @@ npx vercel --prod
 (run from the repo root; `vercel.json` tells it to build `api/gemini.ts` as
 a Node.js function with a 30s timeout — Gemini's response can take a few
 seconds, longer than Vercel's default). This also builds and deploys the
-static `dist` site to the same Vercel project, `base: '/NoteApp/'` and all —
+static `dist` site to the same Vercel project, `base: '/DubNotes/'` and all —
 harmless if you don't use that URL, but see the `base` note above if you
 *do* want Vercel to serve the real site.
 
@@ -340,7 +340,7 @@ that distinction matters to you.
 ### AI mode
 
 A per-page toggle (the bot icon in a page's header) turns that page into a
-live handwritten conversation with NoteApp AI. While it's on (an active page gets
+live handwritten conversation with DubNotes AI. While it's on (an active page gets
 a violet border), writing below the last exchange and then pausing for ~2s
 rasterizes just that region and sends it to `/api/gemini`; a send icon next
 to the toggle submits the current turn immediately instead of waiting. The
@@ -357,7 +357,7 @@ written stays as normal page content.
 
 - Everything is stored locally in IndexedDB database **`noteapp`** — with one
   exception: while AI mode is on for a page (see above), a rasterized image of
-  what you write there is sent to NoteApp AI to get a reply. Nothing
+  what you write there is sent to DubNotes AI to get a reply. Nothing
   else leaves the device, and AI mode is off by default on every page.
 - Clearing Safari website data, or removing the Home Screen app, can delete your notes.
   Use **Export** on the Library screen regularly; **Import** restores a backup

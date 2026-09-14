@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite';
 
-// base: '/NoteApp/' — GitHub Pages serves this project at
-// https://<user>.github.io/NoteApp/, so every built asset URL must carry that
+// base: '/DubNotes/' — GitHub Pages serves this project at
+// https://<user>.github.io/DubNotes/, so every built asset URL must carry that
 // sub-path prefix. Vite bakes `base` into the JS/CSS bundle references in
 // dist/index.html and exposes it at runtime as import.meta.env.BASE_URL (used
 // by sw-register.ts to register the worker at the right scope); everything
@@ -11,7 +11,7 @@ import { defineConfig } from 'vite';
 // root or under any sub-path without rebuilding per-target) or that host's
 // own sub-path.
 export default defineConfig({
-  base: '/NoteApp/',
+  base: '/DubNotes/',
   server: { host: true, port: 5173 },
   preview: { host: true, port: 4173 },
   build: { target: 'es2020', outDir: 'dist' },

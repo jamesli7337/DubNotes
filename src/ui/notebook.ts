@@ -286,8 +286,8 @@ class NotebookView {
 
     this.aiToggleBtn = el('button', {
       class: 'iconbtn ai-toggle',
-      title: 'AI Assistant — read this page and reply with NoteApp AI',
-      'aria-label': 'AI Assistant',
+      title: 'DubNotes AI — read this page and reply',
+      'aria-label': 'DubNotes AI',
       'aria-pressed': 'false',
     }) as HTMLButtonElement;
     this.aiToggleBtn.append(icon('ai'));
@@ -298,8 +298,8 @@ class NotebookView {
 
     this.aiSendBtn = el('button', {
       class: 'iconbtn ai-send',
-      title: 'Send this turn to NoteApp AI now',
-      'aria-label': 'Send this turn to NoteApp AI now',
+      title: 'Send this turn to DubNotes AI now',
+      'aria-label': 'Send this turn to DubNotes AI now',
       hidden: true,
     }) as HTMLButtonElement;
     this.aiSendBtn.append(icon('send'));

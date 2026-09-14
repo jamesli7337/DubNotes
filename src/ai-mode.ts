@@ -115,7 +115,7 @@ export class AiMode {
   mountPanel(container: HTMLElement): void {
     const panel = el('div', { class: 'ai-panel' });
     const header = el('div', { class: 'ai-panel__header' });
-    header.append(el('span', { class: 'ai-panel__title', text: 'AI Assistant' }));
+    header.append(el('span', { class: 'ai-panel__title', text: 'DubNotes AI' }));
 
     const actions = el('div', { class: 'ai-panel__header-actions' });
     const clearBtn = el('button', { class: 'iconbtn', title: 'Clear conversation', 'aria-label': 'Clear conversation' });
@@ -264,7 +264,7 @@ export class AiMode {
     if (!st) return;
     st.pageEl.classList.toggle('page--ai-active', st.active);
     st.statusEl.classList.toggle('ai-status--busy', st.sending);
-    st.statusEl.textContent = st.sending ? 'NoteApp AI is thinking…' : st.active ? 'AI mode' : '';
+    st.statusEl.textContent = st.sending ? 'DubNotes AI is thinking…' : st.active ? 'AI mode' : '';
   }
 
   private async submitTurn(pageId: string): Promise<void> {
@@ -328,11 +328,11 @@ export class AiMode {
         text = data.text;
       } else {
         const reason = typeof data?.error === 'string' ? data.error : `request failed (${res.status})`;
-        text = `NoteApp AI error: ${reason}`;
+        text = `DubNotes AI error: ${reason}`;
         isError = true;
       }
     } catch (err) {
-      text = `NoteApp AI error: could not reach the endpoint (${err instanceof Error ? err.message : 'network error'}).`;
+      text = `DubNotes AI error: could not reach the endpoint (${err instanceof Error ? err.message : 'network error'}).`;
       isError = true;
     }
 
@@ -367,7 +367,7 @@ export class AiMode {
       const cls =
         'ai-panel__reply' + (entry.isError ? ' ai-panel__reply--error' : '') + (entry.pending ? ' ai-panel__reply--pending' : '');
       const replyEl = el('div', { class: cls });
-      if (entry.pending) replyEl.textContent = 'NoteApp AI is thinking…';
+      if (entry.pending) replyEl.textContent = 'DubNotes AI is thinking…';
       else if (entry.isError) replyEl.textContent = entry.text; // an app-generated message, not Gemini markdown/LaTeX
       else renderAiReply(replyEl, entry.text);
       row.append(replyEl);

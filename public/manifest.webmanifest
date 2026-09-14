@@ -1,6 +1,6 @@
 {
-  "name": "NoteApp",
-  "short_name": "NoteApp",
+  "name": "DubNotes",
+  "short_name": "DubNotes",
   "id": "./",
   "start_url": "./",
   "scope": "./",

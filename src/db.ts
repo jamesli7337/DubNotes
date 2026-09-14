@@ -456,7 +456,7 @@ export async function exportAll(): Promise<Backup> {
 
 export async function importAll(b: Backup): Promise<void> {
   if (!b || b.app !== 'noteapp' || !Array.isArray(b.notebooks)) {
-    throw new Error('That file is not a NoteApp backup.');
+    throw new Error('That file is not a DubNotes backup.');
   }
   const notebooks = b.notebooks as LegacyNotebook[];
   const pages = b.pages ?? [];

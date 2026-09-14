@@ -1,4 +1,4 @@
-# NoteApp data format
+# DubNotes data format
 
 All data lives on-device in IndexedDB database **`noteapp`**, currently at
 **schema version `5`**: object stores `notebooks`, `pages`, `strokes`,

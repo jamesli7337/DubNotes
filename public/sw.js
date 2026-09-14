@@ -1,4 +1,4 @@
-/* NoteApp service worker — runtime caching so the app opens offline.
+/* DubNotes service worker — runtime caching so the app opens offline.
  * Strategy: network-first for navigations (keeps the shell fresh),
  * cache-first for same-origin static assets (Vite fingerprints filenames,
  * so a cached asset is safe until the next deploy).

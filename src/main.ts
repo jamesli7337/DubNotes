@@ -23,7 +23,7 @@ async function boot(): Promise<void> {
   route();
   registerSW();
 
-  // launched from the share sheet ("Open in NoteApp" on a PDF): the service
+  // launched from the share sheet ("Open in DubNotes" on a PDF): the service
   // worker has parked the file and sent us here with ?shared=1
   if (new URLSearchParams(location.search).has('shared')) {
     history.replaceState(null, '', location.pathname + location.hash); // a reload must not re-import

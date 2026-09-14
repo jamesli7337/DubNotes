@@ -274,7 +274,7 @@ async function addPage(doc: PDFDocument, page: Page, font: PDFFont): Promise<voi
 export async function exportPdf(nb: Notebook, pages: Page[], fileName: string): Promise<void> {
   const doc = await PDFDocument.create();
   doc.setTitle(nb.name);
-  doc.setProducer('NoteApp');
+  doc.setProducer('DubNotes');
   const font = await doc.embedFont(StandardFonts.Helvetica);
   for (const page of pages) await addPage(doc, page, font);
   const bytes = new Uint8Array(await doc.save()); // copy onto a plain ArrayBuffer so Blob accepts it

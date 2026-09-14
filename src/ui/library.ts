@@ -35,7 +35,7 @@ function buildHeader(folder: Folder | null): HTMLElement {
   mark.append(icon('book'));
   const titles = el('div', { class: 'app-header__titles' });
   titles.append(
-    el('span', { class: 'app-header__title', text: folder ? folder.name : 'NoteApp' }),
+    el('span', { class: 'app-header__title', text: folder ? folder.name : 'DubNotes' }),
     el('span', { class: 'app-header__sub', text: folder ? 'Folder' : 'Notes Library' })
   );
   brand.append(mark, titles);
