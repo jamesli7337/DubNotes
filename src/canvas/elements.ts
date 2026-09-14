@@ -120,13 +120,24 @@ export function backgroundBitmap(
 }
 
 /**
- * Paints a page background (an imported PDF page) fitted inside `w × h` and
- * centred, over the paper fill and under everything else. While a PDF page is
- * still rendering, a light placeholder marks its area; if it failed to render
- * (see pdf-render.ts's `looksBlank`/`isPdfPageFailed` — an unsupported image
- * codec resolves "successfully" with nothing painted, so this can't rely on
- * an exception alone), a more visible placeholder says so, rather than
- * leaving what would otherwise look like a page that silently imported empty.
+ * Paints a page background (an imported PDF page) over the paper fill and
+ * under everything else. A PDF page (`bg.assetId`) fills `w × h` completely,
+ * full-bleed — scaled to cover and centre-cropped to the page's own
+ * proportions, rather than fitted inside with the page's paper showing
+ * around it, since a PDF page's own aspect ratio rarely matches PAGE_W:PAGE_H
+ * exactly (imperceptible for near-Letter-proportioned pages; a page far from
+ * that proportion, e.g. a wide landscape scan, loses some of its margin off
+ * the top/bottom or sides to the crop — an inherent trade-off of filling the
+ * page rather than showing the whole source image). A legacy `bg.src` image
+ * background (pre-PDF-import format; nothing in the app creates these
+ * anymore) keeps the older fit-inside-and-centre behaviour, since it was
+ * never a whole scanned page and correctly showing all of it matters more
+ * there. While a PDF page is still rendering, a light placeholder marks its
+ * area; if it failed to render (see pdf-render.ts's `looksBlank`/
+ * `isPdfPageFailed` — an unsupported image codec resolves "successfully"
+ * with nothing painted, so this can't rely on an exception alone), a more
+ * visible placeholder says so, rather than leaving what would otherwise look
+ * like a page that silently imported empty.
  */
 export function drawBackground(
   ctx: CanvasRenderingContext2D,
@@ -149,6 +160,16 @@ export function drawBackground(
       ctx.fillStyle = 'rgba(128, 128, 128, 0.08)';
       ctx.fillRect(0, 0, w, h);
     }
+    return;
+  }
+  if (bg.assetId !== undefined) {
+    // cover + centre-crop: fills w × h exactly, no paper margin around it
+    const s = Math.max(w / bmp.width, h / bmp.height);
+    const sw = w / s;
+    const sh = h / s;
+    const sx = (bmp.width - sw) / 2;
+    const sy = (bmp.height - sh) / 2;
+    ctx.drawImage(bmp.source, sx, sy, sw, sh, 0, 0, w, h);
     return;
   }
   const s = Math.min(w / bmp.width, h / bmp.height);

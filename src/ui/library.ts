@@ -43,7 +43,7 @@ function buildHeader(folder: Folder | null): HTMLElement {
   const actions = el('div', { class: 'app-header__actions' });
 
   const exportBtn = el('button', { class: 'iconbtn', title: 'Export backup', 'aria-label': 'Export backup' });
-  exportBtn.append(icon('download'));
+  exportBtn.append(icon('export'));
   exportBtn.addEventListener('click', async () => {
     const data = await exportAll();
     download(`noteapp-backup-${timestamp()}.json`, JSON.stringify(data));
@@ -55,7 +55,7 @@ function buildHeader(folder: Folder | null): HTMLElement {
     style: 'display:none',
   }) as HTMLInputElement;
   const importBtn = el('button', { class: 'iconbtn', title: 'Import backup', 'aria-label': 'Import backup' });
-  importBtn.append(icon('upload'));
+  importBtn.append(icon('import'));
   importBtn.addEventListener('click', () => importInput.click());
   importInput.addEventListener('change', async () => {
     const file = importInput.files?.[0];
@@ -87,7 +87,7 @@ function buildHeader(folder: Folder | null): HTMLElement {
     style: 'display:none',
   }) as HTMLInputElement;
   const fileBtn = el('button', { class: 'iconbtn', title: 'Import file', 'aria-label': 'Import file' });
-  fileBtn.append(icon('pdf'));
+  fileBtn.append(icon('import'));
   fileBtn.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', async () => {
     const file = fileInput.files?.[0];

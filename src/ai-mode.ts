@@ -19,7 +19,7 @@ import { itemBounds, unionRects } from './canvas/geom';
 import { PAGE_H } from './const';
 import { store } from './store';
 import { clearAiEntries, getAiEntries, putAiEntry } from './db';
-import { stripMarkdown } from './text-clean';
+import { renderAiReply } from './ai-render';
 import type { Op } from './canvas/page-canvas';
 import type { AiConversationEntry, Page } from './types';
 import { isStroke, uid } from './util';
@@ -325,7 +325,7 @@ export class AiMode {
       });
       const data: { text?: unknown; error?: unknown } | null = await res.json().catch(() => null);
       if (res.ok && typeof data?.text === 'string' && data.text) {
-        text = stripMarkdown(data.text);
+        text = data.text;
       } else {
         const reason = typeof data?.error === 'string' ? data.error : `request failed (${res.status})`;
         text = `NoteApp AI error: ${reason}`;
@@ -366,7 +366,11 @@ export class AiMode {
       }
       const cls =
         'ai-panel__reply' + (entry.isError ? ' ai-panel__reply--error' : '') + (entry.pending ? ' ai-panel__reply--pending' : '');
-      row.append(el('div', { class: cls, text: entry.pending ? 'NoteApp AI is thinking…' : entry.text }));
+      const replyEl = el('div', { class: cls });
+      if (entry.pending) replyEl.textContent = 'NoteApp AI is thinking…';
+      else if (entry.isError) replyEl.textContent = entry.text; // an app-generated message, not Gemini markdown/LaTeX
+      else renderAiReply(replyEl, entry.text);
+      row.append(replyEl);
       body.append(row);
     }
     body.scrollTop = body.scrollHeight;

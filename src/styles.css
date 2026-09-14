@@ -1435,6 +1435,55 @@ select {
   font-style: italic;
   animation: ai-pulse 1.1s ease-in-out infinite;
 }
+/* markdown-lite + KaTeX content rendered by ai-render.ts (see its own doc
+ * comment) — spacing between the block elements it builds; text colour keeps
+ * inheriting from .ai-panel__reply so it still turns error-red, etc. */
+.ai-panel__reply p,
+.ai-panel__reply ul,
+.ai-panel__reply blockquote,
+.ai-panel__reply .ai-md-heading,
+.ai-panel__reply .ai-math--block {
+  margin: 8px 0;
+}
+.ai-panel__reply > :first-child {
+  margin-top: 0;
+}
+.ai-panel__reply > :last-child {
+  margin-bottom: 0;
+}
+.ai-panel__reply .ai-md-heading {
+  font-weight: 700;
+}
+.ai-panel__reply ul {
+  padding-left: 1.3em;
+}
+.ai-panel__reply blockquote {
+  padding-left: 10px;
+  border-left: 2px solid currentColor;
+  opacity: 0.85;
+}
+.ai-panel__reply blockquote p {
+  margin: 4px 0;
+}
+.ai-panel__reply code {
+  font-family: ui-monospace, 'SF Mono', Consolas, monospace;
+  font-size: 0.9em;
+  background: rgba(0, 0, 0, 0.08);
+  border-radius: 4px;
+  padding: 0.1em 0.35em;
+}
+.ai-panel__reply hr {
+  border: none;
+  border-top: 1px solid currentColor;
+  opacity: 0.25;
+  margin: 10px 0;
+}
+.ai-panel__reply .ai-math--block {
+  overflow-x: auto;
+}
+.ai-panel__reply .ai-math--inline {
+  display: inline-block;
+}
 .page {
   position: relative;
   width: 820px;

@@ -318,7 +318,7 @@ class NotebookView {
     // "Import file" which creates a whole new notebook from a PDF — same
     // underlying pdf-import.ts parsing, different insertion point.
     const pdfBtn = el('button', { class: 'iconbtn', title: 'Import PDF pages', 'aria-label': 'Import PDF pages' });
-    pdfBtn.append(icon('pdf'));
+    pdfBtn.append(icon('import'));
     pdfBtn.addEventListener('click', () => this.pdfInput.click());
 
     const exportBtn = el('button', { class: 'iconbtn', title: 'Export', 'aria-label': 'Export' });
@@ -517,7 +517,7 @@ class NotebookView {
     let modal: Modal | null = null;
     const item = (label: string, run: () => Promise<void>): void => {
       const b = el('button', { class: 'menu__item menu__item--icon', role: 'menuitem' });
-      b.append(icon('download', 'sm'), el('span', { text: label }));
+      b.append(icon('export', 'sm'), el('span', { text: label }));
       b.addEventListener('click', () => {
         modal?.close();
         void this.runExport(run);
@@ -1505,7 +1505,7 @@ class NotebookView {
     const SPACINGS: PaperSpacing[] = ['narrow', 'medium', 'wide'];
     const COLORS: PaperColor[] = ['white', 'cream', 'dark'];
 
-    let scope: 'page' | 'all' = 'page';
+    let scope: 'page' | 'all' = 'all';
     let draft: Paper = { ...page.paper };
 
     // spacing only means something once there's ruling to space — dim it for
@@ -1541,7 +1541,7 @@ class NotebookView {
       ),
       field(
         'Apply to',
-        segmented(['This page', 'All pages'], 0, (i) => {
+        segmented(['This page', 'All pages'], 1, (i) => {
           scope = i === 0 ? 'page' : 'all';
         })
       )
