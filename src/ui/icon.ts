@@ -48,6 +48,7 @@ import triangle from 'lucide-static/icons/triangle.svg?raw';
 import moveUpRight from 'lucide-static/icons/move-up-right.svg?raw';
 import bot from 'lucide-static/icons/bot.svg?raw';
 import send from 'lucide-static/icons/send.svg?raw';
+import scissors from 'lucide-static/icons/scissors.svg?raw';
 
 /* Hand-drawn protractor (Lucide has none): a semicircle on a baseline with a few ticks. */
 const protractor = `<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 17a9 9 0 0 1 18 0"/><path d="M3 17h18"/><path d="M12 8v3"/><path d="M6.4 11.6l2.1 2.1"/><path d="M17.6 11.6l-2.1 2.1"/></svg>`;
@@ -98,7 +99,8 @@ export type IconName =
   | 'delete'
   | 'book'
   | 'ai'
-  | 'send';
+  | 'send'
+  | 'cut';
 
 const ICONS: Record<IconName, string> = {
   'arrow-left': arrowLeft,
@@ -147,6 +149,7 @@ const ICONS: Record<IconName, string> = {
   book: bookText,
   ai: bot,
   send,
+  cut: scissors,
 };
 
 /** Returns a <span class="icon"> wrapping the raw SVG; `currentColor` inherits text colour. */

@@ -63,6 +63,14 @@ export interface PageHooks {
   onOp: (op: Op) => void;
   /** the set of selected items on this page changed; `count` 0 means cleared */
   onSelection: (pc: PageCanvas, count: number) => void;
+  /**
+   * The visible selection's frame changed shape/position — on select, drag,
+   * resize, rotate, and deselect (`null`). Frame is in this page's own units;
+   * pair with `pageRect()` to place external UI (the lasso selection callout)
+   * against it in screen space. Fires far more often than onSelection (every
+   * drag frame), so keep this cheap.
+   */
+  onSelectionFrame: (pc: PageCanvas, frame: Frame | null) => void;
   /** true while AI mode is on for this page — a fresh pen/highlighter stroke inks in AI_COLOR instead of the tool's own colour. */
   isAiActive: () => boolean;
 }
@@ -216,6 +224,11 @@ export class PageCanvas {
 
   get hasSelection(): boolean {
     return this.selected.size > 0;
+  }
+
+  /** This mounted page's own screen rect — for external UI (the lasso selection callout) anchored against a Frame from onSelectionFrame. */
+  pageRect(): DOMRect | null {
+    return this.host?.getBoundingClientRect() ?? null;
   }
 
   mount(host: HTMLElement): void {
@@ -1351,6 +1364,7 @@ export class PageCanvas {
     this.commitEdit();
     if (!this.selected.size) {
       this.overlay?.hide();
+      this.hooks.onSelectionFrame(this, null);
       return;
     }
     this.setSelection([]);
@@ -1370,6 +1384,7 @@ export class PageCanvas {
     const frame = itemsFrame(items);
     if (!frame) {
       ov.hide();
+      this.hooks.onSelectionFrame(this, null);
       return;
     }
     const single = items.length === 1 && !isStroke(items[0]) ? items[0] : null;
@@ -1380,6 +1395,7 @@ export class PageCanvas {
       edges: isText ? 'horizontal' : 'all',
       passThrough: this.editor != null,
     });
+    this.hooks.onSelectionFrame(this, frame);
   }
 
   /** A tap on the selection box itself: with the text tool, that re-opens a selected text box for editing. */
@@ -1408,6 +1424,7 @@ export class PageCanvas {
     this.overlay?.hide();
     this.rebuild();
     this.hooks.onSelection(this, 0);
+    this.hooks.onSelectionFrame(this, null);
     if (removed.length) this.hooks.onOp({ kind: 'remove-items', pageId: this.page.id, items: removed });
   }
 
@@ -1459,6 +1476,7 @@ export class PageCanvas {
     this.xfCur = frame;
     this.syncEditor(this.xfLive[0]);
     this.overlay?.update(frame);
+    this.hooks.onSelectionFrame(this, frame);
     this.schedule();
   }
 

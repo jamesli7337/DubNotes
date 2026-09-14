@@ -1567,6 +1567,84 @@ select {
   height: 14px;
 }
 
+/* ------------------------------------------------- lasso selection callout
+ * A floating popover mimicking iOS's text-selection callout (rounded pill,
+ * light background, dark text, small arrow) — the real system menu isn't
+ * reachable for canvas content, so this stands in for it. Lives in
+ * document.body (position: fixed) rather than inside the zoomed .page
+ * subtree — same reason the dock is fixed rather than in-flow: a transformed
+ * ancestor traps any descendant's z-index no matter its value (see the
+ * dock's own comment), and this needs to float above everything the same
+ * way. notebook.ts's positionCallout sets left/top directly in real screen
+ * pixels; this only supplies the look plus the arrow, via
+ * --sel-callout-arrow-x (also set from JS, since the callout can get
+ * clamped sideways away from directly above/below the selection). Toggled
+ * via the `hidden` attribute (not a class) when the selection scrolls fully
+ * out of view — needs its own `[hidden]` rule since the plain `display: flex`
+ * below is an author-origin rule and would otherwise silently beat the
+ * browser's own `[hidden] { display: none }` (author always outranks
+ * user-agent at equal specificity, regardless of the specificity numbers —
+ * this exact trap has bitten a couple of other buttons in this codebase). */
+.sel-callout {
+  position: fixed;
+  z-index: 55;
+  display: flex;
+  align-items: center;
+  padding: 4px;
+  background: var(--surface-c-lowest);
+  border-radius: var(--r-full);
+  box-shadow: var(--sh-3);
+  --sel-callout-arrow-x: 50%;
+}
+.sel-callout[hidden] {
+  display: none;
+}
+.sel-callout::after {
+  content: '';
+  position: absolute;
+  left: var(--sel-callout-arrow-x);
+  bottom: -6px;
+  width: 12px;
+  height: 6px;
+  margin-left: -6px;
+  background: var(--surface-c-lowest);
+  clip-path: polygon(50% 100%, 0 0, 100% 0);
+}
+/* flipped below the selection (not enough room above) — arrow moves to the
+   callout's top edge and points up instead of down */
+.sel-callout--below::after {
+  bottom: auto;
+  top: -6px;
+  clip-path: polygon(50% 0%, 0 100%, 100% 100%);
+}
+.sel-callout__btn {
+  width: 36px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--on-surface);
+  border-radius: var(--r-lg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.sel-callout__btn:hover {
+  background: var(--surface-c);
+}
+.sel-callout__btn .icon {
+  width: 17px;
+  height: 17px;
+}
+.sel-callout__divider {
+  width: 1px;
+  align-self: stretch;
+  margin: 6px 0;
+  background: var(--outline-variant);
+  flex: none;
+}
+
 /* ------------------------------------------------------- ruler / protractor
  * View-only drawing aids positioned in page units; `--guide-unrot` counter-
  * rotates the angle readout so it stays upright. */

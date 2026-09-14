@@ -1,5 +1,6 @@
 import { AiMode } from '../ai-mode';
 import { AUTO_COLOR, resolveInkColor } from '../canvas/freehand';
+import { rotateAround, type Frame } from '../canvas/geom';
 import type { GuideKind } from '../canvas/guide';
 import { PageCanvas } from '../canvas/page-canvas';
 import type { Op } from '../canvas/page-canvas';
@@ -116,6 +117,26 @@ class NotebookView {
   private guideKind: GuideKind | null = null;
   private guidePageId: string | null = null;
 
+  /**
+   * Floating iOS-callout-style popover for a lasso selection (copy/cut/paste/
+   * delete/duplicate) — see showSelectionCallout. `calloutPc` is which page's
+   * selection it's currently showing for, so a *different* page's own
+   * deselect event (firing after a fresh selection elsewhere already opened
+   * the callout there — see onSelectionFrame) doesn't hide it out from under
+   * the new one.
+   */
+  private calloutEl: HTMLElement | null = null;
+  private calloutPc: PageCanvas | null = null;
+  /** The frame the callout is currently positioned against — re-placed (not re-shown) on scroll/resize, since neither changes the frame itself, only where it lands on screen. */
+  private calloutFrame: Frame | null = null;
+  /** Bound so the same reference can be added to and removed from `window` — see the scroll/resize wiring in buildChrome and its cleanup in onLeave. */
+  private readonly repositionCallout = (): void => {
+    if (!this.calloutEl || !this.calloutPc || !this.calloutFrame) return;
+    const pageRect = this.calloutPc.pageRect();
+    if (!pageRect) return;
+    this.positionCallout(this.calloutEl, this.calloutFrame, pageRect);
+  };
+
   private readonly onKey: (e: KeyboardEvent) => void;
   private readonly onLeave: () => void;
 
@@ -170,6 +191,8 @@ class NotebookView {
         this.redo();
       } else if (k === 'c') {
         if (this.copySelection()) e.preventDefault();
+      } else if (k === 'x') {
+        if (this.cutSelection()) e.preventDefault();
       } else if (k === 'v') {
         if (this.pasteClipboard()) e.preventDefault();
       } else if (k === 'd') {
@@ -179,6 +202,8 @@ class NotebookView {
     this.onLeave = () => {
       window.removeEventListener('keydown', this.onKey);
       window.removeEventListener('hashchange', this.onLeave);
+      window.removeEventListener('resize', this.repositionCallout);
+      this.hideSelectionCallout();
       this.deactivateAll(); // commit an open text edit before the canvases go away
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
       this.observer.disconnect();
@@ -300,6 +325,15 @@ class NotebookView {
     this.scrollEl = el('div', { class: 'nb-scroll' });
     blockGestures(this.scrollEl);
     this.bindZoomGestures();
+    // scrolling/resizing changes where the selection lands on screen without
+    // changing its frame — reposition the callout (if open) to match; a fresh
+    // pageRect() picks up the new scroll/zoom, same idea as openModal's
+    // anchored popovers re-placing themselves on resize/orientationchange.
+    // A bound method (not a local closure) so onLeave can remove the same
+    // reference from `window` — otherwise every notebook visit would leak
+    // one more resize listener onto it for the life of the tab.
+    this.scrollEl.addEventListener('scroll', this.repositionCallout, { passive: true });
+    window.addEventListener('resize', this.repositionCallout);
 
     this.imageInput = el('input', {
       type: 'file',
@@ -727,7 +761,12 @@ class NotebookView {
     return b;
   }
 
-  /** Lasso dock: selection actions, and recolour swatches for the selected strokes. */
+  /**
+   * Lasso dock: the selection-shape picker and recolour swatches. Copy / cut /
+   * paste / delete / duplicate used to live here too — they're in the
+   * floating selection callout now (see showSelectionCallout), so this only
+   * renders a hint (nothing selected) or the recolour swatches (something is).
+   */
   private renderLassoTools(t: HTMLElement): void {
     const items = this.selPc?.selectedItems() ?? [];
     const action = this.actionBtn;
@@ -761,15 +800,6 @@ class NotebookView {
       if (this.clipboard.length) t.append(action('paste', 'Paste', () => this.pasteClipboard()));
       return;
     }
-
-    const actions = el('div', { class: 'dock-group' });
-    actions.append(
-      action('copy', 'Copy', () => this.copySelection()),
-      action('duplicate', 'Duplicate', () => this.duplicateSelection())
-    );
-    if (this.clipboard.length) actions.append(action('paste', 'Paste', () => this.pasteClipboard()));
-    actions.append(action('delete', 'Delete', () => this.selPc?.deleteSelection()));
-    t.append(actions);
 
     const strokes = items.filter(isStroke);
     const hasPen = strokes.some((s) => s.tool === 'pen');
@@ -870,6 +900,162 @@ class NotebookView {
     if (toolState.kind === 'lasso' || toolState.kind === 'shapes') this.renderTools();
   }
 
+  /**
+   * A lasso selection's frame changed (selected, dragged, resized, rotated,
+   * or cleared — `frame` is null then). Shows/repositions/hides the floating
+   * callout accordingly; a no-op outside the lasso tool (the Shapes tool's
+   * own selection keeps using the dock's Delete action, unchanged).
+   */
+  private onSelectionFrame(pc: PageCanvas, frame: Frame | null): void {
+    if (frame && toolState.kind === 'lasso') {
+      this.calloutPc = pc;
+      this.showSelectionCallout(pc, frame);
+    } else if (pc === this.calloutPc) {
+      // only the page the callout is currently anchored to gets to hide it —
+      // deselecting a *different* page (e.g. the previous one, when a fresh
+      // selection elsewhere just replaced it) must not hide the new one.
+      this.calloutPc = null;
+      this.hideSelectionCallout();
+    }
+  }
+
+  private hideSelectionCallout(): void {
+    this.calloutEl?.remove();
+    this.calloutEl = null;
+    this.calloutFrame = null;
+  }
+
+  /** Rebuilds the callout's buttons in place (e.g. Paste appearing right after a Copy) without moving it. */
+  private refreshSelectionCallout(): void {
+    if (!this.calloutEl) return;
+    this.renderCalloutButtons(this.calloutEl);
+  }
+
+  private renderCalloutButtons(container: HTMLElement): void {
+    container.replaceChildren();
+    const divider = (): HTMLElement => el('span', { class: 'sel-callout__divider' });
+    const btn = (name: IconName, label: string, onClick: () => void): HTMLElement => {
+      const b = el('button', { class: 'sel-callout__btn', title: label, 'aria-label': label });
+      b.append(icon(name, 'sm'));
+      b.addEventListener('click', onClick);
+      return b;
+    };
+    container.append(btn('copy', 'Copy', () => this.copySelection()));
+    container.append(divider());
+    container.append(btn('cut', 'Cut', () => this.cutSelection()));
+    if (this.clipboard.length) {
+      container.append(divider());
+      container.append(btn('paste', 'Paste', () => this.pasteClipboard()));
+    }
+    container.append(divider());
+    container.append(btn('delete', 'Delete', () => this.selPc?.deleteSelection()));
+    container.append(divider());
+    container.append(btn('duplicate', 'Duplicate', () => this.duplicateSelection()));
+  }
+
+  /**
+   * Floating popover mimicking iOS's text-selection callout (rounded pill,
+   * light background, dark text, small arrow) — the real system menu isn't
+   * reachable for canvas content, so this stands in for it. Lives in
+   * `document.body` (position: fixed), never inside the zoomed `.page`
+   * subtree — an element there can't out-rank the dock's z-index no matter
+   * its own value (see the dock's own comment on this same trap), and this
+   * needs to float above everything the same way. Positioned from `frame`
+   * (this page's own units) via `pc.pageRect()` (that page's live screen
+   * rect) so it tracks scroll/zoom/drag for free, each time it's told the
+   * frame changed.
+   */
+  private showSelectionCallout(pc: PageCanvas, frame: Frame): void {
+    const pageRect = pc.pageRect();
+    if (!pageRect) {
+      this.hideSelectionCallout();
+      return;
+    }
+    if (!this.calloutEl) {
+      this.calloutEl = el('div', { class: 'sel-callout', role: 'menu' });
+      document.body.append(this.calloutEl);
+    }
+    this.renderCalloutButtons(this.calloutEl);
+    this.calloutFrame = frame;
+    this.positionCallout(this.calloutEl, frame, pageRect);
+  }
+
+  /**
+   * Places the callout centred above `frame`'s (rotation-aware) bounding box,
+   * flipping below if that would go off the top of the viewport. Hides it
+   * outright (rather than clamping to an edge) if the selection has scrolled
+   * fully out of view, and keeps it clear of the AI side panel when that's
+   * open, shifting right past it rather than rendering underneath.
+   */
+  private positionCallout(callout: HTMLElement, frame: Frame, pageRect: DOMRect): void {
+    const scale = pageRect.width / PAGE_W;
+    const cx = frame.x + frame.w / 2;
+    const cy = frame.y + frame.h / 2;
+    const corners = [
+      [frame.x, frame.y],
+      [frame.x + frame.w, frame.y],
+      [frame.x + frame.w, frame.y + frame.h],
+      [frame.x, frame.y + frame.h],
+    ].map(([x, y]) => rotateAround(x, y, cx, cy, frame.rot));
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const [x, y] of corners) {
+      minX = Math.min(minX, x);
+      minY = Math.min(minY, y);
+      maxX = Math.max(maxX, x);
+      maxY = Math.max(maxY, y);
+    }
+    const box = {
+      left: pageRect.left + minX * scale,
+      top: pageRect.top + minY * scale,
+      right: pageRect.left + maxX * scale,
+      bottom: pageRect.top + maxY * scale,
+    };
+
+    const GAP = 10; // between the callout (or its arrow tip) and the selection
+    const MARGIN = 8; // keep clear of the viewport edge
+    const vw = document.documentElement.clientWidth;
+    const vh = document.documentElement.clientHeight;
+
+    // the selection has scrolled fully out of view — hide rather than clamp
+    // to whichever edge it last crossed, which would otherwise leave a
+    // callout floating there with nothing visible for it to point at
+    const offscreen = box.right < 0 || box.left > vw || box.bottom < 0 || box.top > vh;
+    callout.hidden = offscreen;
+    if (offscreen) return;
+
+    // offsetWidth/Height reflect the callout's own content size regardless of
+    // its current left/top, so no need to move it away to measure first —
+    // that would just add a visible jump on every reposition during a drag.
+    const cw = callout.offsetWidth;
+    const ch = callout.offsetHeight;
+
+    const spaceAbove = box.top - GAP - ch;
+    const below = spaceAbove < MARGIN;
+    callout.classList.toggle('sel-callout--below', below);
+
+    const top = below ? box.bottom + GAP : spaceAbove;
+    let left = (box.left + box.right) / 2 - cw / 2;
+    // the AI panel (position: fixed, left: 0, up to 340px wide) sits above
+    // everything at a higher z-index than the callout — if it's open, keep
+    // clear of it rather than centring underneath/behind it. Always safe to
+    // read: closed, it's slid off-screen via transform, so its own rect's
+    // right edge is off past the left of the viewport and this no-ops.
+    const panelRight = document.querySelector('.ai-panel')?.getBoundingClientRect().right ?? -Infinity;
+    const minLeft = Math.max(MARGIN, panelRight + MARGIN);
+    left = Math.max(minLeft, Math.min(left, vw - cw - MARGIN));
+    const clampedTop = Math.max(MARGIN, Math.min(top, vh - ch - MARGIN));
+
+    callout.style.left = `${Math.round(left)}px`;
+    callout.style.top = `${Math.round(clampedTop)}px`;
+    // the arrow points at the selection's horizontal centre even when the
+    // callout itself got clamped sideways away from directly above it
+    const arrowX = Math.max(12, Math.min((box.left + box.right) / 2 - left, cw - 12));
+    callout.style.setProperty('--sel-callout-arrow-x', `${Math.round(arrowX)}px`);
+  }
+
   /** Finishes any text edit and drops any selection on every page. */
   private deactivateAll(): void {
     for (const pc of this.pcByPage.values()) pc.deactivate();
@@ -881,7 +1067,17 @@ class NotebookView {
     if (!items.length || !this.selPc) return false;
     this.clipboard = items.map((it) => JSON.parse(JSON.stringify(it)) as PageItem);
     this.clipboardPage = this.selPc.page.id;
-    if (toolState.kind === 'lasso') this.renderTools(); // paste becomes available
+    if (toolState.kind === 'lasso') {
+      this.renderTools(); // the dock's own "nothing selected" hint picks up Paste too
+      this.refreshSelectionCallout(); // still open on the same selection — Paste now belongs in it
+    }
+    return true;
+  }
+
+  /** Copies the selection, then deletes it — the callout's "Cut". */
+  private cutSelection(): boolean {
+    if (!this.copySelection()) return false;
+    this.selPc?.deleteSelection();
     return true;
   }
 
@@ -1057,6 +1253,7 @@ class NotebookView {
         this.aiMode.handleOp(op);
       },
       onSelection: (p, n) => this.onSelection(p, n),
+      onSelectionFrame: (p, frame) => this.onSelectionFrame(p, frame),
       isAiActive: () => this.aiMode.isActive(page.id),
     });
     this.pcByPage.set(page.id, pc);
