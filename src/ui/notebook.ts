@@ -304,7 +304,12 @@ class NotebookView {
     }) as HTMLButtonElement;
     this.aiSendBtn.append(icon('send'));
     this.aiSendBtn.addEventListener('click', () => {
-      if (this.currentPageId) this.aiMode.sendNow(this.currentPageId);
+      if (!this.currentPageId) return;
+      // a snapped line can still be sitting uncommitted (adjustable handles,
+      // not yet in the store) when Send is tapped — settle it first so this
+      // turn's capture actually includes it. See PageCanvas.commitLine.
+      this.pcByPage.get(this.currentPageId)?.commitLine();
+      this.aiMode.sendNow(this.currentPageId);
     });
 
     // formerly a dock button ("insert actions" in the tools row); moved here

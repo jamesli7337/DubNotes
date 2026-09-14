@@ -53,7 +53,7 @@ import { drawTemplate } from './templates';
 export type Op =
   | { kind: 'add-stroke'; pageId: string; stroke: Stroke }
   | { kind: 'erase'; pageId: string; strokes: Stroke[] }
-  | { kind: 'add-items'; pageId: string; items: PageItem[] }
+  | { kind: 'add-items'; pageId: string; items: PageItem[]; aiInk?: boolean }
   | { kind: 'remove-items'; pageId: string; items: PageItem[] }
   | { kind: 'replace-items'; pageId: string; before: PageItem[]; after: PageItem[] }
   /** some items went away and others (with different ids) took their place — e.g. a partial erase splitting strokes */
@@ -1105,7 +1105,11 @@ export class PageCanvas {
     const shape = this.lineElement(le);
     store.addItems([shape]);
     this.rebuild();
-    this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items: [shape] });
+    // le.color was set from aiInkColor() when the stroke that became this
+    // line started — same violet-means-ephemeral-turn-ink signal add-stroke
+    // ops carry, so AiMode can discard a snapped line the same way it
+    // discards freehand ink once its turn is sent (see AiMode.handleOp).
+    this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items: [shape], aiInk: le.color === AI_COLOR });
   }
 
   // --------------------------------------------------------- shapes tool

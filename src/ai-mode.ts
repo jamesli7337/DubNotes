@@ -22,10 +22,8 @@ import { clearAiEntries, getAiEntries, putAiEntry } from './db';
 import { renderAiReply } from './ai-render';
 import type { Op } from './canvas/page-canvas';
 import type { AiConversationEntry, Page } from './types';
-import { isStroke, uid } from './util';
+import { uid } from './util';
 
-/** How long a page must sit idle after new ink before a turn auto-submits. */
-const IDLE_MS = 2000;
 /** The one AI accent colour — the page border and in-progress ink both use
  * exactly this, so "AI mode" reads as one consistent identity. */
 export const AI_COLOR = '#6d28d9';
@@ -51,7 +49,6 @@ interface AiPageState {
   sending: boolean;
   /** page-units Y: top of the region the next turn will be read from. */
   turnTop: number;
-  idleTimer: ReturnType<typeof setTimeout> | null;
   /** ids of strokes drawn while AI mode was active on this page — ephemeral:
    * never undoable, removed once their turn is sent (or discarded if AI mode
    * is turned off before that happens). Never holds a stroke the user drew
@@ -106,7 +103,6 @@ export class AiMode {
       active: false,
       sending: false,
       turnTop: 0,
-      idleTimer: null,
       inkIds: new Set(),
     });
   }
@@ -189,17 +185,20 @@ export class AiMode {
 
   /** Feed every committed page op through here. */
   handleOp(op: Op): void {
-    if (op.kind !== 'add-stroke') return;
     const st = this.pages.get(op.pageId);
     if (!st || !st.active) return;
-    // any stroke drawn while AI mode is active is ephemeral ink, regardless
-    // of where on the page it lands — see PageCanvas's isAiActive hook, which
-    // is what actually painted it violet instead of the user's pen colour.
-    st.inkIds.add(op.stroke.id);
-    if (st.sending) return; // still track it; just don't restart the timer mid-send
-    const b = itemBounds(op.stroke);
-    if (b.y + b.h < st.turnTop) return; // above the active region: doesn't (re)arm the timer
-    this.armTimer(op.pageId, st);
+    if (op.kind === 'add-stroke') {
+      // any stroke drawn while AI mode is active is ephemeral ink, regardless
+      // of where on the page it lands — see PageCanvas's isAiActive hook, which
+      // is what actually painted it violet instead of the user's pen colour.
+      // Just tracked here; submission only ever happens via an explicit Send tap.
+      st.inkIds.add(op.stroke.id);
+    } else if (op.kind === 'add-items' && op.aiInk) {
+      // a freehand stroke that got snap-recognized into a line: still the
+      // same violet turn ink, just committed as a shape item instead of a
+      // stroke — track it the same way so it's discarded the same way too.
+      for (const it of op.items) st.inkIds.add(it.id);
+    }
   }
 
   /**
@@ -214,10 +213,6 @@ export class AiMode {
     if (st.active) {
       st.turnTop = 0; // first turn: the whole page so far
     } else {
-      if (st.idleTimer != null) {
-        clearTimeout(st.idleTimer);
-        st.idleTimer = null;
-      }
       this.discardInk(pageId, st); // turned off with unsent violet ink still on the page: drop it
     }
     this.setPanelOpen(st.active);
@@ -227,34 +222,20 @@ export class AiMode {
 
   /** True while a page is being torn down for good (not just scrolled out of view). */
   forgetPage(pageId: string): void {
-    const st = this.pages.get(pageId);
-    if (st?.idleTimer != null) clearTimeout(st.idleTimer);
     this.pages.delete(pageId);
   }
 
-  /** Submits the current turn immediately — called by the app-bar send button, for whichever page is current. */
+  /** Submits the current turn immediately — the only way a turn is ever sent, called by the app-bar send button, for whichever page is current. */
   sendNow(pageId: string): void {
     const st = this.pages.get(pageId);
     if (!st || !st.active || st.sending) return;
-    if (st.idleTimer != null) {
-      clearTimeout(st.idleTimer);
-      st.idleTimer = null;
-    }
     void this.submitTurn(pageId);
-  }
-
-  private armTimer(pageId: string, st: AiPageState): void {
-    if (st.idleTimer != null) clearTimeout(st.idleTimer);
-    st.idleTimer = setTimeout(() => {
-      st.idleTimer = null;
-      void this.submitTurn(pageId);
-    }, IDLE_MS);
   }
 
   /** Removes whatever ephemeral ink is still tracked (unsent) and repaints if any was. */
   private discardInk(pageId: string, st: AiPageState): void {
     if (!st.inkIds.size) return;
-    const removed = store.removeStrokes(pageId, st.inkIds);
+    const removed = store.removeItems(pageId, st.inkIds);
     st.inkIds.clear();
     if (removed.length) this.host.refreshPage(pageId);
   }
@@ -276,7 +257,7 @@ export class AiMode {
 
     const top = st.turnTop;
     const items = store.itemsOf(pageId).filter((it) => itemBounds(it).y + itemBounds(it).h > top + 0.01);
-    if (!items.length) return; // the timer fired but there's nothing new below the line (e.g. it was erased)
+    if (!items.length) return; // Send tapped but there's nothing new below the line (e.g. it was erased)
 
     const bounds = unionRects(items.map(itemBounds))!;
     const bottom = Math.min(Math.max(bounds.y + bounds.h + 12, top + 1), PAGE_H);
@@ -307,13 +288,16 @@ export class AiMode {
       const rendered = await renderPageRegionImage(page, { top, bottom });
       thumbnail = `data:${rendered.mimeType};base64,${rendered.base64}`;
 
-      // the image is captured — this ink's job is done. Discard the strokes
-      // that were part of this turn (only ones we ourselves marked ephemeral;
-      // never touches pre-existing permanent content) so they never persist,
-      // regardless of what the request below does.
-      const sentIds = new Set(items.filter(isStroke).map((it) => it.id).filter((id) => st.inkIds.has(id)));
+      // the image is captured — this ink's job is done. Discard whatever was
+      // part of this turn (only items we ourselves marked ephemeral; never
+      // touches pre-existing permanent content) so it never persists,
+      // regardless of what the request below does. Freehand ink lands as
+      // 'add-stroke' ops, but a stroke that got snap-recognized into a line
+      // commits as a 'shape' item instead (see PageCanvas.commitLine) — both
+      // end up tracked in inkIds the same way, so both are removed here.
+      const sentIds = new Set(items.map((it) => it.id).filter((id) => st.inkIds.has(id)));
       if (sentIds.size) {
-        store.removeStrokes(pageId, sentIds);
+        store.removeItems(pageId, sentIds);
         for (const id of sentIds) st.inkIds.delete(id);
         this.host.refreshPage(pageId);
       }
