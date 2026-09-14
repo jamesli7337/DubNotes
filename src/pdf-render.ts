@@ -16,6 +16,17 @@ const CACHE_MAX = 8;
 /** Render scale: crisp at 2× on high-DPR screens, never more. */
 const RENDER_DPR = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
 
+/**
+ * pdf.js 6.x decodes JBIG2 and CCITT-fax images (both share the same
+ * decoder) and JPEG2000 through WASM modules it fetches on demand from this
+ * base directory (see scripts/copy-pdfjs-wasm.mjs, which copies them out of
+ * node_modules/pdfjs-dist/wasm at predev/prebuild so they're served at a
+ * stable, un-hashed path `wasmUrl` can append its own filenames to). Without
+ * this option, pdf.js can't load those decoders — and instead of throwing,
+ * `page.render()` resolves "successfully" having silently painted nothing.
+ */
+const PDFJS_WASM_URL = `${import.meta.env.BASE_URL}pdfjs-wasm/`;
+
 let pdfjsPromise: Promise<PdfJs> | null = null;
 function pdfjs(): Promise<PdfJs> {
   if (!pdfjsPromise) {
@@ -36,7 +47,7 @@ function document(assetId: string): Promise<PdfDoc> {
     p = (async () => {
       const [lib, asset] = await Promise.all([pdfjs(), getAsset(assetId)]);
       if (!asset) throw new Error('PDF asset not found');
-      return lib.getDocument({ data: new Uint8Array(asset.data.slice(0)) }).promise;
+      return lib.getDocument({ data: new Uint8Array(asset.data.slice(0)), wasmUrl: PDFJS_WASM_URL }).promise;
     })();
     docs.set(assetId, p);
     p.catch(() => docs.delete(assetId)); // let a failed load be retried later
@@ -47,6 +58,25 @@ function document(assetId: string): Promise<PdfDoc> {
 const rendered = new Map<string, HTMLCanvasElement>(); // insertion order = age
 const inFlight = new Map<string, Promise<HTMLCanvasElement>>();
 const key = (assetId: string, page: number): string => `${assetId}#${page}`;
+
+/**
+ * True if every sampled pixel is (near-)white, i.e. nothing but the pre-fill
+ * survived the render. pdf.js can resolve `render().promise` successfully
+ * while having silently failed to paint an image it can't decode (seen with
+ * certain CCITT-fax-encoded scans — no exception, no rejected promise, just
+ * an empty page) — this is the general backstop for that whole class of
+ * failure, not specific to CCITT. Sampled on a stride rather than every pixel
+ * (a full page canvas can be a few megapixels) since a real failure leaves
+ * the *entire* canvas untouched, so a stride can't miss it.
+ */
+function looksBlank(ctx: CanvasRenderingContext2D, width: number, height: number): boolean {
+  const { data } = ctx.getImageData(0, 0, width, height);
+  const stride = 4 * 97; // steps by 97 pixels; prime-ish so it doesn't alias a regular pattern
+  for (let i = 0; i < data.length; i += stride) {
+    if (data[i] < 250 || data[i + 1] < 250 || data[i + 2] < 250) return false;
+  }
+  return true;
+}
 
 async function render(assetId: string, page: number): Promise<HTMLCanvasElement> {
   const doc = await document(assetId);
@@ -63,14 +93,26 @@ async function render(assetId: string, page: number): Promise<HTMLCanvasElement>
   ctx.fillRect(0, 0, c.width, c.height);
   await p.render({ canvas: c, canvasContext: ctx, viewport }).promise;
   p.cleanup();
+  if (looksBlank(ctx, c.width, c.height)) {
+    throw new Error(`PDF page ${page} rendered blank (an image on it may use an unsupported codec)`);
+  }
   return c;
 }
 
-/** Resolves with the rendered page (cached). */
+/** Pages that failed to render (an exception, or looksBlank) — remembered so a permanently-broken page isn't retried forever. */
+const failed = new Set<string>();
+
+/** True once a page has been tried and failed (see `failed`'s own doc comment). */
+export function isPdfPageFailed(assetId: string, page: number): boolean {
+  return failed.has(key(assetId, page));
+}
+
+/** Resolves with the rendered page (cached), or rejects if it failed to render (also cached — see `failed`). */
 export function ensurePdfPage(assetId: string, page: number): Promise<HTMLCanvasElement> {
   const k = key(assetId, page);
   const hit = rendered.get(k);
   if (hit) return Promise.resolve(hit);
+  if (failed.has(k)) return Promise.reject(new Error('PDF page previously failed to render'));
   let p = inFlight.get(k);
   if (!p) {
     p = render(assetId, page)
@@ -84,6 +126,10 @@ export function ensurePdfPage(assetId: string, page: number): Promise<HTMLCanvas
         }
         return c;
       })
+      .catch((err) => {
+        failed.add(k);
+        throw err;
+      })
       .finally(() => inFlight.delete(k));
     inFlight.set(k, p);
   }
@@ -92,7 +138,9 @@ export function ensurePdfPage(assetId: string, page: number): Promise<HTMLCanvas
 
 /**
  * Synchronous accessor for painting: the rendered page if it is ready, else
- * null — and `onReady` fires once it is (or never, if rendering fails).
+ * null — `onReady` fires once rendering settles, whether it succeeded (call
+ * `getPdfPage` again to get the bitmap) or failed (call `isPdfPageFailed` to
+ * tell a genuine failure apart from "still loading").
  */
 export function getPdfPage(assetId: string, page: number, onReady?: () => void): HTMLCanvasElement | null {
   const hit = rendered.get(key(assetId, page));
@@ -102,7 +150,8 @@ export function getPdfPage(assetId: string, page: number, onReady?: () => void):
     rendered.set(key(assetId, page), hit);
     return hit;
   }
+  if (failed.has(key(assetId, page))) return null;
   const p = ensurePdfPage(assetId, page);
-  if (onReady) p.then(onReady, () => undefined);
+  if (onReady) p.then(onReady, onReady);
   return null;
 }

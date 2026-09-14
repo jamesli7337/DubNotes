@@ -7,11 +7,14 @@ import { uid } from './util';
 
 pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
 
+/** Same WASM decoders pdf-render.ts points at — see its own doc comment on PDFJS_WASM_URL. */
+const PDFJS_WASM_URL = `${import.meta.env.BASE_URL}pdfjs-wasm/`;
+
 /** Reads a PDF's bytes and page count without rasterising anything. */
 async function readPdf(file: File): Promise<{ data: ArrayBuffer; total: number }> {
   const data = await file.arrayBuffer();
   // parse once just to validate the file and count its pages
-  const task = pdfjs.getDocument({ data: new Uint8Array(data.slice(0)) });
+  const task = pdfjs.getDocument({ data: new Uint8Array(data.slice(0)), wasmUrl: PDFJS_WASM_URL });
   const doc = await task.promise;
   const total = doc.numPages;
   await task.destroy();

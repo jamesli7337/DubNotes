@@ -1,4 +1,4 @@
-import { getPdfPage } from '../pdf-render';
+import { getPdfPage, isPdfPageFailed } from '../pdf-render';
 import type { ImageElement, PageBackground, PageElement, Paper, ShapeElement, TapeElement, TextElement } from '../types';
 import { resolveInkColor } from './freehand';
 
@@ -122,7 +122,11 @@ export function backgroundBitmap(
 /**
  * Paints a page background (an imported PDF page) fitted inside `w × h` and
  * centred, over the paper fill and under everything else. While a PDF page is
- * still rendering, a light placeholder marks its area.
+ * still rendering, a light placeholder marks its area; if it failed to render
+ * (see pdf-render.ts's `looksBlank`/`isPdfPageFailed` — an unsupported image
+ * codec resolves "successfully" with nothing painted, so this can't rely on
+ * an exception alone), a more visible placeholder says so, rather than
+ * leaving what would otherwise look like a page that silently imported empty.
  */
 export function drawBackground(
   ctx: CanvasRenderingContext2D,
@@ -133,7 +137,15 @@ export function drawBackground(
 ): void {
   const bmp = backgroundBitmap(bg, onReady);
   if (!bmp) {
-    if (bg.assetId) {
+    if (bg.assetId && isPdfPageFailed(bg.assetId, bg.page)) {
+      ctx.fillStyle = '#e3e1da';
+      ctx.fillRect(0, 0, w, h);
+      ctx.fillStyle = '#79766c';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.font = textFont(22);
+      ctx.fillText("This page couldn't be rendered", w / 2, h / 2);
+    } else if (bg.assetId) {
       ctx.fillStyle = 'rgba(128, 128, 128, 0.08)';
       ctx.fillRect(0, 0, w, h);
     }
