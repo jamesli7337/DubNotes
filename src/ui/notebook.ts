@@ -37,7 +37,7 @@ import type {
 } from '../types';
 import { clamp, isStroke } from '../util';
 import { loadImageFile } from '../media';
-import { alertDialog, openAnchoredModal, openModal, textPrompt, type Modal } from './dialog';
+import { alertDialog, confirmDialog, openAnchoredModal, openModal, textPrompt, type Modal } from './dialog';
 import { blockGestures, el } from './dom';
 import { icon, type IconName } from './icon';
 
@@ -84,6 +84,7 @@ class NotebookView {
   private toolsOptionsEl!: HTMLElement;
   private titleEl!: HTMLElement;
   private imageInput!: HTMLInputElement;
+  private pdfInput!: HTMLInputElement;
   private undoBtn!: HTMLButtonElement;
   private redoBtn!: HTMLButtonElement;
   /** Single app-bar AI-mode controls, acting on whichever page is "current" (see setCurrentPage). */
@@ -92,6 +93,8 @@ class NotebookView {
   /** View zoom (1 = 100%); pages are CSS-scaled, so pointer maths stays in page units. */
   private zoom = 1;
   private pinch: { d0: number; z0: number; mx: number; my: number; cx: number; cy: number } | null = null;
+  /** Hand tool, mouse only — touch/pen panning is native (touch-action), see bindHandToolGestures. */
+  private handPan: { pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null = null;
 
   private observer: IntersectionObserver;
   private readonly pcByPage = new Map<string, PageCanvas>();
@@ -113,6 +116,23 @@ class NotebookView {
   /** In-app clipboard: deep copies of the last copied items and where they came from. */
   private clipboard: PageItem[] = [];
   private clipboardPage: string | null = null;
+  /**
+   * Guards the paper-settings button against its own touch ghost-click: on a
+   * touch device, dismissing the (non-anchored, centred) paper menu via a tap
+   * on its backdrop still lets the browser's own compatibility `click` event
+   * through afterward — unlike mousedown/mouseup, it isn't reliably
+   * suppressed by calling preventDefault() on pointerdown (see openModal's
+   * backdrop-dismiss handler). That synthetic click lands on whatever the
+   * backdrop's removal just revealed — the paper button itself — and
+   * reopens the menu it just closed. Sidesteps the same-icon `if already
+   * open, close` toggle the anchored popovers use (this modal has no such
+   * state to check, and shouldn't gain click-through-clearance semantics
+   * just to work around this) by simply ignoring the button's click for a
+   * brief window right after an outside-tap dismiss.
+   */
+  private paperMenuGuardUntil = 0;
+  /** Same touch-ghost-click guard as paperMenuGuardUntil, for the page-manager button. */
+  private pageMgrGuardUntil = 0;
   /** Ruler / protractor: view-only, lives on one page, re-shown when that page remounts. */
   private guideKind: GuideKind | null = null;
   private guidePageId: string | null = null;
@@ -126,6 +146,8 @@ class NotebookView {
    * the new one.
    */
   private calloutEl: HTMLElement | null = null;
+  /** The visible pill inside calloutEl — a separate element so its `overflow: hidden` (which rounds the outer buttons' corners to match the pill) doesn't also clip the arrow, which lives on calloutEl itself. */
+  private calloutPill: HTMLElement | null = null;
   private calloutPc: PageCanvas | null = null;
   /** The frame the callout is currently positioned against — re-placed (not re-shown) on scroll/resize, since neither changes the frame itself, only where it lands on screen. */
   private calloutFrame: Frame | null = null;
@@ -292,6 +314,13 @@ class NotebookView {
     imgBtn.append(icon('image'));
     imgBtn.addEventListener('click', () => this.imageInput.click());
 
+    // appends a PDF's pages after the page in view, vs. the library's own
+    // "Import file" which creates a whole new notebook from a PDF — same
+    // underlying pdf-import.ts parsing, different insertion point.
+    const pdfBtn = el('button', { class: 'iconbtn', title: 'Import PDF pages', 'aria-label': 'Import PDF pages' });
+    pdfBtn.append(icon('pdf'));
+    pdfBtn.addEventListener('click', () => this.pdfInput.click());
+
     const exportBtn = el('button', { class: 'iconbtn', title: 'Export', 'aria-label': 'Export' });
     exportBtn.append(icon('export'));
     exportBtn.addEventListener('click', () => this.openExportMenu(exportBtn));
@@ -301,10 +330,21 @@ class NotebookView {
     // page is currently in view (same page this bar's other per-page actions
     // — AI toggle/send — already target).
     const paperBtn = el('button', { class: 'iconbtn', title: 'Customize paper', 'aria-label': 'Customize paper' });
-    paperBtn.append(icon('palette'));
+    paperBtn.append(icon('paper'));
     paperBtn.addEventListener('click', () => {
+      if (Date.now() < this.paperMenuGuardUntil) return; // swallow the touch ghost-click right after a dismiss — see the field's own doc comment
       const page = this.currentPageId ? store.pages.get(this.currentPageId) : undefined;
       if (page) this.openPaperMenu(page);
+    });
+
+    // lists every page as a thumbnail: reorder / duplicate / delete, and jump
+    // to one by tapping it. Page deletion now lives here (see openPageManager's
+    // own doc comment) rather than in the paper-settings menu.
+    const pagesBtn = el('button', { class: 'iconbtn', title: 'Manage pages', 'aria-label': 'Manage pages' });
+    pagesBtn.append(icon('pages'));
+    pagesBtn.addEventListener('click', () => {
+      if (Date.now() < this.pageMgrGuardUntil) return; // same touch ghost-click guard as the paper button, see paperMenuGuardUntil
+      void this.openPageManager();
     });
 
     // three grid zones (back | title | actions) so the title sits truly
@@ -312,7 +352,7 @@ class NotebookView {
     // — undo/redo used to live in the right zone; now that they're in the
     // dock's top row instead, this keeps the bar from reading lopsided.
     const rightGroup = el('div', { class: 'nb-appbar__right' });
-    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, imgBtn, exportBtn, paperBtn);
+    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, imgBtn, pdfBtn, exportBtn, pagesBtn, paperBtn);
     bar.append(back, this.titleEl, rightGroup);
 
     // Notability-style dock: a fixed top row (tools + undo/redo, never reflows)
@@ -325,6 +365,7 @@ class NotebookView {
     this.scrollEl = el('div', { class: 'nb-scroll' });
     blockGestures(this.scrollEl);
     this.bindZoomGestures();
+    this.bindHandToolGestures();
     // scrolling/resizing changes where the selection lands on screen without
     // changing its frame — reposition the callout (if open) to match; a fresh
     // pageRect() picks up the new scroll/zoom, same idea as openModal's
@@ -347,7 +388,19 @@ class NotebookView {
       if (file) void this.insertImage(file);
     });
 
-    view.append(bar, this.toolsEl, this.scrollEl, this.imageInput);
+    this.pdfInput = el('input', {
+      type: 'file',
+      accept: 'application/pdf,.pdf',
+      style: 'display:none',
+      'aria-hidden': 'true',
+    }) as HTMLInputElement;
+    this.pdfInput.addEventListener('change', () => {
+      const file = this.pdfInput.files?.[0];
+      this.pdfInput.value = '';
+      if (file) void this.importPdfPagesHere(file);
+    });
+
+    view.append(bar, this.toolsEl, this.scrollEl, this.imageInput, this.pdfInput);
     this.aiMode.mountPanel(view); // fixed-position, so it overlays regardless of where it sits in the DOM
     this.root.replaceChildren(view);
 
@@ -422,6 +475,38 @@ class NotebookView {
     );
   }
 
+  /**
+   * Hand tool: drag anywhere to pan. Touch and pen already pan for free —
+   * `touch-action: pan-x pan-y` on .nb-scroll covers both (PageCanvas's own
+   * onDown steps aside entirely for this tool, see its own comment there,
+   * and lets the event bubble here rather than consuming it). Mice have no
+   * such native gesture, so this handles that one case manually — scoped to
+   * `pointerType === 'mouse'` specifically, so it never double-pans a touch
+   * or pen drag that the browser is already panning on its own.
+   */
+  private bindHandToolGestures(): void {
+    const s = this.scrollEl;
+    s.addEventListener('pointerdown', (e) => {
+      if (toolState.kind !== 'hand' || e.pointerType !== 'mouse') return;
+      this.handPan = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, scrollLeft: s.scrollLeft, scrollTop: s.scrollTop };
+      try {
+        s.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    });
+    s.addEventListener('pointermove', (e) => {
+      const p = this.handPan;
+      if (!p || e.pointerId !== p.pointerId) return;
+      s.scrollLeft = p.scrollLeft - (e.clientX - p.x);
+      s.scrollTop = p.scrollTop - (e.clientY - p.y);
+    });
+    const end = (e: PointerEvent): void => {
+      if (this.handPan?.pointerId === e.pointerId) this.handPan = null;
+    };
+    s.addEventListener('pointerup', end);
+    s.addEventListener('pointercancel', end);
+  }
 
   // --------------------------------------------------------------- export
   private openExportMenu(anchor: HTMLElement): void {
@@ -508,6 +593,7 @@ class NotebookView {
   private renderTools(): void {
     this.sizePopover?.close(); // switching tools (or any dock rebuild) dismisses the size popover
     this.colorRefreshers = []; // old closures would target elements this rebuild is about to discard
+    this.scrollEl.classList.toggle('nb-scroll--hand', toolState.kind === 'hand'); // grab cursor, mouse-drag-to-pan feedback
     // `top`: the fixed row (tool icons + undo/redo) — same content/size no
     // matter what's selected. `opts`: the fixed-height row below it, whose
     // *content* changes per tool but whose height (via CSS) never does, so
@@ -550,6 +636,7 @@ class NotebookView {
       toolBtn('shapes', 'shapes', 'Shapes'),
       toolBtn('tape', 'tape', 'Tape'),
       toolBtn('laser', 'laser', 'Laser pointer'),
+      toolBtn('hand', 'hand', 'Hand — drag to pan with pen or mouse, like a finger'),
       el('span', { class: 'divider' })
     );
 
@@ -586,6 +673,9 @@ class NotebookView {
         break;
       case 'laser':
         opts.append(el('span', { class: 'hint', text: 'Point and drag: the trail fades and is never saved.' }));
+        break;
+      case 'hand':
+        opts.append(el('span', { class: 'hint', text: 'Drag anywhere — with the pen, a finger, or the mouse — to pan the page.' }));
         break;
       case 'text':
         opts.append(
@@ -711,6 +801,36 @@ class NotebookView {
     }
     target.insertImage(loaded.src, loaded.w, loaded.h);
     this.renderTools();
+  }
+
+  /**
+   * Imports a PDF's pages, appended right after the page in view, via the
+   * same pdf-import.ts parsing the library's "Import file" uses for a
+   * whole new notebook — this just targets "append to this notebook"
+   * instead. A non-dismissable progress dialog covers the read + per-page
+   * setup so a large PDF never looks like a frozen screen.
+   */
+  private async importPdfPagesHere(file: File): Promise<void> {
+    const pages = store.pagesOf(this.nb.id);
+    const current = this.currentPageId ? store.pages.get(this.currentPageId) : undefined;
+    const afterIndex = current?.index ?? pages.length - 1;
+
+    const box = el('div', { class: 'dlg' });
+    const msg = el('p', { class: 'dlg__msg', text: 'Reading PDF…' });
+    box.append(el('h2', { class: 'dlg__title', text: `Importing ${file.name}` }), msg);
+    const progress = openModal(box, { dismissable: false });
+    try {
+      const { importPdfPages } = await import('../pdf-import'); // pdf.js is loaded only when needed
+      await importPdfPages(file, this.nb.id, afterIndex, (done, total) => {
+        msg.textContent = `Preparing page ${done} of ${total}…`;
+      });
+      progress.close();
+      store.enforceTrailingBlank(this.nb.id); // an imported PDF page isn't blank, so this may add one back
+      this.syncPages();
+    } catch (err) {
+      progress.close();
+      await alertDialog({ title: 'Import failed', message: (err as Error).message || undefined });
+    }
   }
 
   /** Anchored dropdown with the two eraser modes; the choice is remembered in tool state. */
@@ -922,35 +1042,33 @@ class NotebookView {
   private hideSelectionCallout(): void {
     this.calloutEl?.remove();
     this.calloutEl = null;
+    this.calloutPill = null;
     this.calloutFrame = null;
   }
 
   /** Rebuilds the callout's buttons in place (e.g. Paste appearing right after a Copy) without moving it. */
   private refreshSelectionCallout(): void {
-    if (!this.calloutEl) return;
-    this.renderCalloutButtons(this.calloutEl);
+    if (!this.calloutPill) return;
+    this.renderCalloutButtons(this.calloutPill);
   }
 
+  /** Text-label items, iOS-callout order — Duplicate, Cut, Copy, [Paste], Delete. */
   private renderCalloutButtons(container: HTMLElement): void {
     container.replaceChildren();
-    const divider = (): HTMLElement => el('span', { class: 'sel-callout__divider' });
-    const btn = (name: IconName, label: string, onClick: () => void): HTMLElement => {
-      const b = el('button', { class: 'sel-callout__btn', title: label, 'aria-label': label });
-      b.append(icon(name, 'sm'));
+    const items: Array<[string, () => void]> = [
+      ['Duplicate', () => this.duplicateSelection()],
+      ['Cut', () => this.cutSelection()],
+      ['Copy', () => this.copySelection()],
+    ];
+    if (this.clipboard.length) items.push(['Paste', () => this.pasteClipboard()]);
+    items.push(['Delete', () => this.selPc?.deleteSelection()]);
+
+    items.forEach(([label, onClick], i) => {
+      if (i > 0) container.append(el('span', { class: 'sel-callout__divider' }));
+      const b = el('button', { class: 'sel-callout__btn', role: 'menuitem', text: label });
       b.addEventListener('click', onClick);
-      return b;
-    };
-    container.append(btn('copy', 'Copy', () => this.copySelection()));
-    container.append(divider());
-    container.append(btn('cut', 'Cut', () => this.cutSelection()));
-    if (this.clipboard.length) {
-      container.append(divider());
-      container.append(btn('paste', 'Paste', () => this.pasteClipboard()));
-    }
-    container.append(divider());
-    container.append(btn('delete', 'Delete', () => this.selPc?.deleteSelection()));
-    container.append(divider());
-    container.append(btn('duplicate', 'Duplicate', () => this.duplicateSelection()));
+      container.append(b);
+    });
   }
 
   /**
@@ -973,9 +1091,11 @@ class NotebookView {
     }
     if (!this.calloutEl) {
       this.calloutEl = el('div', { class: 'sel-callout', role: 'menu' });
+      this.calloutPill = el('div', { class: 'sel-callout__pill' });
+      this.calloutEl.append(this.calloutPill);
       document.body.append(this.calloutEl);
     }
-    this.renderCalloutButtons(this.calloutEl);
+    this.renderCalloutButtons(this.calloutPill!);
     this.calloutFrame = frame;
     this.positionCallout(this.calloutEl, frame, pageRect);
   }
@@ -1430,7 +1550,14 @@ class NotebookView {
     const confirmBtn = el('button', { class: 'primary dlg__wide', text: 'Confirm' });
     wrap.append(confirmBtn);
 
-    const modal = openModal(wrap);
+    const modal = openModal(wrap, {
+      // see paperMenuGuardUntil's own doc comment: arms on every close, not
+      // just a backdrop-tap dismiss, since the Confirm button's own ghost
+      // click can't land on the paper button anyway — simplest to just always set it.
+      onClose: () => {
+        this.paperMenuGuardUntil = Date.now() + 400;
+      },
+    });
     confirmBtn.addEventListener('click', () => {
       store.setPaper(page.id, draft, scope);
       if (scope === 'all') for (const p of store.pagesOf(this.nb.id)) this.refreshPagePaper(p);
@@ -1441,11 +1568,10 @@ class NotebookView {
   }
 
   /**
-   * Deletes a page (undo-tracked). Currently unreferenced: this used to be
-   * wired to a "Delete page" button in openPaperMenu, removed from there on
-   * request. Left in place, not deleted, so it's ready to wire to wherever
-   * page deletion should live instead (e.g. a per-page context menu) — there
-   * is presently no UI path to it at all.
+   * Deletes a page (undo-tracked). Was previously unreferenced — a "Delete
+   * page" button in openPaperMenu was removed on request, leaving this ready
+   * to rewire; the page manager (openPageManager) is now that place, per the
+   * same request.
    */
   private removePage(page: Page): void {
     const strokes = store.strokesOf(page.id).map((s) => ({ ...s }));
@@ -1458,6 +1584,126 @@ class NotebookView {
   /** Runs the "one trailing blank page" invariant; reconciles pages if it changed structure. */
   private enforceAndMaybeRerender(): void {
     if (store.enforceTrailingBlank(this.nb.id)) this.syncPages();
+  }
+
+  /** Scrolls to a page and marks it "current" right away (rather than waiting for the scroll to settle and the view-intersection observer to catch up). */
+  private goToPage(pageId: string): void {
+    this.wrapById.get(pageId)?.scrollIntoView({ block: 'start' });
+    this.setCurrentPage(pageId);
+  }
+
+  /**
+   * Full-screen page manager: every page as a thumbnail, in order — reorder
+   * (move up/down; drag-and-drop was skipped in favour of buttons, which are
+   * simpler to get right across mouse/touch/pen than a DnD implementation,
+   * per the task's own suggested fallback), duplicate, delete, or tap one to
+   * jump to it. Thumbnails are rendered once per open and cached in `thumbs`
+   * for the rest of the session — reordering/deleting just redraws the list
+   * from the cache; only a freshly duplicated page renders new pixels.
+   */
+  private async openPageManager(): Promise<void> {
+    const { renderPageCanvas } = await import('../export/raster'); // pulls in the (lazy) export/render code only when this opens
+    // rendered wider than the CSS grid's minimum column (150px) since the
+    // thumbnail box stretches to fill wider columns on a big screen —
+    // the canvas would otherwise upscale and look soft
+    const THUMB_W = 260;
+    const thumbs = new Map<string, HTMLCanvasElement>();
+
+    const wrap = el('div', { class: 'pagemgr' });
+    const head = el('div', { class: 'pagemgr__head' });
+    head.append(el('h2', { class: 'pagemgr__title', text: 'Pages' }));
+    const closeBtn = el('button', { class: 'iconbtn', title: 'Close', 'aria-label': 'Close' });
+    closeBtn.append(icon('close'));
+    head.append(closeBtn);
+    const grid = el('div', { class: 'pagemgr__grid' });
+    wrap.append(head, grid);
+
+    const modal = openModal(wrap, {
+      cardClass: 'modal-card--pages',
+      onClose: () => {
+        this.pageMgrGuardUntil = Date.now() + 400; // see pageMgrGuardUntil's own doc comment
+      },
+    });
+    closeBtn.addEventListener('click', () => modal.close());
+
+    const actionBtn = (name: IconName, label: string, disabled: boolean, run: () => void): HTMLButtonElement => {
+      const b = el('button', { class: 'iconbtn', title: label, 'aria-label': label }) as HTMLButtonElement;
+      b.append(icon(name));
+      b.disabled = disabled;
+      b.addEventListener('click', run);
+      return b;
+    };
+
+    const render = (): void => {
+      const pages = store.pagesOf(this.nb.id);
+      grid.replaceChildren();
+      pages.forEach((page, i) => {
+        const card = el('div', { class: 'pagemgr__card' });
+
+        const thumbBtn = el('button', {
+          class: 'pagemgr__thumbbtn',
+          title: `Go to page ${i + 1}`,
+          'aria-label': `Go to page ${i + 1}`,
+        });
+        const thumbBox = el('span', { class: 'pagemgr__thumb' });
+        thumbBtn.append(thumbBox, el('span', { class: 'pagemgr__num', text: `Page ${i + 1}` }));
+        thumbBtn.addEventListener('click', () => {
+          modal.close();
+          this.goToPage(page.id);
+        });
+
+        const cached = thumbs.get(page.id);
+        if (cached) {
+          thumbBox.append(cached);
+        } else {
+          void renderPageCanvas(page, THUMB_W / PAGE_W)
+            .then((c) => {
+              c.className = 'pagemgr__canvas';
+              thumbs.set(page.id, c);
+              thumbBox.replaceChildren(c);
+            })
+            .catch(() => {
+              /* a page whose background image fails to decode just keeps a blank thumbnail */
+            });
+        }
+
+        const actions = el('div', { class: 'pagemgr__actions' });
+        actions.append(
+          actionBtn('arrow-up', 'Move page up', i === 0, () => {
+            store.movePage(page.id, -1);
+            this.syncPages();
+            render();
+          }),
+          actionBtn('arrow-down', 'Move page down', i === pages.length - 1, () => {
+            store.movePage(page.id, 1);
+            this.syncPages();
+            render();
+          }),
+          actionBtn('duplicate', 'Duplicate page', false, () => {
+            store.duplicatePage(page.id);
+            store.enforceTrailingBlank(this.nb.id);
+            this.syncPages();
+            render();
+          }),
+          actionBtn('delete', 'Delete page', false, async () => {
+            const ok = await confirmDialog({
+              title: `Delete page ${i + 1}?`,
+              message: 'Its strokes and content will be removed from this notebook.',
+              confirmText: 'Delete page',
+              danger: true,
+            });
+            if (!ok) return;
+            thumbs.delete(page.id);
+            this.removePage(page);
+            render();
+          })
+        );
+
+        card.append(thumbBtn, actions);
+        grid.append(card);
+      });
+    };
+    render();
   }
 
   // -------------------------------------------------------------- history

@@ -1,7 +1,7 @@
 import { AUTO_COLOR } from './canvas/freehand';
 import { clamp } from './util';
 
-export type ToolKind = 'pen' | 'highlighter' | 'eraser' | 'lasso' | 'text' | 'shapes' | 'tape' | 'laser';
+export type ToolKind = 'pen' | 'highlighter' | 'eraser' | 'lasso' | 'text' | 'shapes' | 'tape' | 'laser' | 'hand';
 
 /** What the Shapes tool places on a drag. Lines are the pen's business (hold-to-snap), not this tool's. */
 export type PlacedShape = 'rect' | 'ellipse' | 'arrow' | 'triangle';

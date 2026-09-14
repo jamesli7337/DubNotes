@@ -493,11 +493,24 @@ export class PageCanvas {
    * finger-scrolling between strokes is untouched.
    */
   private blockNativeGesture = (e: TouchEvent): void => {
+    // Hand tool: the whole point of blocking the native gesture the rest of
+    // the time is to make a stylus draw instead of pan — here we want the
+    // opposite, so let WebKit's own recognizer (and touch-action) take it.
+    if (toolState.kind === 'hand') return;
     const stylus = Array.from(e.changedTouches).some((t) => (t as WebKitTouch).touchType === 'stylus');
     if (this.mode === 'draw' || stylus) e.preventDefault();
   };
 
   private onDown = (e: PointerEvent): void => {
+    // Hand tool: every pointer type just pans, nothing here reacts to it —
+    // no preventDefault, no capture, no tool dispatch. That leaves the event
+    // to bubble/behave natively: touch/pen panning happens for free via
+    // `touch-action: pan-x pan-y` on .nb-scroll (which the browser already
+    // applies to pen input, not just touch — the same CSS a finger drag
+    // relies on below); the mouse case (touch-action doesn't cover mice)
+    // is handled separately, by NotebookView's own drag-to-pan listener on
+    // .nb-scroll, which only activates for this tool.
+    if (toolState.kind === 'hand') return;
     if (e.pointerType === 'touch') {
       // finger drags scroll; a finger *tap* on a tape strip still peels /
       // covers it. blockNativeGesture (above) is what actually keeps a

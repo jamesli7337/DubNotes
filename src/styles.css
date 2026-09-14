@@ -1241,7 +1241,15 @@ select {
   -webkit-overflow-scrolling: touch;
   touch-action: pan-x pan-y;
   overscroll-behavior: contain;
-  padding: 130px 0 40vh;
+  padding: 118px 0 40vh;
+}
+/* Hand tool active: a grab cursor for the mouse-drag-to-pan path (see
+   bindHandToolGestures) — touch/pen panning is native and has no cursor. */
+.nb-scroll--hand {
+  cursor: grab;
+}
+.nb-scroll--hand:active {
+  cursor: grabbing;
 }
 .nb-empty {
   text-align: center;
@@ -1588,17 +1596,14 @@ select {
 .sel-callout {
   position: fixed;
   z-index: 55;
-  display: flex;
-  align-items: center;
-  padding: 4px;
-  background: var(--surface-c-lowest);
-  border-radius: var(--r-full);
-  box-shadow: var(--sh-3);
   --sel-callout-arrow-x: 50%;
 }
 .sel-callout[hidden] {
   display: none;
 }
+/* the arrow lives on this outer element, not the pill below — the pill's own
+   overflow: hidden (which rounds its end buttons to match its pill shape)
+   would otherwise clip the arrow too, since it pokes out past the pill's box. */
 .sel-callout::after {
   content: '';
   position: absolute;
@@ -1617,14 +1622,28 @@ select {
   top: -6px;
   clip-path: polygon(50% 0%, 0 100%, 100% 100%);
 }
+/* the visible pill: text-label items in a single row, thin dividers between
+   them, ends rounded to match the pill via overflow: hidden rather than
+   rounding each button — stays correct regardless of how many items show. */
+.sel-callout__pill {
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  background: var(--surface-c-lowest);
+  border-radius: var(--r-full);
+  box-shadow: var(--sh-3);
+}
 .sel-callout__btn {
-  width: 36px;
-  height: 32px;
-  padding: 0;
+  height: 38px;
+  padding: 0 16px;
   border: none;
+  border-radius: 0; /* only the pill's own overflow: hidden should round anything, at the true ends */
   background: transparent;
   color: var(--on-surface);
-  border-radius: var(--r-lg);
+  font-family: var(--font-body);
+  font-size: 15px;
+  font-weight: 500;
+  white-space: nowrap;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1633,14 +1652,9 @@ select {
 .sel-callout__btn:hover {
   background: var(--surface-c);
 }
-.sel-callout__btn .icon {
-  width: 17px;
-  height: 17px;
-}
 .sel-callout__divider {
   width: 1px;
-  align-self: stretch;
-  margin: 6px 0;
+  margin: 8px 0;
   background: var(--outline-variant);
   flex: none;
 }
@@ -1898,6 +1912,95 @@ select {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* page manager: a wider, taller modal-card variant (the default .modal-card
+ * caps out at 340px, far too narrow for a thumbnail grid) */
+.modal-card--pages {
+  width: min(920px, calc(100vw - 32px));
+  max-width: none;
+  height: min(760px, calc(100vh - 64px));
+  max-height: none;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden; /* .pagemgr__grid scrolls instead, so the header stays put */
+}
+.pagemgr {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 16px;
+  gap: 10px;
+}
+.pagemgr__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex: none;
+}
+.pagemgr__title {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 18px;
+  color: var(--primary);
+  margin: 0;
+}
+.pagemgr__grid {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 18px;
+  padding: 4px 4px 8px;
+  align-content: start;
+}
+.pagemgr__card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pagemgr__thumbbtn {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: none;
+  background: none;
+  padding: 0;
+  border-radius: var(--r-lg);
+  text-align: left;
+}
+.pagemgr__thumb {
+  display: block;
+  aspect-ratio: 820 / 1060;
+  border-radius: var(--r-lg);
+  background: #fff;
+  overflow: hidden;
+  box-shadow: var(--sh-1);
+  border: 1px solid var(--outline-variant);
+}
+.pagemgr__thumb canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.pagemgr__num {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--on-surface-variant);
+}
+.pagemgr__actions {
+  display: flex;
+  gap: 2px;
+}
+.pagemgr__actions .iconbtn {
+  width: 32px;
+  height: 32px;
+}
+.pagemgr__actions .icon {
+  width: 17px;
+  height: 17px;
 }
 
 .seg {

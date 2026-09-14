@@ -389,6 +389,56 @@ class Store {
     this.schedule();
   }
 
+  /** Moves a page one step earlier/later among its notebook's pages. False (no-op) at either end. */
+  movePage(pageId: string, dir: -1 | 1): boolean {
+    const page = this.pages.get(pageId);
+    if (!page) return false;
+    const siblings = this.pagesOf(page.notebookId);
+    const i = siblings.findIndex((p) => p.id === pageId);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= siblings.length) return false;
+    this.reindex(page.notebookId, pageId, j);
+    this.bump(page.notebookId);
+    this.schedule();
+    return true;
+  }
+
+  /**
+   * Duplicates a page — paper, background, and every stroke/element (each
+   * re-keyed with a fresh id, deep-copied where an array is mutated in place
+   * later) — and inserts the copy immediately after the original. Item
+   * `createdAt`s are reassigned sequentially (source order preserved) rather
+   * than copied verbatim, so z-order survives even if originals share a
+   * millisecond timestamp.
+   */
+  duplicatePage(pageId: string): Page | undefined {
+    const src = this.pages.get(pageId);
+    if (!src) return undefined;
+    const now = Date.now();
+    const copy: Page = {
+      id: uid(),
+      notebookId: src.notebookId,
+      index: src.index + 1,
+      paper: { ...src.paper },
+      createdAt: now,
+      updatedAt: now,
+    };
+    if (src.background) copy.background = { ...src.background };
+    this.insertPage(copy, copy.index);
+
+    this.itemsOf(pageId).forEach((it, i) => {
+      const createdAt = now + i;
+      if (isStroke(it)) {
+        this.addStroke({ ...it, id: uid(), pageId: copy.id, notebookId: copy.notebookId, createdAt, points: it.points.map((p) => [...p]) });
+      } else {
+        const el: PageElement = { ...it, id: uid(), pageId: copy.id, notebookId: copy.notebookId, createdAt };
+        if (el.kind === 'shape' && el.pts) el.pts = el.pts.map((p) => [...p]);
+        this.addElement(el);
+      }
+    });
+    return copy;
+  }
+
   /** Sets or clears a page's background image (imported PDF page). */
   setBackground(pageId: string, background: Page['background']): void {
     const p = this.pages.get(pageId);

@@ -20,14 +20,17 @@ export function openModal(
     anchor?: HTMLElement;
     /** anchored only: called after each (re)position — at open and on viewport changes */
     onReposition?: () => void;
+    /** extra class on the card, e.g. for a wider/full-height variant (see .modal-card--pages) */
+    cardClass?: string;
   } = {}
 ): Modal {
-  const { onClose, dismissable = true, anchor, onReposition } = opts;
+  const { onClose, dismissable = true, anchor, onReposition, cardClass } = opts;
 
   const backdrop = document.createElement('div');
   backdrop.className = anchor ? 'modal-backdrop modal-backdrop--anchored' : 'modal-backdrop';
   const card = document.createElement('div');
   card.className = anchor ? 'modal-card modal-card--anchored' : 'modal-card';
+  if (cardClass) card.classList.add(cardClass);
   card.setAttribute('role', 'dialog');
   card.setAttribute('aria-modal', 'true');
   card.append(content);
@@ -63,6 +66,16 @@ export function openModal(
     // outside taps are untouched — this only exempts the one element whose
     // own click handler is already responsible for this popover's state.
     if (anchor && anchor.contains(e.target as Node)) return;
+    // on a touch device, closing here removes whatever was covering the
+    // tapped spot (the backdrop) — the browser then still fires its own
+    // synthetic compatibility mousedown/mouseup/click for that same touch,
+    // which lands on whatever is *now* there and can re-trigger it (e.g. a
+    // second tap on the paper-settings button: this closes the menu, then
+    // the synthetic click hits the now-revealed button and reopens it —
+    // same "closes then instantly reopens" symptom as the anchored-popover
+    // race, different mechanism). preventDefault() on pointerdown is what
+    // Chrome documents as suppressing those compatibility events.
+    (e as PointerEvent).preventDefault?.();
     close();
   };
   const reflow = (): void => {
@@ -79,7 +92,12 @@ export function openModal(
     window.addEventListener('orientationchange', reflow);
   } else {
     backdrop.addEventListener('pointerdown', (e) => {
-      if (e.target === backdrop && dismissable) close();
+      if (e.target !== backdrop || !dismissable) return;
+      // see the matching comment on onOutside above — same touch-compatibility-
+      // click suppression, needed here too (this is the paper-settings menu's
+      // own path, non-anchored).
+      e.preventDefault();
+      close();
     });
   }
   document.addEventListener('keydown', onKey, true);
