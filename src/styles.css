@@ -330,6 +330,10 @@ select {
   width: 100%;
   height: 100%;
   display: block;
+  /* a landscape-imported first page renders at its own (wider) aspect ratio
+     (see renderThumb) — contain it inside this fixed-size icon rather than
+     stretching it to fill, which would visibly distort the page */
+  object-fit: contain;
 }
 .featured__body {
   display: flex;
@@ -409,6 +413,8 @@ select {
   width: 100%;
   height: 100%;
   display: block;
+  /* same reasoning as .featured__thumb canvas above */
+  object-fit: contain;
 }
 
 .nb-card__body {
@@ -1261,13 +1267,21 @@ select {
 .nb-scroll {
   --zoom: 1;
 }
+/* --pw/--ph: this page's own size (page units), set inline per page-wrap
+   (buildPageWrap) from pageW/pageH — defaults here cover a page with no
+   inline override (shouldn't happen, but keeps these rules self-contained).
+   Inherited by .page-frame/.page/.page canvas below, so a landscape-imported
+   PDF page (see pdf-import.ts) lays out at its own aspect ratio instead of
+   the fixed portrait box. */
 .page-wrap {
-  width: calc(820px * var(--zoom));
+  --pw: 820px;
+  --ph: 1060px;
+  width: calc(var(--pw) * var(--zoom));
   margin: 0 auto 22px;
 }
 .page-frame {
-  width: calc(820px * var(--zoom));
-  height: calc(1060px * var(--zoom));
+  width: calc(var(--pw) * var(--zoom));
+  height: calc(var(--ph) * var(--zoom));
 }
 .page-frame .page {
   transform: scale(var(--zoom));
@@ -1486,8 +1500,8 @@ select {
 }
 .page {
   position: relative;
-  width: 820px;
-  height: 1060px;
+  width: var(--pw);
+  height: var(--ph);
   background: #fff;
   border-radius: var(--r-lg);
   box-shadow: var(--sh-3), inset 0 0 0 1px rgba(4, 21, 52, 0.06);
@@ -1506,8 +1520,8 @@ select {
 .page canvas {
   position: absolute;
   inset: 0;
-  width: 820px;
-  height: 1060px;
+  width: var(--pw);
+  height: var(--ph);
   display: block;
   touch-action: pan-x pan-y; /* matches .page's default; overridden together by .page--capturing below */
 }
@@ -1704,6 +1718,51 @@ select {
 .sel-callout__divider {
   width: 1px;
   margin: 8px 0;
+  background: var(--outline-variant);
+  flex: none;
+}
+
+/* Invisible, positioned, genuinely hit-testable placeholder over a tape
+   strip's own screen rect while its resize/delete popover is open — a tape
+   strip is canvas-painted, not a real element, so this stands in as the
+   "trigger" openAnchoredModal's toggle-on-repeat-tap logic needs (see
+   NotebookView.showTapePopover's own doc comment for the full reasoning). */
+.tape-popover-anchor {
+  position: fixed;
+  z-index: 56;
+  background: transparent;
+}
+.tape-popover {
+  gap: 2px;
+}
+.tape-popover__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+}
+.tape-popover__label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--on-surface-variant);
+  flex: none;
+  width: 44px;
+}
+.tape-popover__range {
+  flex: 1;
+  min-width: 0;
+}
+.tape-popover__value {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--on-surface-variant);
+  flex: none;
+  width: 28px;
+  text-align: right;
+}
+.menu__divider {
+  height: 1px;
+  margin: 6px 4px;
   background: var(--outline-variant);
   flex: none;
 }

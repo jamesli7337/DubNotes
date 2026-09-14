@@ -1,29 +1,33 @@
 import { drawBackground, drawElement } from '../canvas/elements';
 import { drawStroke } from '../canvas/freehand';
 import { drawTemplate } from '../canvas/templates';
-import { DEFAULT_PAPER, PAGE_H, PAGE_W } from '../const';
+import { DEFAULT_PAPER, PAGE_H, PAGE_W, pageH, pageW } from '../const';
 import { store } from '../store';
 import type { Notebook } from '../types';
 import { isStroke } from '../util';
 
 /**
  * Renders a small static preview of a notebook's first page (template,
- * background, strokes + elements). `onReady` fires if an image wasn't decoded
- * yet, so the caller can render again.
+ * background, strokes + elements), sized to that page's own aspect ratio
+ * (a landscape-imported first page thumbnails wide/short, not squeezed into
+ * a portrait box). `onReady` fires if an image wasn't decoded yet, so the
+ * caller can render again.
  */
 export function renderThumb(nb: Notebook, wPx = 168, onReady?: () => void): HTMLCanvasElement {
-  const scale = wPx / PAGE_W;
+  const first = store.pagesOf(nb.id)[0];
+  const pw = first ? pageW(first) : PAGE_W;
+  const ph = first ? pageH(first) : PAGE_H;
+  const scale = wPx / pw;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   const c = document.createElement('canvas');
   c.width = Math.round(wPx * dpr);
-  c.height = Math.round(PAGE_H * scale * dpr);
+  c.height = Math.round(ph * scale * dpr);
   const ctx = c.getContext('2d');
   if (!ctx) return c;
   ctx.scale(dpr * scale, dpr * scale);
   try {
-    const first = store.pagesOf(nb.id)[0];
-    drawTemplate(ctx, first ? first.paper : DEFAULT_PAPER, PAGE_W, PAGE_H);
-    if (first?.background) drawBackground(ctx, first.background, PAGE_W, PAGE_H, onReady);
+    drawTemplate(ctx, first ? first.paper : DEFAULT_PAPER, pw, ph);
+    if (first?.background) drawBackground(ctx, first.background, pw, ph, onReady);
     if (first) {
       for (const it of store.itemsOf(first.id)) {
         if (isStroke(it)) drawStroke(ctx, it, first.paper);
@@ -36,7 +40,7 @@ export function renderThumb(nb: Notebook, wPx = 168, onReady?: () => void): HTML
   // hairline frame so an empty page still reads as a page
   ctx.strokeStyle = 'rgba(4, 21, 52, 0.14)';
   ctx.lineWidth = 2;
-  ctx.strokeRect(1, 1, PAGE_W - 2, PAGE_H - 2);
+  ctx.strokeRect(1, 1, pw - 2, ph - 2);
   return c;
 }
 

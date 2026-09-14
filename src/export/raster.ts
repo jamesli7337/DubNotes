@@ -1,13 +1,13 @@
 import { drawBackground, drawElement, loadImage } from '../canvas/elements';
 import { drawStroke } from '../canvas/freehand';
 import { drawTemplate } from '../canvas/templates';
-import { PAGE_H, PAGE_W } from '../const';
+import { pageH, pageW } from '../const';
 import { ensurePdfPage } from '../pdf-render';
 import { store } from '../store';
 import type { Notebook, Page } from '../types';
 import { clamp, downloadBlob, isStroke, safeFileName } from '../util';
 
-/** A vertical slice of the page, in page units — `top`/`bottom` clamped to `[0, PAGE_H]`. Omit for the whole page. */
+/** A vertical slice of the page, in page units — `top`/`bottom` clamped to `[0, pageH(page)]`. Omit for the whole page. */
 export interface PageRegion {
   top: number;
   bottom: number;
@@ -32,17 +32,19 @@ export async function preloadPageImages(page: Page): Promise<void> {
  */
 export async function renderPageCanvas(page: Page, scale = 2, region?: PageRegion): Promise<HTMLCanvasElement> {
   await preloadPageImages(page);
-  const top = region ? clamp(region.top, 0, PAGE_H) : 0;
-  const bottom = region ? clamp(region.bottom, top, PAGE_H) : PAGE_H;
+  const pw = pageW(page);
+  const ph = pageH(page);
+  const top = region ? clamp(region.top, 0, ph) : 0;
+  const bottom = region ? clamp(region.bottom, top, ph) : ph;
   const c = document.createElement('canvas');
-  c.width = Math.round(PAGE_W * scale);
+  c.width = Math.round(pw * scale);
   c.height = Math.round((bottom - top) * scale);
   const ctx = c.getContext('2d');
   if (!ctx) throw new Error('Could not create a canvas.');
   ctx.scale(scale, scale);
   if (top) ctx.translate(0, -top);
-  drawTemplate(ctx, page.paper, PAGE_W, PAGE_H);
-  if (page.background) drawBackground(ctx, page.background, PAGE_W, PAGE_H);
+  drawTemplate(ctx, page.paper, pw, ph);
+  if (page.background) drawBackground(ctx, page.background, pw, ph);
   for (const it of store.itemsOf(page.id)) {
     if (isStroke(it)) drawStroke(ctx, it, page.paper);
     else drawElement(ctx, it, page.paper);

@@ -2,13 +2,17 @@ import { degrees, LineCapStyle, PDFDocument, PDFFont, PDFPage, rgb, StandardFont
 import { backgroundBitmap, loadImage, TEXT_LINE_HEIGHT } from '../canvas/elements';
 import { HIGHLIGHTER_ALPHA, resolveInkColor, strokeOutline } from '../canvas/freehand';
 import { rotateAround } from '../canvas/geom';
-import { PAGE_H, PAGE_W } from '../const';
+import { PAGE_W, pageH, pageW } from '../const';
 import { store } from '../store';
 import type { Notebook, Page, PageElement, Paper, PaperColor, PaperSpacing, ShapeElement, TextElement } from '../types';
 import { downloadBlob, isStroke, safeFileName } from '../util';
 import { preloadPageImages } from './raster';
 
-/** Exported pages are Letter-width: 820 page units → 612 pt. */
+/** Page units → PDF points, fixed app-wide (calibrated against the default
+ *  portrait page: 820 page units → 612 pt, Letter width) — every page shares
+ *  this one scale regardless of its own size, so a page's own w/h (see
+ *  pageW/pageH) only changes which PDF page box it lands in, not how big a
+ *  page-unit is. */
 const SCALE = 612 / PAGE_W;
 
 // same values as canvas/templates.ts (kept private there); the export must match the screen
@@ -28,9 +32,12 @@ function color(css: string): RGB {
   return rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
 }
 
-/** Page units → PDF points, y flipped (PDF origin is bottom-left). */
+/** Page units → PDF points. */
 const px = (x: number): number => x * SCALE;
-const py = (y: number): number => (PAGE_H - y) * SCALE;
+/** Page units (top-down) → PDF points (PDF origin is bottom-left) — the flip
+ *  needs *this* page's own height, so it's built per-page in addPage and
+ *  threaded through as a parameter rather than a fixed module function. */
+type PyFn = (y: number) => number;
 
 /** SVG path (page units) for a closed polygon; drawn with pdf-lib's y-down SVG semantics from the page's top-left. */
 function polygonPath(pts: number[][]): string {
@@ -58,21 +65,21 @@ function ellipsePath(el: ShapeElement): string {
   );
 }
 
-function drawPaper(pdf: PDFPage, paper: Paper): void {
+function drawPaper(pdf: PDFPage, paper: Paper, pw: number, ph: number, py: PyFn): void {
   const ink = PAPER[paper.color];
-  pdf.drawRectangle({ x: 0, y: 0, width: px(PAGE_W), height: px(PAGE_H), color: color(ink.bg) });
+  pdf.drawRectangle({ x: 0, y: 0, width: px(pw), height: px(ph), color: color(ink.bg) });
   const gap = SPACING[paper.spacing];
   const rule = color(ink.rule);
   const line = (x1: number, y1: number, x2: number, y2: number): void =>
     pdf.drawLine({ start: { x: px(x1), y: py(y1) }, end: { x: px(x2), y: py(y2) }, thickness: 0.75, color: rule });
   if (paper.template === 'ruled') {
-    for (let y = gap * 1.5; y < PAGE_H - 4; y += gap) line(0, y, PAGE_W, y);
+    for (let y = gap * 1.5; y < ph - 4; y += gap) line(0, y, pw, y);
   } else if (paper.template === 'grid') {
-    for (let x = gap; x < PAGE_W; x += gap) line(x, 0, x, PAGE_H);
-    for (let y = gap; y < PAGE_H; y += gap) line(0, y, PAGE_W, y);
+    for (let x = gap; x < pw; x += gap) line(x, 0, x, ph);
+    for (let y = gap; y < ph; y += gap) line(0, y, pw, y);
   } else if (paper.template === 'dot') {
-    for (let x = gap; x < PAGE_W; x += gap) {
-      for (let y = gap; y < PAGE_H; y += gap) pdf.drawCircle({ x: px(x), y: py(y), size: 1.3 * SCALE, color: rule });
+    for (let x = gap; x < pw; x += gap) {
+      for (let y = gap; y < ph; y += gap) pdf.drawCircle({ x: px(x), y: py(y), size: 1.3 * SCALE, color: rule });
     }
   }
 }
@@ -123,7 +130,7 @@ function wrapPdf(text: string, font: PDFFont, size: number, maxWidth: number): s
   return lines;
 }
 
-function drawTextEl(pdf: PDFPage, el: TextElement, paper: Paper, font: PDFFont): void {
+function drawTextEl(pdf: PDFPage, el: TextElement, paper: Paper, font: PDFFont, py: PyFn): void {
   const size = el.fontSize * SCALE;
   const lineHeight = el.fontSize * TEXT_LINE_HEIGHT;
   const lead = (lineHeight - el.fontSize) / 2;
@@ -146,7 +153,7 @@ function drawTextEl(pdf: PDFPage, el: TextElement, paper: Paper, font: PDFFont):
   });
 }
 
-function drawShapeEl(pdf: PDFPage, el: ShapeElement, paper: Paper): void {
+function drawShapeEl(pdf: PDFPage, el: ShapeElement, paper: Paper, py: PyFn): void {
   const ink = color(resolveInkColor(el.color, paper));
   const thickness = el.size * SCALE;
   const cx = el.x + el.w / 2;
@@ -198,15 +205,15 @@ function drawShapeEl(pdf: PDFPage, el: ShapeElement, paper: Paper): void {
   }
 }
 
-async function drawElementPdf(doc: PDFDocument, pdf: PDFPage, el: PageElement, paper: Paper, font: PDFFont): Promise<void> {
+async function drawElementPdf(doc: PDFDocument, pdf: PDFPage, el: PageElement, paper: Paper, font: PDFFont, py: PyFn): Promise<void> {
   const cx = el.x + el.w / 2;
   const cy = el.y + el.h / 2;
   switch (el.kind) {
     case 'text':
-      drawTextEl(pdf, el, paper, font);
+      drawTextEl(pdf, el, paper, font, py);
       break;
     case 'shape':
-      drawShapeEl(pdf, el, paper);
+      drawShapeEl(pdf, el, paper, py);
       break;
     case 'tape':
       pdf.drawSvgPath(
@@ -237,18 +244,26 @@ async function drawElementPdf(doc: PDFDocument, pdf: PDFPage, el: PageElement, p
 
 async function addPage(doc: PDFDocument, page: Page, font: PDFFont): Promise<void> {
   await preloadPageImages(page);
-  const pdf = doc.addPage([px(PAGE_W), px(PAGE_H)]);
-  drawPaper(pdf, page.paper);
+  const pw = pageW(page);
+  const ph = pageH(page);
+  const py: PyFn = (y) => (ph - y) * SCALE;
+  const pdf = doc.addPage([px(pw), px(ph)]);
+  drawPaper(pdf, page.paper, pw, ph, py);
   if (page.background) {
-    // a v5 image background embeds as-is; a stored-PDF page is rendered (already cached by preloadPageImages) and embedded as JPEG
+    // a v5 image background embeds as-is; a stored-PDF page is rendered (already cached by preloadPageImages) and embedded as JPEG.
+    // A PDF-imported page's own w/h already match this image's aspect ratio
+    // (see pdf-import.ts), so this fills edge-to-edge same as the on-screen
+    // full-bleed rendering (canvas/elements.ts's drawBackground) — a legacy
+    // v5 image background (rarely a whole-page aspect match) still contains
+    // within the default-sized page as before.
     const bmp = backgroundBitmap(page.background);
     const src = page.background.src ?? (bmp ? (bmp.source as HTMLCanvasElement).toDataURL('image/jpeg', 0.85) : null);
     if (src) {
       const img = await embedDataUrl(doc, src);
-      const s = Math.min(PAGE_W / img.width, PAGE_H / img.height);
+      const s = Math.min(pw / img.width, ph / img.height);
       const w = img.width * s;
       const h = img.height * s;
-      pdf.drawImage(img, { x: px((PAGE_W - w) / 2), y: py((PAGE_H - h) / 2 + h), width: w * SCALE, height: h * SCALE });
+      pdf.drawImage(img, { x: px((pw - w) / 2), y: py((ph - h) / 2 + h), width: w * SCALE, height: h * SCALE });
     }
   }
   for (const it of store.itemsOf(page.id)) {
@@ -262,7 +277,7 @@ async function addPage(doc: PDFDocument, page: Page, font: PDFFont): Promise<voi
         opacity: hi ? HIGHLIGHTER_ALPHA : 1,
       });
     } else {
-      await drawElementPdf(doc, pdf, it, page.paper, font);
+      await drawElementPdf(doc, pdf, it, page.paper, font, py);
     }
   }
 }

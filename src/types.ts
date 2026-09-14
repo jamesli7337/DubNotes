@@ -136,6 +136,14 @@ export interface Page {
   paper: Paper;
   /** fitted inside the page, centred, drawn over the paper and under all content */
   background?: PageBackground;
+  /** This page's own size in page units, when it differs from the app's
+   *  default portrait page (see PAGE_W/PAGE_H in const.ts) — set for a page
+   *  imported from a PDF page with a non-default aspect ratio, so it can be
+   *  full-bleed without cropping. Undefined (the common case) means the
+   *  default size; read through `pageW`/`pageH` (const.ts), never these
+   *  fields directly, so the fallback stays in one place. */
+  w?: number;
+  h?: number;
   createdAt: number;
   updatedAt: number;
 }

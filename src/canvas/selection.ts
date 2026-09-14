@@ -1,4 +1,3 @@
-import { PAGE_H, PAGE_W } from '../const';
 import { icon } from '../ui/icon';
 import { rotateAround, type Frame } from './geom';
 
@@ -44,6 +43,9 @@ export class SelectionOverlay {
   private readonly box: HTMLElement;
   private readonly handleEls = new Map<Handle, HTMLElement>();
   private readonly rotEl: HTMLElement;
+  /** the page this overlay lives on, in page units — for the screen→page coordinate conversion in toPage. */
+  private readonly pw: number;
+  private readonly ph: number;
   private frame: Frame | null = null;
   private opts: OverlayOptions = { rotate: false, aspect: false, edges: 'all', passThrough: false };
 
@@ -56,9 +58,11 @@ export class SelectionOverlay {
     startAngle: number;
   } | null = null;
 
-  constructor(host: HTMLElement, hooks: OverlayHooks) {
+  constructor(host: HTMLElement, hooks: OverlayHooks, pw: number, ph: number) {
     this.host = host;
     this.hooks = hooks;
+    this.pw = pw;
+    this.ph = ph;
 
     this.box = document.createElement('div');
     this.box.className = 'sel-box';
@@ -148,8 +152,8 @@ export class SelectionOverlay {
   private toPage(e: PointerEvent): [number, number] {
     const r = this.host.getBoundingClientRect();
     return [
-      (e.clientX - r.left) * (PAGE_W / r.width),
-      (e.clientY - r.top) * (PAGE_H / r.height),
+      (e.clientX - r.left) * (this.pw / r.width),
+      (e.clientY - r.top) * (this.ph / r.height),
     ];
   }
 

@@ -16,7 +16,7 @@ import { icon } from './ui/icon';
 import { confirmDialog } from './ui/dialog';
 import { renderPageRegionImage } from './export/raster';
 import { itemBounds, unionRects } from './canvas/geom';
-import { PAGE_H } from './const';
+import { pageH } from './const';
 import { store } from './store';
 import { clearAiEntries, getAiEntries, putAiEntry } from './db';
 import { renderAiReply } from './ai-render';
@@ -50,10 +50,17 @@ interface AiPageState {
   /** page-units Y: top of the region the next turn will be read from. */
   turnTop: number;
   /** ids of strokes drawn while AI mode was active on this page — ephemeral:
-   * never undoable, removed once their turn is sent (or discarded if AI mode
-   * is turned off before that happens). Never holds a stroke the user drew
-   * with AI mode off. */
+   * removed once their turn is sent (or discarded if AI mode is turned off
+   * before that happens). Never holds a stroke the user drew with AI mode
+   * off. */
   inkIds: Set<string>;
+  /** This turn's own undo/redo history — only ever holds the 'add-stroke'/
+   * 'add-items' ops that created this turn's ink (see handleOp), entirely
+   * separate from NotebookView's main undo stack (which never sees AI ink at
+   * all). Cleared whenever the ink itself is cleared: on toggle-off
+   * (discardInk) and once a turn is sent (submitTurn). */
+  aiUndo: Op[];
+  aiRedo: Op[];
 }
 
 /** What `AiMode` needs from `NotebookView`, injected rather than imported to avoid a cycle. */
@@ -62,6 +69,8 @@ export interface AiModeHost {
   refreshPage(pageId: string): void;
   /** A page's active flag changed — lets the app-bar toggle/send buttons refresh if it's the current page. */
   onActiveChanged(pageId: string, active: boolean): void;
+  /** This page's AI-scoped undo/redo stacks changed — lets the app-bar undo/redo buttons refresh (enabled state) if it's the current page. */
+  onAiHistoryChanged(pageId: string): void;
 }
 
 export class AiMode {
@@ -104,6 +113,8 @@ export class AiMode {
       sending: false,
       turnTop: 0,
       inkIds: new Set(),
+      aiUndo: [],
+      aiRedo: [],
     });
   }
 
@@ -198,7 +209,14 @@ export class AiMode {
       // same violet turn ink, just committed as a shape item instead of a
       // stroke — track it the same way so it's discarded the same way too.
       for (const it of op.items) st.inkIds.add(it.id);
+    } else {
+      return; // not this turn's ink — doesn't touch the AI undo stack either
     }
+    // this turn's own undo history: a fresh piece of ink invalidates redo,
+    // same convention as NotebookView's main stack (see pushOp).
+    st.aiUndo.push(op);
+    st.aiRedo.length = 0;
+    this.host.onAiHistoryChanged(op.pageId);
   }
 
   /**
@@ -225,6 +243,62 @@ export class AiMode {
     this.pages.delete(pageId);
   }
 
+  /** Whether this page has any AI-mode ink left to undo — only meaningful while AI mode is active. */
+  canUndo(pageId: string): boolean {
+    return (this.pages.get(pageId)?.aiUndo.length ?? 0) > 0;
+  }
+
+  /** Whether this page has any undone AI-mode ink left to redo — only meaningful while AI mode is active. */
+  canRedo(pageId: string): boolean {
+    return (this.pages.get(pageId)?.aiRedo.length ?? 0) > 0;
+  }
+
+  /** Removes the most recently created piece of this turn's AI-mode ink. */
+  undo(pageId: string): void {
+    const st = this.pages.get(pageId);
+    if (!st || !st.aiUndo.length) return;
+    const op = st.aiUndo.pop()!;
+    this.invertInk(pageId, st, op);
+    st.aiRedo.push(op);
+    this.host.onAiHistoryChanged(pageId);
+  }
+
+  /** Restores the most recently undone piece of this turn's AI-mode ink. */
+  redo(pageId: string): void {
+    const st = this.pages.get(pageId);
+    if (!st || !st.aiRedo.length) return;
+    const op = st.aiRedo.pop()!;
+    this.forwardInk(pageId, st, op);
+    st.aiUndo.push(op);
+    this.host.onAiHistoryChanged(pageId);
+  }
+
+  /** Undoes one AI-ink creation op (only ever 'add-stroke' or 'add-items' — see handleOp). */
+  private invertInk(pageId: string, st: AiPageState, op: Op): void {
+    if (op.kind === 'add-stroke') {
+      store.removeStrokes(pageId, new Set([op.stroke.id]));
+      st.inkIds.delete(op.stroke.id);
+    } else if (op.kind === 'add-items') {
+      const ids = new Set(op.items.map((it) => it.id));
+      store.removeItems(pageId, ids);
+      for (const id of ids) st.inkIds.delete(id);
+    }
+    this.host.refreshPage(pageId);
+  }
+
+  /** Redoes one previously-undone AI-ink creation op, restoring the same ids. */
+  private forwardInk(pageId: string, st: AiPageState, op: Op): void {
+    if (op.kind === 'add-stroke') {
+      store.addStroke({ ...op.stroke });
+      st.inkIds.add(op.stroke.id);
+    } else if (op.kind === 'add-items') {
+      const items = op.items.map((it) => ({ ...it }));
+      store.addItems(items);
+      for (const it of items) st.inkIds.add(it.id);
+    }
+    this.host.refreshPage(pageId);
+  }
+
   /** Submits the current turn immediately — the only way a turn is ever sent, called by the app-bar send button, for whichever page is current. */
   sendNow(pageId: string): void {
     const st = this.pages.get(pageId);
@@ -232,8 +306,10 @@ export class AiMode {
     void this.submitTurn(pageId);
   }
 
-  /** Removes whatever ephemeral ink is still tracked (unsent) and repaints if any was. */
+  /** Removes whatever ephemeral ink is still tracked (unsent) and repaints if any was; also clears this turn's own undo/redo history, since it referred only to ink that just went away. */
   private discardInk(pageId: string, st: AiPageState): void {
+    st.aiUndo.length = 0;
+    st.aiRedo.length = 0;
     if (!st.inkIds.size) return;
     const removed = store.removeItems(pageId, st.inkIds);
     st.inkIds.clear();
@@ -260,7 +336,7 @@ export class AiMode {
     if (!items.length) return; // Send tapped but there's nothing new below the line (e.g. it was erased)
 
     const bounds = unionRects(items.map(itemBounds))!;
-    const bottom = Math.min(Math.max(bounds.y + bounds.h + 12, top + 1), PAGE_H);
+    const bottom = Math.min(Math.max(bounds.y + bounds.h + 12, top + 1), pageH(page));
 
     st.sending = true;
     this.applyVisual(pageId);
@@ -300,6 +376,13 @@ export class AiMode {
         store.removeItems(pageId, sentIds);
         for (const id of sentIds) st.inkIds.delete(id);
         this.host.refreshPage(pageId);
+      }
+      // this turn's own undo/redo history referred only to ink that's now
+      // sent (and removed above) — matches discardInk's clearing on toggle-off.
+      if (st.aiUndo.length || st.aiRedo.length) {
+        st.aiUndo.length = 0;
+        st.aiRedo.length = 0;
+        this.host.onAiHistoryChanged(pageId);
       }
 
       const res = await fetch(GEMINI_ENDPOINT, {

@@ -424,6 +424,8 @@ class Store {
       updatedAt: now,
     };
     if (src.background) copy.background = { ...src.background };
+    if (src.w !== undefined) copy.w = src.w;
+    if (src.h !== undefined) copy.h = src.h;
     this.insertPage(copy, copy.index);
 
     this.itemsOf(pageId).forEach((it, i) => {
@@ -445,6 +447,18 @@ class Store {
     if (!p) return;
     if (background) p.background = background;
     else delete p.background;
+    p.updatedAt = Date.now();
+    this.dirtyPg.add(pageId);
+    this.bump(p.notebookId);
+    this.schedule();
+  }
+
+  /** Sets a page's own size (page units), overriding the app's default portrait size — see `Page.w`/`Page.h`'s doc comment. Used by PDF import to match a source page's aspect ratio. */
+  setPageSize(pageId: string, w: number, h: number): void {
+    const p = this.pages.get(pageId);
+    if (!p) return;
+    p.w = w;
+    p.h = h;
     p.updatedAt = Date.now();
     this.dirtyPg.add(pageId);
     this.bump(p.notebookId);

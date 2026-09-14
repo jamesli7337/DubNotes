@@ -1,4 +1,4 @@
-import { PAGE_H, PAGE_W } from '../const';
+import { PAGE_W } from '../const';
 import { icon } from '../ui/icon';
 
 export type GuideKind = 'ruler' | 'protractor';
@@ -44,17 +44,22 @@ export class Guide {
   private readonly host: HTMLElement;
   private readonly root: HTMLElement;
   private readonly angleEl: HTMLElement;
+  /** the page this guide lives on, in page units — for placement bounds and screen↔page coordinate conversion (see toPage); the ruler/protractor's own drawn size stays fixed regardless (see RULER_LEN/PROTRACTOR_R). */
+  private readonly pw: number;
+  private readonly ph: number;
   private cx: number;
   private cy: number;
   private angle = 0;
   private drag: { pointerId: number; kind: 'move' | 'rotate'; startPt: [number, number]; cx: number; cy: number } | null =
     null;
 
-  constructor(host: HTMLElement, kind: GuideKind) {
+  constructor(host: HTMLElement, kind: GuideKind, pw: number, ph: number) {
     this.host = host;
     this.kind = kind;
-    this.cx = PAGE_W / 2;
-    this.cy = kind === 'ruler' ? PAGE_H * 0.4 : PAGE_H * 0.45;
+    this.pw = pw;
+    this.ph = ph;
+    this.cx = pw / 2;
+    this.cy = kind === 'ruler' ? ph * 0.4 : ph * 0.45;
 
     this.root = document.createElement('div');
     this.root.className = `guide guide--${kind}`;
@@ -128,7 +133,7 @@ export class Guide {
 
   private toPage(e: PointerEvent): [number, number] {
     const r = this.host.getBoundingClientRect();
-    return [(e.clientX - r.left) * (PAGE_W / r.width), (e.clientY - r.top) * (PAGE_H / r.height)];
+    return [(e.clientX - r.left) * (this.pw / r.width), (e.clientY - r.top) * (this.ph / r.height)];
   }
 
   private onDown = (e: PointerEvent): void => {
@@ -151,8 +156,8 @@ export class Guide {
     e.preventDefault();
     const pt = this.toPage(e);
     if (d.kind === 'move') {
-      this.cx = Math.min(Math.max(d.cx + pt[0] - d.startPt[0], 0), PAGE_W);
-      this.cy = Math.min(Math.max(d.cy + pt[1] - d.startPt[1], 0), PAGE_H);
+      this.cx = Math.min(Math.max(d.cx + pt[0] - d.startPt[0], 0), this.pw);
+      this.cy = Math.min(Math.max(d.cy + pt[1] - d.startPt[1], 0), this.ph);
     } else {
       // the grip sits at the ruler's right end / the protractor's apex
       let a = Math.atan2(pt[1] - this.cy, pt[0] - this.cx);

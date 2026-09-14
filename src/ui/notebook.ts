@@ -2,9 +2,9 @@ import { AiMode } from '../ai-mode';
 import { AUTO_COLOR, resolveInkColor } from '../canvas/freehand';
 import { rotateAround, type Frame } from '../canvas/geom';
 import type { GuideKind } from '../canvas/guide';
-import { PageCanvas } from '../canvas/page-canvas';
+import { PageCanvas, TAPE_MIN } from '../canvas/page-canvas';
 import type { Op } from '../canvas/page-canvas';
-import { DEFAULT_PAPER, PAGE_W } from '../const';
+import { DEFAULT_PAPER, PAGE_W, pageH, pageW } from '../const';
 import { store } from '../store';
 import {
   addCustomColor,
@@ -151,12 +151,33 @@ class NotebookView {
   private calloutPc: PageCanvas | null = null;
   /** The frame the callout is currently positioned against — re-placed (not re-shown) on scroll/resize, since neither changes the frame itself, only where it lands on screen. */
   private calloutFrame: Frame | null = null;
+
+  /**
+   * The tape resize/delete popover (see showTapePopover) — at most one open
+   * at a time, same as the selection callout. Unlike every other anchored
+   * popover in this app, a tape strip has no permanent DOM trigger to anchor
+   * to (it's canvas-painted, not a real element), so `tapePopoverAnchor` is
+   * one created on demand: an invisible, positioned, *actually hit-testable*
+   * div sitting over the strip's own screen rect for as long as its popover
+   * stays open — see showTapePopover's own doc comment for why that's what
+   * makes openAnchoredModal's toggle-on-repeat-tap behaviour work here too.
+   */
+  private tapePopoverAnchor: HTMLElement | null = null;
+  private tapePopoverModal: Modal | null = null;
+  private tapePopoverPc: PageCanvas | null = null;
+  private tapePopoverFrame: Frame | null = null;
+  private tapePopoverTapeId: string | null = null;
+
   /** Bound so the same reference can be added to and removed from `window` — see the scroll/resize wiring in buildChrome and its cleanup in onLeave. */
   private readonly repositionCallout = (): void => {
-    if (!this.calloutEl || !this.calloutPc || !this.calloutFrame) return;
-    const pageRect = this.calloutPc.pageRect();
-    if (!pageRect) return;
-    this.positionCallout(this.calloutEl, this.calloutFrame, pageRect);
+    if (this.calloutEl && this.calloutPc && this.calloutFrame) {
+      const pageRect = this.calloutPc.pageRect();
+      if (pageRect) this.positionCallout(this.calloutEl, this.calloutFrame, pageRect, pageW(this.calloutPc.page));
+    }
+    if (this.tapePopoverAnchor && this.tapePopoverPc && this.tapePopoverFrame) {
+      const pageRect = this.tapePopoverPc.pageRect();
+      if (pageRect) this.positionTapeAnchor(this.tapePopoverAnchor, this.tapePopoverFrame, pageRect, pageW(this.tapePopoverPc.page));
+    }
   };
 
   private readonly onKey: (e: KeyboardEvent) => void;
@@ -171,6 +192,9 @@ class NotebookView {
       refreshPage: (pageId) => this.rebuildIfMounted(pageId),
       onActiveChanged: (pageId) => {
         if (pageId === this.currentPageId) this.refreshAiControls();
+      },
+      onAiHistoryChanged: (pageId) => {
+        if (pageId === this.currentPageId) this.syncHistory();
       },
     });
     void this.aiMode.loadConversation(); // async; resolves after buildChrome's mountPanel has run
@@ -226,6 +250,7 @@ class NotebookView {
       window.removeEventListener('hashchange', this.onLeave);
       window.removeEventListener('resize', this.repositionCallout);
       this.hideSelectionCallout();
+      this.hideTapePopover();
       this.deactivateAll(); // commit an open text edit before the canvases go away
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
       this.observer.disconnect();
@@ -412,8 +437,11 @@ class NotebookView {
     this.renderTools();
     this.syncHistory();
     this.refreshAiControls();
-    // start fitted to the width on narrow screens, 100% otherwise
-    this.setZoom(Math.min(1, (this.scrollEl.clientWidth - 24) / PAGE_W) || 1);
+    // start fitted to the width on narrow screens, 100% otherwise — fit
+    // against the first page's own width (a landscape-imported first page is
+    // wider than the default, so it needs more shrinking to fit)
+    const first = store.pagesOf(this.nb.id)[0];
+    this.setZoom(Math.min(1, (this.scrollEl.clientWidth - 24) / (first ? pageW(first) : PAGE_W)) || 1);
   }
 
   // ----------------------------------------------------------------- zoom
@@ -1059,7 +1087,6 @@ class NotebookView {
 
   /** Text-label items, iOS-callout order — Duplicate, Cut, Copy, [Paste], Delete. */
   private renderCalloutButtons(container: HTMLElement): void {
-    container.replaceChildren();
     const items: Array<[string, () => void]> = [
       ['Duplicate', () => this.duplicateSelection()],
       ['Cut', () => this.cutSelection()],
@@ -1067,7 +1094,31 @@ class NotebookView {
     ];
     if (this.clipboard.length) items.push(['Paste', () => this.pasteClipboard()]);
     items.push(['Delete', () => this.selPc?.deleteSelection()]);
+    this.fillCalloutButtons(container, items);
+  }
 
+  /**
+   * The empty-lasso-selection variant (see showEmptyLassoCallout): nothing
+   * is selected, so Duplicate/Cut/Copy/Delete would all be no-ops — only
+   * Paste ever applies here. Unlike renderCalloutButtons (which hides Paste
+   * when the clipboard is empty — fine there, since Duplicate/Cut/Copy/
+   * Delete are always present alongside it), Paste is this pill's *only*
+   * possible button, so hiding it on an empty clipboard would leave a
+   * literally empty, invisible pill — defeating the point of always showing
+   * a callout here. Shown-but-disabled instead, via the app's existing
+   * `button:disabled` convention (see styles.css), same as e.g. the page
+   * manager's boundary-disabled move buttons.
+   */
+  private renderEmptyCalloutButtons(container: HTMLElement): void {
+    container.replaceChildren();
+    const b = el('button', { class: 'sel-callout__btn', role: 'menuitem', text: 'Paste' }) as HTMLButtonElement;
+    b.disabled = !this.clipboard.length;
+    b.addEventListener('click', () => this.pasteClipboard());
+    container.append(b);
+  }
+
+  private fillCalloutButtons(container: HTMLElement, items: Array<[string, () => void]>): void {
+    container.replaceChildren();
     items.forEach(([label, onClick], i) => {
       if (i > 0) container.append(el('span', { class: 'sel-callout__divider' }));
       const b = el('button', { class: 'sel-callout__btn', role: 'menuitem', text: label });
@@ -1102,7 +1153,33 @@ class NotebookView {
     }
     this.renderCalloutButtons(this.calloutPill!);
     this.calloutFrame = frame;
-    this.positionCallout(this.calloutEl, frame, pageRect);
+    this.positionCallout(this.calloutEl, frame, pageRect, pageW(pc.page));
+  }
+
+  /**
+   * A lasso drag over empty space (see PageCanvas's onEmptyLassoSelection) —
+   * there's nothing selected, so Duplicate/Cut/Copy/Delete would all be
+   * no-ops; only Paste ever makes sense here. Shown regardless of clipboard
+   * state (even an empty pill) so lassoing empty space always gives a
+   * consistent place to check/attempt paste, positioned near the lasso
+   * itself rather than no UI at all.
+   */
+  private showEmptyLassoCallout(pc: PageCanvas, frame: Frame): void {
+    const pageRect = pc.pageRect();
+    if (!pageRect) {
+      this.hideSelectionCallout();
+      return;
+    }
+    this.calloutPc = pc;
+    if (!this.calloutEl) {
+      this.calloutEl = el('div', { class: 'sel-callout', role: 'menu' });
+      this.calloutPill = el('div', { class: 'sel-callout__pill' });
+      this.calloutEl.append(this.calloutPill);
+      document.body.append(this.calloutEl);
+    }
+    this.renderEmptyCalloutButtons(this.calloutPill!);
+    this.calloutFrame = frame;
+    this.positionCallout(this.calloutEl, frame, pageRect, pageW(pc.page));
   }
 
   /**
@@ -1112,32 +1189,8 @@ class NotebookView {
    * fully out of view, and keeps it clear of the AI side panel when that's
    * open, shifting right past it rather than rendering underneath.
    */
-  private positionCallout(callout: HTMLElement, frame: Frame, pageRect: DOMRect): void {
-    const scale = pageRect.width / PAGE_W;
-    const cx = frame.x + frame.w / 2;
-    const cy = frame.y + frame.h / 2;
-    const corners = [
-      [frame.x, frame.y],
-      [frame.x + frame.w, frame.y],
-      [frame.x + frame.w, frame.y + frame.h],
-      [frame.x, frame.y + frame.h],
-    ].map(([x, y]) => rotateAround(x, y, cx, cy, frame.rot));
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const [x, y] of corners) {
-      minX = Math.min(minX, x);
-      minY = Math.min(minY, y);
-      maxX = Math.max(maxX, x);
-      maxY = Math.max(maxY, y);
-    }
-    const box = {
-      left: pageRect.left + minX * scale,
-      top: pageRect.top + minY * scale,
-      right: pageRect.left + maxX * scale,
-      bottom: pageRect.top + maxY * scale,
-    };
+  private positionCallout(callout: HTMLElement, frame: Frame, pageRect: DOMRect, pw: number): void {
+    const box = frameScreenBox(frame, pageRect, pw);
 
     const GAP = 10; // between the callout (or its arrow tip) and the selection
     const MARGIN = 8; // keep clear of the viewport edge
@@ -1179,6 +1232,150 @@ class NotebookView {
     // callout itself got clamped sideways away from directly above it
     const arrowX = Math.max(12, Math.min((box.left + box.right) / 2 - left, cw - 12));
     callout.style.setProperty('--sel-callout-arrow-x', `${Math.round(arrowX)}px`);
+  }
+
+  // ------------------------------------------------------------ tape popover
+  /**
+   * Resize + delete popover for one tape strip — opened by a tap/hold while
+   * the tape tool itself is active (see PageCanvas.handleTapeTap/onTapeTap;
+   * every other tool's tap on the same strip still peels/covers it,
+   * unaffected by any of this). In addition to the existing lasso-based
+   * select/resize/delete, not a replacement for it.
+   *
+   * Every other anchored popover in this app (eraser mode, size slider, …)
+   * anchors to a real, permanent DOM button, which is what lets
+   * openAnchoredModal's own "second call for the same anchor closes it
+   * instead of opening another" toggle work — and also what exempts a repeat
+   * tap on that button from openModal's generic outside-tap dismiss (see its
+   * onOutside: it skips closing when the tap lands on the anchor itself,
+   * since the anchor's own click handler is already about to toggle it).
+   * A tape strip has neither: it's canvas-painted, not a real element, so
+   * there's nothing a second tap could land "on" for that exemption to
+   * apply — without it, a second tap would hit the canvas, get treated as
+   * outside, close the popover, and then this code would immediately reopen
+   * a fresh one in the same breath (net effect: it never appears to close).
+   *
+   * The fix is to give it a real anchor: `tapePopoverAnchor`, an invisible
+   * div positioned over the strip's own screen rect for as long as its
+   * popover is open. A second tap in that same spot now hits *it* — exempt
+   * from outside-dismiss, and its own click handler re-runs
+   * openAnchoredModal, which is what actually closes it. A tap on a
+   * *different* tape (or blank page) still reaches the canvas as normal,
+   * triggers the generic outside-dismiss for whatever was open, and this
+   * method then opens fresh for the new one.
+   */
+  private showTapePopover(pc: PageCanvas, tapeId: string, frame: Frame): void {
+    const pageRect = pc.pageRect();
+    if (!pageRect) return;
+    this.tapePopoverPc = pc;
+    this.tapePopoverFrame = frame;
+    this.tapePopoverTapeId = tapeId;
+
+    let anchor = this.tapePopoverAnchor;
+    if (!anchor) {
+      anchor = el('div', { class: 'tape-popover-anchor' });
+      document.body.append(anchor);
+      this.tapePopoverAnchor = anchor;
+      // the second-tap toggle path (see the doc comment above) — fires only
+      // when a real tap lands on this anchor, which only happens once it's
+      // actually positioned over the strip
+      anchor.addEventListener('click', () => this.openTapePopoverModal(pc, tapeId, anchor!));
+    }
+    this.positionTapeAnchor(anchor, frame, pageRect, pageW(pc.page));
+    this.openTapePopoverModal(pc, tapeId, anchor);
+  }
+
+  /** Opens (or, per openAnchoredModal's own toggle rule, closes) the popover for `anchor` — a null return there just means this call closed the existing one instead of opening; onClose below already settles the state either way. */
+  private openTapePopoverModal(pc: PageCanvas, tapeId: string, anchor: HTMLElement): void {
+    const modal = openAnchoredModal(anchor, this.buildTapePopoverPanel(pc, tapeId), {
+      onClose: () => {
+        if (this.tapePopoverTapeId !== tapeId) return; // a newer popover already replaced this one
+        this.tapePopoverModal = null;
+        anchor.remove();
+        this.tapePopoverAnchor = null;
+        this.tapePopoverPc = null;
+        this.tapePopoverFrame = null;
+        this.tapePopoverTapeId = null;
+      },
+    });
+    if (modal) this.tapePopoverModal = modal;
+  }
+
+  /** Closes the tape popover (if any) the proper way — through the Modal's own close(), so its backdrop/card are actually torn down rather than just this method's bookkeeping (leaving the real popover UI orphaned in the DOM, still catching clicks, is what plain field-nulling here used to do). onClose above does the rest of the state cleanup once close() runs it. */
+  private hideTapePopover(): void {
+    this.tapePopoverModal?.close();
+  }
+
+  /** Positions the invisible tape-popover anchor over a tape's own (rotation-aware) screen rect — same box math as positionCallout, just applied to the anchor's box instead of a centred pill. */
+  private positionTapeAnchor(anchor: HTMLElement, frame: Frame, pageRect: DOMRect, pw: number): void {
+    const box = frameScreenBox(frame, pageRect, pw);
+    anchor.style.left = `${Math.round(box.left)}px`;
+    anchor.style.top = `${Math.round(box.top)}px`;
+    anchor.style.width = `${Math.round(box.right - box.left)}px`;
+    anchor.style.height = `${Math.round(box.bottom - box.top)}px`;
+  }
+
+  /**
+   * Width/height sliders (live preview via pc.previewTapeResize, one undo
+   * step per drag/keypress session via pc.beginTapeResize/commitTapeResize)
+   * plus Delete — see showTapePopover.
+   */
+  private buildTapePopoverPanel(pc: PageCanvas, tapeId: string): HTMLElement {
+    const menu = el('div', { class: 'menu tape-popover', role: 'menu' });
+    const current = pc.tapeGeometry(tapeId);
+    if (!current) return menu;
+
+    let wInput!: HTMLInputElement;
+    let hInput!: HTMLInputElement;
+    const sizeRow = (label: string, value: number, max: number): { row: HTMLElement; input: HTMLInputElement } => {
+      const row = el('div', { class: 'tape-popover__row' });
+      row.append(el('span', { class: 'tape-popover__label', text: label }));
+      const input = el('input', {
+        type: 'range',
+        min: String(TAPE_MIN),
+        max: String(Math.max(Math.round(max), TAPE_MIN)),
+        step: '1',
+        value: String(Math.round(value)),
+        class: 'tape-popover__range',
+        'aria-label': `Tape ${label.toLowerCase()}`,
+      }) as HTMLInputElement;
+      const readout = el('span', { class: 'tape-popover__value', text: `${Math.round(value)}` });
+      // the first `input` of a drag/keypress arms the undo snapshot; `change`
+      // (fires once, on release — for a keyboard nudge, immediately) commits
+      // it as one step and re-arms for the next interaction
+      let dragging = false;
+      input.addEventListener('input', () => {
+        if (!dragging) {
+          pc.beginTapeResize(tapeId);
+          dragging = true;
+        }
+        readout.textContent = input.value;
+        pc.previewTapeResize(tapeId, Number(wInput.value), Number(hInput.value));
+      });
+      input.addEventListener('change', () => {
+        pc.commitTapeResize(tapeId);
+        dragging = false;
+      });
+      row.append(input, readout);
+      return { row, input };
+    };
+
+    const w = sizeRow('Width', current.w, pageW(pc.page));
+    const h = sizeRow('Height', current.h, pageH(pc.page));
+    wInput = w.input;
+    hInput = h.input;
+    menu.append(w.row, h.row);
+
+    menu.append(el('span', { class: 'menu__divider' }));
+    const del = el('button', { class: 'menu__item menu__item--icon danger', role: 'menuitem' });
+    del.append(icon('delete', 'sm'), el('span', { text: 'Delete' }));
+    del.addEventListener('click', () => {
+      pc.deleteTape(tapeId);
+      this.hideTapePopover();
+    });
+    menu.append(del);
+
+    return menu;
   }
 
   /** Finishes any text edit and drops any selection on every page. */
@@ -1311,10 +1508,9 @@ class NotebookView {
     return { panel, refreshTicks: () => buildSizeTicks(ticks, input, range) };
   }
 
-  /** Page-unit → CSS-px factor the mounted page canvases render at (matches `toLocal`). */
+  /** Page-unit → CSS-px factor the mounted page canvases render at (matches `toLocal`). Just `this.zoom` — screen px per page unit is the same for every page regardless of its own size, since a page's on-screen width is always (its own width in page units) × zoom. */
   private pageScale(): number {
-    const w = this.scrollEl.querySelector('canvas')?.getBoundingClientRect().width;
-    return w && w > 0 ? w / PAGE_W : 1;
+    return this.zoom;
   }
 
   // ---------------------------------------------------------------- pages
@@ -1349,6 +1545,11 @@ class NotebookView {
 
   private buildPageWrap(page: Page): HTMLElement {
     const wrap = el('div', { class: 'page-wrap' });
+    // this page's own size (--pw/--ph inherited by .page-frame/.page/.page
+    // canvas — see styles.css) — a landscape-imported page lays out at its
+    // own aspect ratio instead of the fixed portrait default
+    wrap.style.setProperty('--pw', `${pageW(page)}px`);
+    wrap.style.setProperty('--ph', `${pageH(page)}px`);
 
     const headEl = el('div', { class: 'page-head' });
     headEl.append(el('span', { text: `Page ${page.index + 1}` }));
@@ -1372,13 +1573,19 @@ class NotebookView {
     const pc = new PageCanvas(page, this.nb, {
       onOp: (op) => {
         // ink drawn while AI mode is active is ephemeral (see AiMode) — it
-        // never enters undo history, only turn-detection sees it.
-        const isAiInk = op.kind === 'add-stroke' && this.aiMode.isActive(op.pageId);
+        // never enters the main undo history, only AiMode's own turn-scoped
+        // stack sees it (see AiMode.handleOp). A snapped line lands as an
+        // 'add-items' op like any other insertion, so it's only excluded
+        // here when PageCanvas itself flagged it as AI ink (aiInk).
+        const isAiInk =
+          this.aiMode.isActive(op.pageId) && (op.kind === 'add-stroke' || (op.kind === 'add-items' && op.aiInk));
         if (!isAiInk) this.pushOp(op);
         this.aiMode.handleOp(op);
       },
       onSelection: (p, n) => this.onSelection(p, n),
       onSelectionFrame: (p, frame) => this.onSelectionFrame(p, frame),
+      onEmptyLassoSelection: (p, frame) => this.showEmptyLassoCallout(p, frame),
+      onTapeTap: (p, tapeId, frame) => this.showTapePopover(p, tapeId, frame),
       isAiActive: () => this.aiMode.isActive(page.id),
     });
     this.pcByPage.set(page.id, pc);
@@ -1402,6 +1609,7 @@ class NotebookView {
     const pc = this.pcByPage.get(id);
     pc?.unmount();
     if (pc && this.selPc === pc) this.selPc = null;
+    if (pc && this.tapePopoverPc === pc) this.hideTapePopover();
     if (id === this.guidePageId) this.guideKind = this.guidePageId = null;
     this.pcByPage.delete(id);
     this.wrapById.delete(id);
@@ -1477,12 +1685,13 @@ class NotebookView {
     this.refreshAiControls();
   }
 
-  /** Reflects the current page's AI-mode state on the single app-bar toggle + send buttons. */
+  /** Reflects the current page's AI-mode state on the single app-bar toggle + send buttons, and on undo/redo (which switch to AI-scoped history while active). */
   private refreshAiControls(): void {
     const active = this.currentPageId ? this.aiMode.isActive(this.currentPageId) : false;
     this.aiToggleBtn.classList.toggle('active', active);
     this.aiToggleBtn.setAttribute('aria-pressed', String(active));
     this.aiSendBtn.hidden = !active;
+    this.syncHistory();
   }
 
   /** Paper of the page currently in view, for resolving the "auto" ink token. */
@@ -1651,6 +1860,7 @@ class NotebookView {
           'aria-label': `Go to page ${i + 1}`,
         });
         const thumbBox = el('span', { class: 'pagemgr__thumb' });
+        thumbBox.style.aspectRatio = `${pageW(page)} / ${pageH(page)}`; // a landscape-imported page thumbnails at its own shape, not the default portrait box
         thumbBtn.append(thumbBox, el('span', { class: 'pagemgr__num', text: `Page ${i + 1}` }));
         thumbBtn.addEventListener('click', () => {
           modal.close();
@@ -1661,7 +1871,7 @@ class NotebookView {
         if (cached) {
           thumbBox.append(cached);
         } else {
-          void renderPageCanvas(page, THUMB_W / PAGE_W)
+          void renderPageCanvas(page, THUMB_W / pageW(page))
             .then((c) => {
               c.className = 'pagemgr__canvas';
               thumbs.set(page.id, c);
@@ -1720,9 +1930,22 @@ class NotebookView {
     this.enforceAndMaybeRerender();
   }
 
+  /** While AI mode is active on the current page, Undo/Redo act on that
+   * turn's own ephemeral ink stack instead of the notebook's normal
+   * content — see AiMode.undo/redo. Either way, a tape popover's sliders
+   * reflect a snapshot of one specific tape's geometry — undo/redo can
+   * change (or remove) it out from under the popover with no pointer event
+   * to trigger the usual outside-tap dismiss, so it's closed unconditionally
+   * here rather than risk it going stale. */
   private undo(): void {
+    if (this.currentPageId && this.aiMode.isActive(this.currentPageId)) {
+      if (this.aiMode.canUndo(this.currentPageId)) this.hideTapePopover();
+      this.aiMode.undo(this.currentPageId);
+      return;
+    }
     const op = this.undoStack.pop();
     if (!op) return;
+    this.hideTapePopover();
     this.invert(op);
     this.redoStack.push(op);
     this.syncHistory();
@@ -1730,8 +1953,14 @@ class NotebookView {
   }
 
   private redo(): void {
+    if (this.currentPageId && this.aiMode.isActive(this.currentPageId)) {
+      if (this.aiMode.canRedo(this.currentPageId)) this.hideTapePopover();
+      this.aiMode.redo(this.currentPageId);
+      return;
+    }
     const op = this.redoStack.pop();
     if (!op) return;
+    this.hideTapePopover();
     this.forward(op);
     this.undoStack.push(op);
     this.syncHistory();
@@ -1813,7 +2042,13 @@ class NotebookView {
     if (this.mounted.has(pageId)) this.pcByPage.get(pageId)?.refresh();
   }
 
+  /** Undo/redo button enabled state — reflects AiMode's turn-scoped stack while it's active on the current page, the main stacks otherwise. */
   private syncHistory(): void {
+    if (this.currentPageId && this.aiMode.isActive(this.currentPageId)) {
+      this.undoBtn.disabled = !this.aiMode.canUndo(this.currentPageId);
+      this.redoBtn.disabled = !this.aiMode.canRedo(this.currentPageId);
+      return;
+    }
     this.undoBtn.disabled = this.undoStack.length === 0;
     this.redoBtn.disabled = this.redoStack.length === 0;
   }
@@ -1823,6 +2058,35 @@ const ERASER_MODES: Record<EraserMode, { label: string; sub: string }> = {
   whole: { label: 'Whole stroke', sub: 'Removes any stroke you touch' },
   partial: { label: 'Partial', sub: 'Removes only the parts you touch' },
 };
+
+/** A page-unit Frame's (rotation-aware) bounding box, in fixed screen px — shared by positionCallout and positionTapeAnchor. */
+function frameScreenBox(frame: Frame, pageRect: DOMRect, pw: number): { left: number; top: number; right: number; bottom: number } {
+  const scale = pageRect.width / pw;
+  const cx = frame.x + frame.w / 2;
+  const cy = frame.y + frame.h / 2;
+  const corners = [
+    [frame.x, frame.y],
+    [frame.x + frame.w, frame.y],
+    [frame.x + frame.w, frame.y + frame.h],
+    [frame.x, frame.y + frame.h],
+  ].map(([x, y]) => rotateAround(x, y, cx, cy, frame.rot));
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [x, y] of corners) {
+    minX = Math.min(minX, x);
+    minY = Math.min(minY, y);
+    maxX = Math.max(maxX, x);
+    maxY = Math.max(maxY, y);
+  }
+  return {
+    left: pageRect.left + minX * scale,
+    top: pageRect.top + minY * scale,
+    right: pageRect.left + maxX * scale,
+    bottom: pageRect.top + maxY * scale,
+  };
+}
 
 /** A row of mutually-exclusive pill buttons; calls `onPick` with the chosen index. */
 function segmented(labels: string[], activeIndex: number, onPick: (i: number) => void): HTMLElement {

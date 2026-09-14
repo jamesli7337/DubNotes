@@ -1,5 +1,5 @@
 import { AI_COLOR } from '../ai-mode';
-import { DPR, PAGE_H, PAGE_W } from '../const';
+import { DPR, pageH, pageW } from '../const';
 import { store } from '../store';
 import {
   ERASER_RADIUS,
@@ -37,6 +37,7 @@ import { drawStroke, resolveInkColor } from './freehand';
 import { Guide, projectOnEdge, type EdgeLine, type GuideKind } from './guide';
 import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
 import {
+  aabb,
   elementInPolygon,
   itemsFrame,
   nearShapeOutline,
@@ -71,6 +72,23 @@ export interface PageHooks {
    * drag frame), so keep this cheap.
    */
   onSelectionFrame: (pc: PageCanvas, frame: Frame | null) => void;
+  /**
+   * A lasso *drag* (not a tap) just ended over empty space — nothing was
+   * caught, so onSelection/onSelectionFrame both fire with 0/null as usual,
+   * but this fires right alongside them with the drawn lasso's own bounding
+   * box, so the notebook can still show a (Paste-only) callout near where
+   * the user gestured, instead of no UI at all. Never fires for a plain
+   * tap-to-deselect — only an actual drawn lasso shape.
+   */
+  onEmptyLassoSelection: (pc: PageCanvas, frame: Frame) => void;
+  /**
+   * A tap/hold on an *existing* tape strip while the tape tool itself is
+   * active — every other tool still treats the same tap as peel/cover (see
+   * toggleTape), unaffected by this. `frame` is that tape's own box, for
+   * positioning a popover (resize + delete) near it — a second such call for
+   * the same tape id is how the notebook's popover toggles closed again.
+   */
+  onTapeTap: (pc: PageCanvas, tapeId: string, frame: Frame) => void;
   /** true while AI mode is on for this page — a fresh pen/highlighter stroke inks in AI_COLOR instead of the tool's own colour. */
   isAiActive: () => boolean;
 }
@@ -89,7 +107,7 @@ const TAP_SLOP = 4;
 /** Extra hit radius, in page units, when tapping a stroke to select it. */
 const TAP_RADIUS = 6;
 /** Smallest tape strip a drag can create. */
-const TAPE_MIN = 12;
+export const TAPE_MIN = 12;
 /** Smallest box the Shapes tool places (page units); an arrow only needs this much length. */
 const SHAPE_MIN = 12;
 /** An inserted image is fitted into this fraction of the page width. */
@@ -123,6 +141,9 @@ interface LineEdit {
  */
 export class PageCanvas {
   readonly page: Page;
+  /** this page's own size, in page units — see pageW/pageH's doc comment (const.ts). Read once at construction since a page's size never changes after creation. */
+  private readonly pw: number;
+  private readonly ph: number;
   private nb: Notebook;
   private readonly hooks: PageHooks;
 
@@ -159,6 +180,8 @@ export class PageCanvas {
   private readonly peeled = new Set<string>();
   /** tape under a press that may turn into a peel/cover tap */
   private tapeHit: string | null = null;
+  /** a tape's geometry snapshot while its popover's resize sliders are being dragged — see beginTapeResize/commitTapeResize */
+  private tapeResizeOrig: TapeElement | null = null;
   /** shape under a Shapes-tool press: a tap selects it, a drag places a new shape over it */
   private shapeHit: string | null = null;
   /** a finger resting on a tape: becomes a peel/cover tap if it lifts without moving */
@@ -209,6 +232,8 @@ export class PageCanvas {
 
   constructor(page: Page, nb: Notebook, hooks: PageHooks) {
     this.page = page;
+    this.pw = pageW(page);
+    this.ph = pageH(page);
     this.nb = nb;
     this.hooks = hooks;
   }
@@ -236,11 +261,11 @@ export class PageCanvas {
     this.host = host;
 
     const view = document.createElement('canvas');
-    view.width = PAGE_W * DPR;
-    view.height = PAGE_H * DPR;
+    view.width = this.pw * DPR;
+    view.height = this.ph * DPR;
     const cache = document.createElement('canvas');
-    cache.width = PAGE_W * DPR;
-    cache.height = PAGE_H * DPR;
+    cache.width = this.pw * DPR;
+    cache.height = this.ph * DPR;
 
     this.view = view;
     this.cache = cache;
@@ -251,13 +276,18 @@ export class PageCanvas {
     clip.appendChild(view);
     host.appendChild(clip);
     this.clip = clip;
-    this.overlay = new SelectionOverlay(host, {
-      onDragStart: () => this.beginTransform(),
-      onDrag: (f) => this.updateTransform(f),
-      onDragEnd: (f) => this.endTransform(f),
-      onTap: (x, y) => this.tapSelection(x, y),
-      onDelete: () => this.deleteSelection(),
-    });
+    this.overlay = new SelectionOverlay(
+      host,
+      {
+        onDragStart: () => this.beginTransform(),
+        onDrag: (f) => this.updateTransform(f),
+        onDragEnd: (f) => this.endTransform(f),
+        onTap: (x, y) => this.tapSelection(x, y),
+        onDelete: () => this.deleteSelection(),
+      },
+      this.pw,
+      this.ph
+    );
 
     view.addEventListener('pointerdown', this.onDown);
     view.addEventListener('pointermove', this.onMove);
@@ -334,9 +364,9 @@ export class PageCanvas {
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.clearRect(0, 0, cache.width, cache.height);
     c.setTransform(DPR, 0, 0, DPR, 0, 0);
-    drawTemplate(c, this.page.paper, PAGE_W, PAGE_H);
+    drawTemplate(c, this.page.paper, this.pw, this.ph);
     if (this.page.background) {
-      drawBackground(c, this.page.background, PAGE_W, PAGE_H, () => this.rebuild(this.lastDim));
+      drawBackground(c, this.page.background, this.pw, this.ph, () => this.rebuild(this.lastDim));
     }
     for (const it of store.itemsOf(this.page.id)) {
       if (hidden?.has(it.id)) continue;
@@ -462,11 +492,11 @@ export class PageCanvas {
 
   private toLocal(e: PointerEvent): number[] {
     const r = this.view!.getBoundingClientRect();
-    const x = (e.clientX - r.left) * (PAGE_W / r.width);
-    const y = (e.clientY - r.top) * (PAGE_H / r.height);
+    const x = (e.clientX - r.left) * (this.pw / r.width);
+    const y = (e.clientY - r.top) * (this.ph / r.height);
     let p = e.pressure;
     if (!p || p <= 0) p = 0.5; // some styluses report 0 on contact
-    return [clamp(x, 0, PAGE_W), clamp(y, 0, PAGE_H), p];
+    return [clamp(x, 0, this.pw), clamp(y, 0, this.ph), p];
   }
 
   // ------------------------------------------------------------- pointer
@@ -775,7 +805,7 @@ export class PageCanvas {
       this.touchTap = null;
       if (tap && tap.pointerId === e.pointerId && e.type === 'pointerup') {
         const pt = this.toLocal(e);
-        if (Math.hypot(pt[0] - tap.x, pt[1] - tap.y) < TAP_SLOP * 2) this.toggleTape(tap.id);
+        if (Math.hypot(pt[0] - tap.x, pt[1] - tap.y) < TAP_SLOP * 2) this.handleTapeTap(tap.id);
       }
       return;
     }
@@ -850,6 +880,7 @@ export class PageCanvas {
           if (inside) ids.push(it.id);
         }
         this.setSelection(ids);
+        if (!ids.length) this.hooks.onEmptyLassoSelection(this, { ...aabb(path), rot: 0 });
       }
       this.blit();
       return;
@@ -858,7 +889,7 @@ export class PageCanvas {
     if (this.mode === 'tape-tap') {
       const id = this.tapeHit;
       this.reset();
-      if (id && !cancelled) this.toggleTape(id);
+      if (id && !cancelled) this.handleTapeTap(id);
       this.blit();
       return;
     }
@@ -883,7 +914,7 @@ export class PageCanvas {
       if (tape && !cancelled && tape.w >= TAPE_MIN && tape.h >= TAPE_MIN) {
         store.addItems([tape]);
         this.rebuild();
-        this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items: [tape] });
+        this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items: [tape], aiInk: tape.color === AI_COLOR });
       } else {
         this.blit();
       }
@@ -897,7 +928,7 @@ export class PageCanvas {
         // placed: it's an ordinary element from here on, selected so its handles are up
         store.addItems([shape]);
         this.rebuild();
-        this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items: [shape] });
+        this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items: [shape], aiInk: shape.color === AI_COLOR });
         this.setSelection([shape.id]);
       } else {
         this.blit();
@@ -1113,9 +1144,9 @@ export class PageCanvas {
   }
 
   // --------------------------------------------------------- shapes tool
-  /** Starts sizing a shape from `pt`; it takes the pen's colour and width. */
+  /** Starts sizing a shape from `pt`; it takes the pen's colour and width (forced to AI_COLOR while AI mode is active, same as a pen stroke). */
   private beginShapeDrag(pt: number[]): void {
-    this.liveTool = { kind: 'pen', color: toolState.penColor, size: toolState.penSize };
+    this.liveTool = { kind: 'pen', color: this.aiInkColor(toolState.penColor), size: toolState.penSize };
     this.mode = 'shapes';
     this.live = [pt];
     this.pressPt = pt;
@@ -1152,7 +1183,7 @@ export class PageCanvas {
     if (!this.clip) return;
     if (this.guide?.kind === kind) return;
     this.guide?.destroy();
-    this.guide = new Guide(this.clip, kind);
+    this.guide = new Guide(this.clip, kind, this.pw, this.ph);
   }
 
   hideGuide(): void {
@@ -1311,6 +1342,71 @@ export class PageCanvas {
     return this.peeled.has(id);
   }
 
+  /**
+   * A tap/hold resolved on an existing tape strip: every tool but the tape
+   * tool itself still peels/covers it exactly as before (unaffected by the
+   * popover below); the tape tool instead offers resize + delete, since a
+   * tap there can no longer mean "start a new strip" (that only fires when
+   * the press lands on empty page — see topTapeAt's caller in onDown).
+   */
+  private handleTapeTap(id: string): void {
+    if (toolState.kind !== 'tape') {
+      this.toggleTape(id);
+      return;
+    }
+    const frame = this.tapeFrame(id);
+    if (frame) this.hooks.onTapeTap(this, id, frame);
+  }
+
+  private getTape(id: string): TapeElement | undefined {
+    return store.elementsOf(this.page.id).find((e): e is TapeElement => e.kind === 'tape' && e.id === id);
+  }
+
+  private tapeFrame(id: string): Frame | null {
+    const t = this.getTape(id);
+    return t ? { x: t.x, y: t.y, w: t.w, h: t.h, rot: t.rotation } : null;
+  }
+
+  /** Snapshots a tape's current geometry before a popover resize gesture, for one undo step once it finishes (see commitTapeResize). */
+  beginTapeResize(id: string): TapeElement | null {
+    const t = this.getTape(id);
+    this.tapeResizeOrig = t ? { ...t } : null;
+    return this.tapeResizeOrig;
+  }
+
+  /** Live preview while a resize slider is being dragged — repaints immediately, no undo step yet. */
+  previewTapeResize(id: string, w: number, h: number): void {
+    const t = this.getTape(id);
+    if (!t) return;
+    store.replaceItems(this.page.id, [{ ...t, w: Math.max(TAPE_MIN, w), h: Math.max(TAPE_MIN, h) }]);
+    this.rebuild();
+  }
+
+  /** Commits a finished resize gesture as one undo step, against the snapshot from beginTapeResize. */
+  commitTapeResize(id: string): void {
+    const before = this.tapeResizeOrig;
+    this.tapeResizeOrig = null;
+    if (!before) return;
+    const after = this.getTape(id);
+    if (!after || (after.w === before.w && after.h === before.h)) return;
+    this.hooks.onOp({ kind: 'replace-items', pageId: this.page.id, before: [before], after: [after] });
+  }
+
+  /** A tape strip's current width/height (page units), for the popover's resize sliders — null if it no longer exists. */
+  tapeGeometry(id: string): { w: number; h: number } | null {
+    const t = this.getTape(id);
+    return t ? { w: t.w, h: t.h } : null;
+  }
+
+  /** Deletes one tape strip directly by id (the popover's Delete), independent of the lasso selection. */
+  deleteTape(id: string): void {
+    const removed = store.removeItems(this.page.id, new Set([id]));
+    if (!removed.length) return;
+    this.peeled.delete(id);
+    this.rebuild();
+    this.hooks.onOp({ kind: 'remove-items', pageId: this.page.id, items: removed });
+  }
+
   private tapeFromDrag(): TapeElement {
     const a = this.live[0];
     const b = this.live[this.live.length - 1];
@@ -1326,15 +1422,15 @@ export class PageCanvas {
       w: Math.abs(b[0] - a[0]),
       h: Math.abs(b[1] - a[1]),
       rotation: 0,
-      color: TAPE_COLOR,
+      color: this.aiInkColor(TAPE_COLOR),
       createdAt: Date.now(),
     };
   }
 
   /** Places a loaded image centred on the page, fitted to a fraction of its width, as one undo step; selects it. */
   insertImage(src: string, naturalW: number, naturalH: number): void {
-    const maxW = PAGE_W * IMAGE_FIT;
-    const maxH = PAGE_H * IMAGE_FIT;
+    const maxW = this.pw * IMAGE_FIT;
+    const maxH = this.ph * IMAGE_FIT;
     const s = Math.min(maxW / naturalW, maxH / naturalH, 1);
     const w = Math.max(24, naturalW * s);
     const h = Math.max(24, naturalH * s);
@@ -1343,8 +1439,8 @@ export class PageCanvas {
       kind: 'image',
       pageId: this.page.id,
       notebookId: this.nb.id,
-      x: (PAGE_W - w) / 2,
-      y: (PAGE_H - h) / 2,
+      x: (this.pw - w) / 2,
+      y: (this.ph - h) / 2,
       w,
       h,
       rotation: 0,
@@ -1455,14 +1551,24 @@ export class PageCanvas {
     this.hooks.onOp({ kind: 'replace-items', pageId: this.page.id, before, after });
   }
 
-  /** Adds already-cloned items (new ids, this page) as one undo step and selects them. */
+  /**
+   * Adds already-cloned items (new ids, this page) as one undo step and
+   * selects them — the shared landing point for clipboard paste, Duplicate,
+   * and image-insert alike. While AI mode is active, everything landing
+   * here is forced into the same violet/ephemeral treatment as a fresh pen
+   * stroke: colour, for whichever items have one (an image has none — still
+   * tracked as this turn's ink, just with nothing to recolour), and flagged
+   * aiInk so it's captured and cleared with the rest of the turn.
+   */
   pasteItems(items: PageItem[]): void {
     if (!items.length) return;
     this.commitEdit();
-    store.addItems(items);
+    const aiInk = this.hooks.isAiActive();
+    const toAdd = aiInk ? items.map((it) => ('color' in it ? { ...it, color: AI_COLOR } : it)) : items;
+    store.addItems(toAdd);
     this.rebuild();
-    this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items });
-    this.setSelection(items.map((it) => it.id));
+    this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items: toAdd, aiInk });
+    this.setSelection(toAdd.map((it) => it.id));
   }
 
   /** The store changed under us (undo/redo): settle any pending line (like a text edit), drop any selection and repaint. */
@@ -1528,19 +1634,19 @@ export class PageCanvas {
   // ------------------------------------------------------------ text edit
   private newText(x: number, y: number): TextElement {
     const fontSize = TEXT_DEFAULT_SIZE;
-    const w = Math.min(TEXT_DEFAULT_WIDTH, PAGE_W - x);
+    const w = Math.min(TEXT_DEFAULT_WIDTH, this.pw - x);
     return {
       id: uid(),
       kind: 'text',
       pageId: this.page.id,
       notebookId: this.nb.id,
       x,
-      y: clamp(y - fontSize * TEXT_LINE_HEIGHT * 0.5, 0, PAGE_H - fontSize),
+      y: clamp(y - fontSize * TEXT_LINE_HEIGHT * 0.5, 0, this.ph - fontSize),
       w: Math.max(w, 60),
       h: fontSize * TEXT_LINE_HEIGHT,
       rotation: 0,
       text: '',
-      color: toolState.textColor,
+      color: this.aiInkColor(toolState.textColor),
       fontSize,
       createdAt: Date.now(),
     };
@@ -1626,7 +1732,7 @@ export class PageCanvas {
     const next: TextElement = { ...ed.el, text, h: layoutText(text, ed.el.fontSize, ed.el.w).height };
     if (ed.isNew) {
       store.addItems([next]);
-      this.hooks.onOp({ kind: 'add-items', pageId, items: [next] });
+      this.hooks.onOp({ kind: 'add-items', pageId, items: [next], aiInk: next.color === AI_COLOR });
     } else {
       const cur = store.elementsOf(pageId).find((e) => e.id === next.id);
       if (cur && !sameText(cur, next)) {

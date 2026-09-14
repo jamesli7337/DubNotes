@@ -1,4 +1,4 @@
-import { PAGE_H, PAGE_W } from './const';
+import { PAGE_H } from './const';
 import { getAsset } from './db';
 
 /**
@@ -15,6 +15,13 @@ type PdfDoc = Awaited<ReturnType<PdfJs['getDocument']>['promise']>;
 const CACHE_MAX = 8;
 /** Render scale: crisp at 2× on high-DPR screens, never more. */
 const RENDER_DPR = Math.min(Math.max(window.devicePixelRatio || 1, 1), 2);
+/** Target size (page units) for a rendered PDF page's *longer* side — same
+ *  physical scale as the app's default portrait page (whose longer side is
+ *  PAGE_H), but applied to whichever side is actually longest so a landscape
+ *  source page (imported at matching notebook-page proportions — see
+ *  pdf-import.ts) gets rendered at full resolution too, instead of being
+ *  bounded by a fixed portrait-shaped box. */
+const RENDER_TARGET = PAGE_H;
 
 /**
  * pdf.js 6.x decodes JBIG2 and CCITT-fax images (both share the same
@@ -82,7 +89,7 @@ async function render(assetId: string, page: number): Promise<HTMLCanvasElement>
   const doc = await document(assetId);
   const p = await doc.getPage(page);
   const base = p.getViewport({ scale: 1 });
-  const scale = Math.min((PAGE_W * RENDER_DPR) / base.width, (PAGE_H * RENDER_DPR) / base.height);
+  const scale = (RENDER_TARGET * RENDER_DPR) / Math.max(base.width, base.height);
   const viewport = p.getViewport({ scale });
   const c = window.document.createElement('canvas');
   c.width = Math.ceil(viewport.width);
