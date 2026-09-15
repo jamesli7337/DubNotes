@@ -200,6 +200,8 @@ export class PageCanvas {
   private lasso: number[][] = [];
   /** where the lasso pointer is now — for box / circle the polygon's points aren't the pointer */
   private lassoPt: number[] = [0, 0];
+  /** the finalized lasso path from the most recent lasso selection, kept only for the decorative outline — set on a non-empty lasso-shape selection, cleared by every other kind of selection change. Purely visual: never read for hit-testing. */
+  private lastLassoPath: number[][] | null = null;
   private pressPt: number[] = [0, 0];
   private isMounted = false;
 
@@ -430,22 +432,33 @@ export class PageCanvas {
       }
     }
     if (this.mode === 'lasso' && this.lasso.length > 1) {
-      v.save();
-      v.beginPath();
-      v.moveTo(this.lasso[0][0], this.lasso[0][1]);
-      for (let i = 1; i < this.lasso.length; i++) v.lineTo(this.lasso[i][0], this.lasso[i][1]);
       // no fill (no translucent wash over the enclosed region). A freehand
       // lasso is not closePath()ed either: the visible outline is only the
       // dashed line along the path actually drawn, with no straight segment
       // connecting end to start. A box / circle is a closed figure, so it is.
-      if (toolState.lassoShape !== 'free') v.closePath();
-      v.setLineDash([6, 4]);
-      v.lineWidth = 1.5;
-      v.strokeStyle = 'rgba(37, 99, 235, 0.9)';
-      v.stroke();
-      v.restore();
+      this.strokeLassoPath(v, this.lasso, toolState.lassoShape !== 'free');
+    } else if (this.lastLassoPath && this.lastLassoPath.length > 1) {
+      // decorative echo of the finalized selection's lasso shape (page-space
+      // points, so pan/zoom are already handled the same way as the live
+      // path above — both are drawn through this same zoom-transformed
+      // canvas). Static: it does not track the selection box being dragged
+      // or resized afterwards, and goes stale once that happens.
+      this.strokeLassoPath(v, this.lastLassoPath, true);
     }
   };
+
+  private strokeLassoPath(v: CanvasRenderingContext2D, path: number[][], closed: boolean): void {
+    v.save();
+    v.beginPath();
+    v.moveTo(path[0][0], path[0][1]);
+    for (let i = 1; i < path.length; i++) v.lineTo(path[i][0], path[i][1]);
+    if (closed) v.closePath();
+    v.setLineDash([6, 4]);
+    v.lineWidth = 1.5;
+    v.strokeStyle = 'rgba(37, 99, 235, 0.9)';
+    v.stroke();
+    v.restore();
+  }
 
   private schedule(): void {
     if (!this.raf) this.raf = requestAnimationFrame(this.frame);
@@ -880,6 +893,11 @@ export class PageCanvas {
           if (inside) ids.push(it.id);
         }
         this.setSelection(ids);
+        this.lastLassoPath = ids.length ? path : null;
+        // blit() below only redraws the cache — it doesn't run the overlay
+        // pass that paints lastLassoPath, so schedule an animation frame for
+        // that (lands before the next paint; no flash of the bare box first)
+        if (this.lastLassoPath) this.schedule();
         if (!ids.length) this.hooks.onEmptyLassoSelection(this, { ...aabb(path), rot: 0 });
       }
       this.blit();
@@ -1470,8 +1488,10 @@ export class PageCanvas {
     return items;
   }
 
+  /** Sets the selection. Also clears the decorative lasso outline — the lasso pointerup handler re-sets it right after, when this call is the result of a lasso-shape drag. */
   private setSelection(ids: string[]): void {
     this.selected = new Set(ids);
+    this.lastLassoPath = null;
     this.showSelection();
     this.hooks.onSelection(this, this.selected.size);
   }
@@ -1479,6 +1499,7 @@ export class PageCanvas {
   clearSelection(): void {
     this.commitEdit();
     if (!this.selected.size) {
+      this.lastLassoPath = null;
       this.overlay?.hide();
       this.hooks.onSelectionFrame(this, null);
       return;
@@ -1536,6 +1557,7 @@ export class PageCanvas {
     }
     const ids = new Set(this.selected);
     this.selected = new Set();
+    this.lastLassoPath = null;
     const removed = store.removeItems(this.page.id, ids);
     this.overlay?.hide();
     this.rebuild();
@@ -1686,6 +1708,7 @@ export class PageCanvas {
     area.addEventListener('pointerdown', (e) => e.stopPropagation());
 
     this.selected = new Set([el.id]);
+    this.lastLassoPath = null;
     this.rebuild(); // hides the committed copy while the textarea shows it
     this.showSelection();
     this.hooks.onSelection(this, 1);
@@ -1726,6 +1749,7 @@ export class PageCanvas {
         if (removed.length) this.hooks.onOp({ kind: 'remove-items', pageId, items: removed });
       }
       this.selected = new Set();
+      this.lastLassoPath = null;
       this.overlay?.hide();
       this.rebuild();
       this.hooks.onSelection(this, 0);

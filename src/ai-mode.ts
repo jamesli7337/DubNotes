@@ -130,7 +130,7 @@ export class AiMode {
     clearBtn.addEventListener('click', () => void this.clearConversation());
     const closeBtn = el('button', { class: 'iconbtn', title: 'Close', 'aria-label': 'Close AI panel' });
     closeBtn.append(icon('close'));
-    closeBtn.addEventListener('click', () => this.setPanelOpen(false));
+    closeBtn.addEventListener('click', () => this.closeAll());
     actions.append(clearBtn, closeBtn);
     header.append(actions);
 
@@ -221,21 +221,44 @@ export class AiMode {
 
   /**
    * Toggles AI mode for one page — called by the single app-bar button, for
-   * whichever page is current. The panel follows: turning off dismisses it
-   * (same as its own ×, history untouched), turning on reopens it.
+   * whichever page is current. The panel follows: turning off dismisses it,
+   * turning on reopens it. (The panel's own × goes further — see closeAll.)
    */
   toggle(pageId: string): void {
     const st = this.pages.get(pageId);
     if (!st) return;
-    st.active = !st.active;
     if (st.active) {
-      st.turnTop = 0; // first turn: the whole page so far
+      this.deactivate(pageId, st);
     } else {
-      this.discardInk(pageId, st); // turned off with unsent violet ink still on the page: drop it
+      st.active = true;
+      st.turnTop = 0; // first turn: the whole page so far
+      this.applyVisual(pageId);
+      this.host.onActiveChanged(pageId, true);
     }
     this.setPanelOpen(st.active);
+  }
+
+  /**
+   * Ends AI mode for every page it's currently active on — not just whichever
+   * one is "current" — since the panel is the one shared, notebook-wide piece
+   * of AI-mode chrome and its × is the obvious "turn this off" affordance.
+   * Without this, closing the panel this way left whichever page's session
+   * was active still `active` underneath (app-bar toggle still lit, unsent
+   * violet ink never discarded) — indistinguishable from AI mode staying on.
+   */
+  private closeAll(): void {
+    for (const [pageId, st] of this.pages) {
+      if (st.active) this.deactivate(pageId, st);
+    }
+    this.setPanelOpen(false);
+  }
+
+  /** Turns AI mode off for one page: drops any unsent violet ink (see discardInk) and notifies the host. The only way `active` ever goes false. */
+  private deactivate(pageId: string, st: AiPageState): void {
+    st.active = false;
+    this.discardInk(pageId, st);
     this.applyVisual(pageId);
-    this.host.onActiveChanged(pageId, st.active);
+    this.host.onActiveChanged(pageId, false);
   }
 
   /** True while a page is being torn down for good (not just scrolled out of view). */
@@ -404,7 +427,17 @@ export class AiMode {
     }
 
     st.sending = false;
-    st.turnTop = bottom; // next turn starts below whatever was just captured, same as before
+    // Next turn starts below whatever is *actually still on the page* now —
+    // not `bottom`, which was this turn's own ephemeral ink's bound before
+    // that ink got deleted above. Reusing `bottom` left turnTop pointing at
+    // a line with nothing above it (the page had gone blank there again), so
+    // a next turn drawn back in that space fell above the line and Send
+    // found nothing to capture. Any non-ephemeral content (e.g. an inserted
+    // image) that's still there past `top` legitimately pushes the line
+    // forward; if nothing remains, the line stays put.
+    const remaining = store.itemsOf(pageId).filter((it) => itemBounds(it).y + itemBounds(it).h > top + 0.01);
+    const remainingBounds = remaining.length ? unionRects(remaining.map(itemBounds)) : null;
+    st.turnTop = remainingBounds ? Math.min(Math.max(remainingBounds.y + remainingBounds.h + 12, top + 1), pageH(page)) : top;
     this.applyVisual(pageId);
 
     entry.pending = false;
