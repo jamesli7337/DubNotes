@@ -163,53 +163,11 @@ export function strokeInPolygon(points: number[][], poly: number[][]): boolean {
   return inside * 2 >= points.length;
 }
 
-/** Orientation of c relative to segment ab: sign of the cross product, 0 if collinear. */
-function orient(ax: number, ay: number, bx: number, by: number, cx: number, cy: number): number {
-  return Math.sign((bx - ax) * (cy - ay) - (by - ay) * (cx - ax));
-}
-
-/** Assuming a, b, c are collinear, is c within segment ab's bounding box? */
-function onSegment(ax: number, ay: number, bx: number, by: number, cx: number, cy: number): boolean {
-  return (
-    cx >= Math.min(ax, bx) && cx <= Math.max(ax, bx) && cy >= Math.min(ay, by) && cy <= Math.max(ay, by)
-  );
-}
-
-/** True if segment a1a2 and segment b1b2 cross or touch. */
-function segmentsIntersect(a1: number[], a2: number[], b1: number[], b2: number[]): boolean {
-  const o1 = orient(a1[0], a1[1], a2[0], a2[1], b1[0], b1[1]);
-  const o2 = orient(a1[0], a1[1], a2[0], a2[1], b2[0], b2[1]);
-  const o3 = orient(b1[0], b1[1], b2[0], b2[1], a1[0], a1[1]);
-  const o4 = orient(b1[0], b1[1], b2[0], b2[1], a2[0], a2[1]);
-  if (o1 !== o2 && o3 !== o4) return true;
-  if (o1 === 0 && onSegment(a1[0], a1[1], a2[0], a2[1], b1[0], b1[1])) return true;
-  if (o2 === 0 && onSegment(a1[0], a1[1], a2[0], a2[1], b2[0], b2[1])) return true;
-  if (o3 === 0 && onSegment(b1[0], b1[1], b2[0], b2[1], a1[0], a1[1])) return true;
-  if (o4 === 0 && onSegment(b1[0], b1[1], b2[0], b2[1], a2[0], a2[1])) return true;
-  return false;
-}
-
-/**
- * True when the two (implicitly closed, like pointInPolygon) simple polygons
- * genuinely share area — one contains a vertex of the other, or their edges
- * cross — rather than just sampling a few representative points.
- */
-function polygonsOverlap(a: number[][], b: number[][]): boolean {
-  for (const p of a) if (pointInPolygon(p[0], p[1], b)) return true;
-  for (const p of b) if (pointInPolygon(p[0], p[1], a)) return true;
-  for (let i = 0; i < a.length; i++) {
-    const a1 = a[i];
-    const a2 = a[(i + 1) % a.length];
-    for (let j = 0; j < b.length; j++) {
-      if (segmentsIntersect(a1, a2, b[j], b[(j + 1) % b.length])) return true;
-    }
-  }
-  return false;
-}
-
-/** Does an element count as inside the lasso? True when its actual (rotated) box overlaps the lasso's drawn polygon — not just when a sampled corner or centre happens to land inside it. */
+/** Does an element count as inside the lasso? Its centre or any corner must be. */
 export function elementInPolygon(el: PageElement, poly: number[][]): boolean {
-  return polygonsOverlap(elementCorners(el), poly);
+  const [cx, cy] = elementCenter(el);
+  if (pointInPolygon(cx, cy, poly)) return true;
+  return elementCorners(el).some(([x, y]) => pointInPolygon(x, y, poly));
 }
 
 /**

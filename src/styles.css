@@ -1324,15 +1324,6 @@ select {
 .ai-toggle.active:hover {
   color: #6d28d9;
 }
-/* the send button always matches the AI accent (AI_COLOR in ai-mode.ts) rather
-   than the default .iconbtn tint, since it only ever appears while AI mode is
-   active on the current page. */
-.ai-send {
-  color: #6d28d9;
-}
-.ai-send:hover:not(:disabled) {
-  color: #6d28d9;
-}
 /* the bare `button { display: inline-flex }` rule above is an author-origin
    style, so it silently wins over the UA stylesheet's `[hidden] { display:
    none }` — without this, the send button stayed visible and clickable even
@@ -1579,13 +1570,10 @@ select {
   pointer-events: none; /* while editing text the box lets taps reach the textarea… */
 }
 .sel-box--pass .sel-h,
-.sel-box--pass .sel-rot {
+.sel-box--pass .sel-rot,
+.sel-box--pass .sel-del {
   pointer-events: auto; /* …but its handles still work */
 }
-/* .sel-del isn't listed above: it lives in document.body now (see the
-   selection.ts doc comment on delEl), not inside .sel-box, so this rule
-   never applied to it in the first place — it was never subject to
-   .sel-box--pass's own pointer-events: none to begin with. */
 .sel-h {
   position: absolute;
   width: 14px;
@@ -1598,13 +1586,10 @@ select {
   touch-action: none;
 }
 /* handles and grips live inside the zoomed page: counter-scale them so they
-   stay the same size on screen (and don't swallow a thin selection's body).
-   .sel-del isn't listed: it lives outside the zoomed subtree entirely now
-   (document.body, position: fixed — see selection.ts), so its natural CSS
-   size is already zoom-independent; counter-scaling it too would wrongly
-   shrink/grow it as the zoom level changes instead of leaving it alone. */
+   stay the same size on screen (and don't swallow a thin selection's body) */
 .sel-h,
 .sel-rot,
+.sel-del,
 .guide__rot {
   transform: scale(calc(1 / var(--zoom, 1)));
 }
@@ -1634,15 +1619,10 @@ select {
   cursor: grab;
   touch-action: none;
 }
-/* Lives in document.body (position: fixed), not inside .sel-box — same
-   reason .sel-callout and the tape-popover anchor do (see selection.ts's
-   doc comment on delEl): .sel-box sits under .page-frame's zoom `transform`,
-   which traps everything inside it below the fixed app-bar/dock no matter
-   its own z-index. left/top are set from JS (SelectionOverlay.placeDelEl),
-   in real screen pixels, not page units. */
 .sel-del {
-  position: fixed;
-  z-index: 55; /* same tier as .sel-callout — above the app-bar/dock (30/40), below the AI panel (60) / modals (100) */
+  position: absolute;
+  right: -12px;
+  top: -12px;
   width: 24px;
   height: 24px;
   padding: 0;
@@ -1652,15 +1632,6 @@ select {
   color: #fff;
   box-shadow: var(--sh-1);
   cursor: pointer;
-  /* .sel-h and .sel-rot both declare this; this one was missing it — without
-     it, a real touchscreen's gesture recognizer can treat a tap here as
-     pan-eligible and swallow it before a click ever fires, even though that
-     never reproduces via synthetic pointer/touch dispatch, which bypasses
-     that disambiguation entirely. */
-  touch-action: none;
-}
-.sel-del[hidden] {
-  display: none;
 }
 .sel-del .icon {
   width: 14px;
@@ -2138,26 +2109,6 @@ select {
 .pagemgr__actions .icon {
   width: 17px;
   height: 17px;
-}
-/* `touch-action: none` so a touch drag starts moving the card immediately
-   instead of the pannable `.pagemgr__grid` (overflow-y: auto) intercepting
-   it as a scroll gesture first — see CLAUDE.md's touch-action note. */
-.pagemgr__drag-handle {
-  cursor: grab;
-  touch-action: none;
-}
-.pagemgr__drag-handle:active {
-  cursor: grabbing;
-}
-.pagemgr__card--dragging {
-  box-shadow: var(--sh-2);
-  opacity: 0.95;
-  user-select: none;
-}
-.pagemgr__card--placeholder {
-  border-radius: var(--r-lg);
-  border: 2px dashed var(--outline-variant);
-  background: var(--surface-c);
 }
 
 .seg {

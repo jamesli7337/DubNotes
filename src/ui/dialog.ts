@@ -175,8 +175,6 @@ export function textPrompt(opts: {
   value?: string;
   placeholder?: string;
   confirmText?: string;
-  /** false: a tap on the backdrop (or Escape) doesn't cancel — only the Cancel button does. Default true. */
-  dismissable?: boolean;
 }): Promise<string | null> {
   return new Promise((resolve) => {
     const form = document.createElement('form');
@@ -207,7 +205,6 @@ export function textPrompt(opts: {
       modal.close();
     };
     const modal = openModal(form, {
-      dismissable: opts.dismissable,
       onClose: () => {
         if (!settled) {
           settled = true;

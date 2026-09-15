@@ -1122,10 +1122,9 @@ export class PageCanvas {
     return da <= db ? 'a' : 'b';
   }
 
-  /** The view zoom changed: the pending line's handles are sized for the screen, so repaint them, and the selection's delete button (screen-fixed — see SelectionOverlay) needs to catch up too. */
+  /** The view zoom changed: the pending line's handles are sized for the screen, so repaint them. */
   zoomChanged(): void {
     if (this.lineEdit) this.schedule();
-    this.overlay?.reposition();
   }
 
   /** Adds the pending line to the page as one undo step; a no-op when there is none. */
@@ -1198,10 +1197,9 @@ export class PageCanvas {
       return;
     }
     let hit = false;
-    const eraserTol = ERASER_RADIUS / this.zoom();
     for (const s of store.strokesOf(this.page.id)) {
       if (this.erased.has(s.id)) continue;
-      const tol = s.size / 2 + eraserTol;
+      const tol = s.size / 2 + ERASER_RADIUS;
       if (nearPolyline(pt[0], pt[1], s.points, tol)) {
         this.erased.add(s.id);
         hit = true;
@@ -1218,10 +1216,9 @@ export class PageCanvas {
    */
   private eraseShapesAt(pt: number[]): boolean {
     let hit = false;
-    const eraserTol = ERASER_RADIUS / this.zoom();
     for (const e of store.elementsOf(this.page.id)) {
       if (e.kind !== 'shape' || this.erased.has(e.id)) continue;
-      if (nearShapeOutline(e, pt[0], pt[1], e.size / 2 + eraserTol)) {
+      if (nearShapeOutline(e, pt[0], pt[1], e.size / 2 + ERASER_RADIUS)) {
         this.erased.add(e.id);
         hit = true;
       }
@@ -1238,9 +1235,8 @@ export class PageCanvas {
   private partialEraseAt(pt: number[]): void {
     let newStroke = false;
     let changed = false;
-    const eraserTol = ERASER_RADIUS / this.zoom();
     for (const s of store.strokesOf(this.page.id)) {
-      const tol = s.size / 2 + eraserTol;
+      const tol = s.size / 2 + ERASER_RADIUS;
       const t2 = tol * tol;
       let gone = this.partial.get(s.id);
       const p = s.points;
