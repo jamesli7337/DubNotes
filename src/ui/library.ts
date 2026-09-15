@@ -567,6 +567,7 @@ function buildFab(root: HTMLElement, folder: Folder | null): HTMLElement {
       title: 'New notebook',
       placeholder: 'Notebook name',
       confirmText: 'Create',
+      dismissable: false,
     });
     if (name == null) return;
     const nb = store.createNotebook(name, folder?.id ?? null);

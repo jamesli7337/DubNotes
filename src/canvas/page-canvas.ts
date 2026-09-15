@@ -1197,9 +1197,10 @@ export class PageCanvas {
       return;
     }
     let hit = false;
+    const eraserTol = ERASER_RADIUS / this.zoom();
     for (const s of store.strokesOf(this.page.id)) {
       if (this.erased.has(s.id)) continue;
-      const tol = s.size / 2 + ERASER_RADIUS;
+      const tol = s.size / 2 + eraserTol;
       if (nearPolyline(pt[0], pt[1], s.points, tol)) {
         this.erased.add(s.id);
         hit = true;
@@ -1216,9 +1217,10 @@ export class PageCanvas {
    */
   private eraseShapesAt(pt: number[]): boolean {
     let hit = false;
+    const eraserTol = ERASER_RADIUS / this.zoom();
     for (const e of store.elementsOf(this.page.id)) {
       if (e.kind !== 'shape' || this.erased.has(e.id)) continue;
-      if (nearShapeOutline(e, pt[0], pt[1], e.size / 2 + ERASER_RADIUS)) {
+      if (nearShapeOutline(e, pt[0], pt[1], e.size / 2 + eraserTol)) {
         this.erased.add(e.id);
         hit = true;
       }
@@ -1235,8 +1237,9 @@ export class PageCanvas {
   private partialEraseAt(pt: number[]): void {
     let newStroke = false;
     let changed = false;
+    const eraserTol = ERASER_RADIUS / this.zoom();
     for (const s of store.strokesOf(this.page.id)) {
-      const tol = s.size / 2 + ERASER_RADIUS;
+      const tol = s.size / 2 + eraserTol;
       const t2 = tol * tol;
       let gone = this.partial.get(s.id);
       const p = s.points;
