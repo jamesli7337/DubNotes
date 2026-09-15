@@ -43,7 +43,26 @@ export class SelectionOverlay {
   private readonly box: HTMLElement;
   private readonly handleEls = new Map<Handle, HTMLElement>();
   private readonly rotEl: HTMLElement;
-  /** the page this overlay lives on, in page units — for the screen→page coordinate conversion in toPage. */
+  /**
+   * The delete button lives in `document.body` (position: fixed), *not*
+   * inside `box` — `host` sits under `.page-frame`'s zoom `transform`, which
+   * (like `.sel-callout` and the tape popover anchor) establishes a stacking
+   * context nothing inside it can escape no matter its own z-index: once the
+   * page scrolls far enough that a selection's corner lands under the fixed
+   * app-bar/dock (z-index 30/40), those bars always paint over anything
+   * still inside that trap, so a tap meant for an in-page delete-X never
+   * reached it there at all — the actual root cause of "the delete handle
+   * doesn't work" (see its own investigation). Every other handle stays
+   * inside `box`, unaffected — resize/rotate/move weren't reported broken,
+   * and keeping their drag math in simple page-local coordinates (which
+   * `box`'s own CSS transform chain already scales/positions for free) is
+   * far simpler than reimplementing that. See place() for how this tracks
+   * the same corner `box`'s own CSS would put it at, in screen coordinates.
+   */
+  private readonly delEl: HTMLButtonElement;
+  /** the nearest scrollable ancestor — scrolling it moves `host` but not this fixed delEl, so it needs its own reposition on scroll (see place()/onScroll). */
+  private readonly scrollEl: HTMLElement | null;
+  /** the page this overlay lives on, in page units — for the screen→page coordinate conversion in toPage, and for delEl's screen-space placement in place(). */
   private readonly pw: number;
   private readonly ph: number;
   private frame: Frame | null = null;
@@ -82,15 +101,27 @@ export class SelectionOverlay {
     this.rotEl.append(icon('rotate', 'sm'));
     this.box.append(this.rotEl);
 
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'sel-del';
-    del.title = 'Delete';
-    del.setAttribute('aria-label', 'Delete selection');
-    del.append(icon('close', 'sm'));
-    del.addEventListener('pointerdown', (e) => e.stopPropagation());
-    del.addEventListener('click', () => this.hooks.onDelete());
-    this.box.append(del);
+    this.delEl = document.createElement('button');
+    this.delEl.type = 'button';
+    this.delEl.className = 'sel-del';
+    this.delEl.hidden = true;
+    this.delEl.title = 'Delete';
+    this.delEl.setAttribute('aria-label', 'Delete selection');
+    this.delEl.append(icon('close', 'sm'));
+    // preventDefault alongside touch-action: none (styles.css) — same
+    // belt-and-suspenders the other handles get from .sel-box's own onDown
+    // (e.preventDefault(); e.stopPropagation();), which this button never
+    // reaches since it stops propagation before that runs.
+    this.delEl.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    this.delEl.addEventListener('click', () => this.hooks.onDelete());
+    document.body.append(this.delEl);
+
+    this.scrollEl = host.closest<HTMLElement>('.nb-scroll');
+    this.scrollEl?.addEventListener('scroll', this.onViewportChange, { passive: true });
+    window.addEventListener('resize', this.onViewportChange);
 
     this.box.addEventListener('pointerdown', this.onDown);
     this.box.addEventListener('pointermove', this.onMove);
@@ -111,6 +142,7 @@ export class SelectionOverlay {
     this.frame = { ...frame };
     this.opts = opts;
     this.box.hidden = false;
+    this.delEl.hidden = false;
     this.box.classList.toggle('sel-box--pass', opts.passThrough);
     this.rotEl.hidden = !opts.rotate;
     for (const [h, d] of this.handleEls) {
@@ -123,6 +155,7 @@ export class SelectionOverlay {
 
   hide(): void {
     this.box.hidden = true;
+    this.delEl.hidden = true;
     this.frame = null;
     this.drag = null;
   }
@@ -134,11 +167,38 @@ export class SelectionOverlay {
     this.place();
   }
 
+  /** Re-places delEl against the current frame without touching anything else — for a zoom change, which moves `host`'s on-screen rect without the frame itself changing (see PageCanvas.zoomChanged). A no-op while hidden. */
+  reposition(): void {
+    if (!this.box.hidden) this.place();
+  }
+
   destroy(): void {
+    this.scrollEl?.removeEventListener('scroll', this.onViewportChange);
+    window.removeEventListener('resize', this.onViewportChange);
+    this.delEl.remove();
     this.box.remove();
   }
 
+  private readonly onViewportChange = (): void => {
+    if (!this.box.hidden) this.placeDelEl();
+  };
+
+  /** delEl's own screen position: the frame's (rotation-aware) top-right corner, converted from page units via `host`'s current on-screen rect — same maths NotebookView's floating popovers use (frameScreenBox), just local here since delEl has no reason to leave this module. */
+  private placeDelEl(): void {
+    const f = this.frame;
+    if (!f) return;
+    const r = this.host.getBoundingClientRect();
+    const scale = r.width / this.pw;
+    const cx = f.x + f.w / 2;
+    const cy = f.y + f.h / 2;
+    const [cornerX, cornerY] = rotateAround(f.x + f.w, f.y, cx, cy, f.rot);
+    const SIZE = 24; // matches .sel-del's own width/height
+    this.delEl.style.left = `${r.left + cornerX * scale - SIZE / 2}px`;
+    this.delEl.style.top = `${r.top + cornerY * scale - SIZE / 2}px`;
+  }
+
   private place(): void {
+    this.placeDelEl();
     const f = this.frame;
     if (!f) return;
     const s = this.box.style;

@@ -51,8 +51,8 @@ export function sizeRange(kind: 'pen' | 'highlighter'): SizeRange {
   return kind === 'pen' ? PEN_SIZE_RANGE : HI_SIZE_RANGE;
 }
 
-/** Extra pointer radius, in page units, added to a stroke's own width when hit-testing the eraser. */
-export const ERASER_RADIUS = 14;
+/** Extra pointer radius, in screen px (counter-scaled for zoom — see PageCanvas.zoom()), added to a stroke's own width when hit-testing the eraser. */
+export const ERASER_RADIUS = 6;
 
 /** Whole: a touched stroke goes entirely. Partial: only the touched parts go, splitting the stroke. */
 export type EraserMode = 'whole' | 'partial';

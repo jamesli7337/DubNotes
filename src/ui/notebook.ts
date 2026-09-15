@@ -46,6 +46,9 @@ type ViewOp = Op | { kind: 'del-page'; page: Page; strokes: Stroke[]; elements: 
 /** Offset applied when pasting back onto the page the items were copied from. */
 const PASTE_OFFSET = 24;
 
+/** Size-slider magnetic snap: a dragged value within this much of a whole number lands exactly on it, so a whole size is easy to hit despite the slider's finer 0.1 step. */
+const SIZE_SNAP_RADIUS = 0.25;
+
 /** The lasso's selection shapes, in dock order. */
 const LASSO_OPTIONS: Record<LassoShape, { icon: IconName; label: string }> = {
   free: { icon: 'lasso', label: 'Freehand lasso' },
@@ -107,6 +110,8 @@ class NotebookView {
   private readonly pageVisibility = new Map<string, number>();
   private currentPageId: string | null = null;
   private colorRefreshers: Array<() => void> = [];
+  /** Last-known "current page has AI mode on" state — lets refreshAiControls rebuild the dock (see renderTools/aiColorsHidden) only when this actually flips, not on every routine page-switch. */
+  private lastAiColorsHidden = false;
 
   private readonly undoStack: ViewOp[] = [];
   private readonly redoStack: ViewOp[] = [];
@@ -623,6 +628,11 @@ class NotebookView {
     else this.closeDockOptions();
   }
 
+  /** While AI mode is on for the current page, every tool's ink is forced to the violet AI colour regardless of what's picked (see PageCanvas.aiInkColor) — showing a colour swatch row would be misleading, since choosing one has no effect. Only the colour picker itself is hidden; size, shape-kind, and eraser-mode options stay as normal. */
+  private aiColorsHidden(): boolean {
+    return !!(this.currentPageId && this.aiMode.isActive(this.currentPageId));
+  }
+
   private renderTools(): void {
     this.sizePopover?.close(); // switching tools (or any dock rebuild) dismisses the size popover
     this.colorRefreshers = []; // old closures would target elements this rebuild is about to discard
@@ -711,19 +721,21 @@ class NotebookView {
         opts.append(el('span', { class: 'hint', text: 'Drag anywhere — with the pen, a finger, or the mouse — to pan the page.' }));
         break;
       case 'text':
-        opts.append(
-          this.buildSwatches(
-            PEN_COLORS,
-            toolState.textColor,
-            (c) => {
-              toolState.textColor = c;
-              saveToolState();
-              this.renderTools();
-            },
-            'pen'
-          ),
-          el('span', { class: 'hint', text: 'Tap to place text. Tap a box to edit it.' })
-        );
+        if (!this.aiColorsHidden()) {
+          opts.append(
+            this.buildSwatches(
+              PEN_COLORS,
+              toolState.textColor,
+              (c) => {
+                toolState.textColor = c;
+                saveToolState();
+                this.renderTools();
+              },
+              'pen'
+            )
+          );
+        }
+        opts.append(el('span', { class: 'hint', text: 'Tap to place text. Tap a box to edit it.' }));
         break;
       case 'shapes': {
         // which shape a drag places, then the outline's colour and width (the pen's)
@@ -747,21 +759,22 @@ class NotebookView {
           });
           picker.append(b);
         }
-        opts.append(
-          picker,
-          el('span', { class: 'divider' }),
-          this.buildSwatches(
-            PEN_COLORS,
-            toolState.penColor,
-            (c) => {
-              toolState.penColor = c;
-              saveToolState();
-              this.renderTools();
-            },
-            'pen'
-          ),
-          this.buildSizeControl(true)
-        );
+        opts.append(picker, el('span', { class: 'divider' }));
+        if (!this.aiColorsHidden()) {
+          opts.append(
+            this.buildSwatches(
+              PEN_COLORS,
+              toolState.penColor,
+              (c) => {
+                toolState.penColor = c;
+                saveToolState();
+                this.renderTools();
+              },
+              'pen'
+            )
+          );
+        }
+        opts.append(this.buildSizeControl(true));
         // a shape is selected (freshly placed, or tapped to readjust): give it
         // the same reliable Delete action the Lasso tool's own selection row
         // has, rather than leaving the on-canvas × as the only way to delete
@@ -777,18 +790,22 @@ class NotebookView {
       }
       default: {
         const isPen = toolState.kind === 'pen';
-        const swatches = this.buildSwatches(
-          isPen ? PEN_COLORS : HI_COLORS,
-          isPen ? toolState.penColor : toolState.hiColor,
-          (c) => {
-            if (isPen) toolState.penColor = c;
-            else toolState.hiColor = c;
-            saveToolState();
-            this.renderTools();
-          },
-          isPen ? 'pen' : 'highlighter'
-        );
-        opts.append(swatches, this.buildSizeControl(isPen));
+        if (!this.aiColorsHidden()) {
+          opts.append(
+            this.buildSwatches(
+              isPen ? PEN_COLORS : HI_COLORS,
+              isPen ? toolState.penColor : toolState.hiColor,
+              (c) => {
+                if (isPen) toolState.penColor = c;
+                else toolState.hiColor = c;
+                saveToolState();
+                this.renderTools();
+              },
+              isPen ? 'pen' : 'highlighter'
+            )
+          );
+        }
+        opts.append(this.buildSizeControl(isPen));
         // line-snap lives on the pen only: draw a straight-ish stroke, hold
         // still, and it becomes a line you can adjust by its ends
         if (isPen) {
@@ -1465,9 +1482,10 @@ class NotebookView {
   }
 
   /**
-   * The slider panel shown inside the popover: continuous range (no snapping),
-   * a tick layer, and the numeric readout. Drag updates `toolState`, the readout
-   * and the dock dot via `onLiveSize` — never a dock re-render; saved on release.
+   * The slider panel shown inside the popover: a continuous range with a
+   * magnetic snap to whole numbers (see SIZE_SNAP_RADIUS), a tick layer, and
+   * the numeric readout. Drag updates `toolState`, the readout and the dock
+   * dot via `onLiveSize` — never a dock re-render; saved on release.
    * `refreshTicks` (re)builds the tick layer from the input's real rendered size.
    */
   private buildSizePanel(
@@ -1495,7 +1513,12 @@ class NotebookView {
     valueEl.textContent = current.toFixed(1);
 
     input.addEventListener('input', () => {
-      const v = clamp(parseFloat(input.value), range.min, range.max);
+      let v = clamp(parseFloat(input.value), range.min, range.max);
+      const whole = Math.round(v);
+      if (whole >= range.min && whole <= range.max && Math.abs(v - whole) <= SIZE_SNAP_RADIUS) {
+        v = whole;
+        input.value = String(v); // snaps the visible thumb to the tick, not just the stored value
+      }
       if (isPen) toolState.penSize = v;
       else toolState.hiSize = v;
       valueEl.textContent = v.toFixed(1);
@@ -1692,6 +1715,14 @@ class NotebookView {
     this.aiToggleBtn.setAttribute('aria-pressed', String(active));
     this.aiSendBtn.hidden = !active;
     this.syncHistory();
+    // rebuild the dock only when whether colours should be hidden actually
+    // changed (a toggle, or switching to/from a page with a different AI
+    // state) — not on every routine page-switch, which would otherwise
+    // needlessly reset dock state (e.g. close an open size popover) on scroll
+    if (active !== this.lastAiColorsHidden) {
+      this.lastAiColorsHidden = active;
+      this.renderTools();
+    }
   }
 
   /** Paper of the page currently in view, for resolving the "auto" ink token. */
@@ -1848,6 +1879,116 @@ class NotebookView {
       return b;
     };
 
+    // -------------------------------------------------- drag-and-drop reorder
+    // One pointer drags a card's grip handle; a placeholder marks its current
+    // slot in the grid and is shuffled live as the pointer crosses other
+    // cards, while the card itself floats as a `position: fixed` element (so
+    // it escapes the grid's `overflow-y: auto` clipping, same escape pattern
+    // selection.ts uses for its own fixed-position overlay pieces) tracking
+    // the pointer. The store isn't touched until drop, when the placeholder's
+    // final slot becomes the page's new index.
+    interface DragCtx {
+      pointerId: number;
+      pageId: string;
+      card: HTMLElement;
+      placeholder: HTMLElement;
+      offsetX: number;
+      offsetY: number;
+      lastClientY: number;
+    }
+    let dragCtx: DragCtx | null = null;
+    let autoscrollRaf = 0;
+    const AUTOSCROLL_EDGE = 48;
+    const AUTOSCROLL_SPEED = 10;
+
+    const autoscrollTick = (): void => {
+      if (!dragCtx) {
+        autoscrollRaf = 0;
+        return;
+      }
+      const r = grid.getBoundingClientRect();
+      const y = dragCtx.lastClientY;
+      if (y < r.top + AUTOSCROLL_EDGE) grid.scrollTop -= AUTOSCROLL_SPEED;
+      else if (y > r.bottom - AUTOSCROLL_EDGE) grid.scrollTop += AUTOSCROLL_SPEED;
+      autoscrollRaf = requestAnimationFrame(autoscrollTick);
+    };
+
+    const endDrag = (commit: boolean): void => {
+      const ctx = dragCtx;
+      if (!ctx) return;
+      dragCtx = null;
+      if (autoscrollRaf) {
+        cancelAnimationFrame(autoscrollRaf);
+        autoscrollRaf = 0;
+      }
+      const finalIndex = [...grid.children].indexOf(ctx.placeholder);
+      ctx.placeholder.replaceWith(ctx.card);
+      ctx.card.classList.remove('pagemgr__card--dragging');
+      ctx.card.style.cssText = '';
+      if (commit && finalIndex >= 0 && store.reorderPage(ctx.pageId, finalIndex)) {
+        this.syncPages();
+        render();
+      }
+    };
+
+    const dragHandle = (page: Page, card: HTMLElement): HTMLButtonElement => {
+      const handle = el('button', {
+        class: 'iconbtn pagemgr__drag-handle',
+        title: 'Drag to reorder',
+        'aria-label': 'Drag to reorder',
+      }) as HTMLButtonElement;
+      handle.append(icon('grip'));
+      handle.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        const rect = card.getBoundingClientRect();
+        const placeholder = el('div', { class: 'pagemgr__card pagemgr__card--placeholder' });
+        placeholder.style.width = `${rect.width}px`;
+        placeholder.style.height = `${rect.height}px`;
+        card.before(placeholder);
+        document.body.append(card);
+        card.classList.add('pagemgr__card--dragging');
+        Object.assign(card.style, {
+          position: 'fixed',
+          left: `${rect.left}px`,
+          top: `${rect.top}px`,
+          width: `${rect.width}px`,
+          pointerEvents: 'none',
+          zIndex: '10000',
+        });
+        dragCtx = {
+          pointerId: e.pointerId,
+          pageId: page.id,
+          card,
+          placeholder,
+          offsetX: e.clientX - rect.left,
+          offsetY: e.clientY - rect.top,
+          lastClientY: e.clientY,
+        };
+        handle.setPointerCapture(e.pointerId);
+        if (!autoscrollRaf) autoscrollRaf = requestAnimationFrame(autoscrollTick);
+      });
+      handle.addEventListener('pointermove', (e) => {
+        if (!dragCtx || e.pointerId !== dragCtx.pointerId) return;
+        dragCtx.lastClientY = e.clientY;
+        dragCtx.card.style.left = `${e.clientX - dragCtx.offsetX}px`;
+        dragCtx.card.style.top = `${e.clientY - dragCtx.offsetY}px`;
+        const hovered = document.elementFromPoint(e.clientX, e.clientY)?.closest('.pagemgr__card') as HTMLElement | null;
+        if (hovered && hovered !== dragCtx.placeholder && hovered.parentElement === grid) {
+          const children = [...grid.children];
+          if (children.indexOf(hovered) > children.indexOf(dragCtx.placeholder)) hovered.after(dragCtx.placeholder);
+          else hovered.before(dragCtx.placeholder);
+        }
+      });
+      const finish = (e: PointerEvent): void => {
+        if (!dragCtx || e.pointerId !== dragCtx.pointerId) return;
+        endDrag(true);
+      };
+      handle.addEventListener('pointerup', finish);
+      handle.addEventListener('pointercancel', finish);
+      return handle;
+    };
+
     const render = (): void => {
       const pages = store.pagesOf(this.nb.id);
       grid.replaceChildren();
@@ -1884,6 +2025,7 @@ class NotebookView {
 
         const actions = el('div', { class: 'pagemgr__actions' });
         actions.append(
+          dragHandle(page, card),
           actionBtn('arrow-up', 'Move page up', i === 0, () => {
             store.movePage(page.id, -1);
             this.syncPages();

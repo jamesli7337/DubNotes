@@ -403,6 +403,19 @@ class Store {
     return true;
   }
 
+  /** Moves a page to an arbitrary position among its notebook's pages (drag-and-drop reorder in the page manager). False (no-op) if it's already at `toIndex`. */
+  reorderPage(pageId: string, toIndex: number): boolean {
+    const page = this.pages.get(pageId);
+    if (!page) return false;
+    const siblings = this.pagesOf(page.notebookId);
+    const target = Math.max(0, Math.min(toIndex, siblings.length - 1));
+    if (target === page.index) return false;
+    this.reindex(page.notebookId, pageId, target);
+    this.bump(page.notebookId);
+    this.schedule();
+    return true;
+  }
+
   /**
    * Duplicates a page — paper, background, and every stroke/element (each
    * re-keyed with a fresh id, deep-copied where an array is mutated in place
