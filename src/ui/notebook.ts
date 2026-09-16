@@ -1,6 +1,6 @@
 import { AiMode } from '../ai-mode';
 import { AUTO_COLOR, resolveInkColor } from '../canvas/freehand';
-import { rotateAround, type Frame } from '../canvas/geom';
+import { itemBounds, rotateAround, unionRects, type Frame } from '../canvas/geom';
 import type { GuideKind } from '../canvas/guide';
 import { PageCanvas, TAPE_MIN } from '../canvas/page-canvas';
 import type { Op } from '../canvas/page-canvas';
@@ -1359,7 +1359,11 @@ class NotebookView {
     container.replaceChildren();
     const b = el('button', { class: 'sel-callout__btn', role: 'menuitem', text: 'Paste' }) as HTMLButtonElement;
     b.disabled = !this.clipboard.length;
-    b.addEventListener('click', () => this.pasteClipboard());
+    // this callout only ever shows for a just-lassoed empty region (see
+    // showEmptyLassoCallout), so calloutFrame — read fresh here, not
+    // captured at button-creation time — is exactly the "paste here" the
+    // user pointed at, not just the original copied position
+    b.addEventListener('click', () => this.pasteClipboard(this.calloutFrame ?? undefined));
     container.append(b);
   }
 
@@ -1649,15 +1653,33 @@ class NotebookView {
     return true;
   }
 
-  /** Pastes onto the page with the selection, else the page in view; nudged when it's the source page. */
-  private pasteClipboard(): boolean {
+  /**
+   * Pastes onto the page with the selection, else the page in view; nudged
+   * when it's the source page. `at`, when given, is an explicit "paste
+   * here" location (in that page's units) — only the empty-lasso callout's
+   * Paste button passes one, since a just-lassoed empty region is the one
+   * case with an unambiguous target spot. Every clipboard item is then
+   * offset so their combined bounding box lands centred on `at`, instead of
+   * the usual same-page nudge from the copied items' own stored position.
+   * `at` is paired with calloutPc (not selPc/currentPageId) as the target
+   * page — it's meaningless against any page but the one it was measured on.
+   */
+  private pasteClipboard(at?: Frame): boolean {
     if (!this.clipboard.length) return false;
-    const target = this.selPc ?? (this.currentPageId ? this.pcByPage.get(this.currentPageId) : null);
+    const target = at ? this.calloutPc : (this.selPc ?? (this.currentPageId ? this.pcByPage.get(this.currentPageId) : null));
     if (!target?.mounted) return false;
-    const nudge = target.page.id === this.clipboardPage ? PASTE_OFFSET : 0;
-    const items = this.clipboard.map((it) => PageCanvas.cloneItem(it, target.page.id, this.nb.id, nudge, nudge));
-    // pasting again lands the next copy one step further along
-    if (nudge) this.clipboard = items.map((it) => JSON.parse(JSON.stringify(it)) as PageItem);
+    let dx: number;
+    let dy: number;
+    if (at) {
+      const box = unionRects(this.clipboard.map(itemBounds));
+      dx = box ? at.x + at.w / 2 - (box.x + box.w / 2) : 0;
+      dy = box ? at.y + at.h / 2 - (box.y + box.h / 2) : 0;
+    } else {
+      dx = dy = target.page.id === this.clipboardPage ? PASTE_OFFSET : 0;
+    }
+    const items = this.clipboard.map((it) => PageCanvas.cloneItem(it, target.page.id, this.nb.id, dx, dy));
+    // pasting again (without an explicit target) lands the next copy one step further along
+    if (!at && dx) this.clipboard = items.map((it) => JSON.parse(JSON.stringify(it)) as PageItem);
     target.pasteItems(items);
     return true;
   }
