@@ -39,10 +39,25 @@ function chordDeviation(pts: number[][]): number {
   return max;
 }
 
-function isStraight(pts: number[][]): boolean {
+/** Minimum total stroke length (screen px, counter-scaled for zoom) recognizeLine will even consider. */
+const MIN_TOTAL_LEN = 30;
+/** Minimum chord length (screen px, counter-scaled for zoom) for a shaft to count as a straight candidate. */
+const MIN_CHORD = 20;
+/** Deviation floor (screen px, counter-scaled for zoom) under the 5%-of-chord tolerance, for short lines. */
+const MIN_DEVIATION_FLOOR = 5;
+
+/**
+ * `zoom` converts the screen-px constants above into the page-space units
+ * `pts` are measured in, so the same *visually* straight/long line snaps the
+ * same way regardless of what zoom level it was drawn at — a short-looking
+ * line drawn while zoomed in shouldn't be held to the same page-unit chord
+ * length as one drawn zoomed out. The 5%/8% ratios elsewhere are already
+ * scale-invariant and don't need this.
+ */
+function isStraight(pts: number[][], zoom: number): boolean {
   if (pts.length < 2) return false;
   const chord = dist(pts[0], pts[pts.length - 1]);
-  return chord >= 20 && chordDeviation(pts) <= Math.max(0.05 * chord, 5);
+  return chord >= MIN_CHORD / zoom && chordDeviation(pts) <= Math.max(0.05 * chord, MIN_DEVIATION_FLOOR / zoom);
 }
 
 /** The line (or arrow) element box between two endpoints, `nib` being the stroke width. */
@@ -72,11 +87,12 @@ export function lineEnds(fit: ShapeFit): [number[], number[]] {
  * stroke doesn't look like one (a curve, a corner, a loop, ordinary writing).
  * Anything drawn past the tip (a wobble at the end) is ignored as long as it
  * is short. `nib` is the stroke width, used for tolerances and the box height.
+ * `zoom` is the view zoom the stroke was drawn at — see isStraight's comment.
  */
-export function recognizeLine(pts: number[][], nib: number): ShapeFit | null {
+export function recognizeLine(pts: number[][], nib: number, zoom: number): ShapeFit | null {
   if (pts.length < 6) return null;
   const total = pathLength(pts);
-  if (total < 30) return null;
+  if (total < MIN_TOTAL_LEN / zoom) return null;
   const start = pts[0];
   let tipIndex = 0;
   let tipDist = 0;
@@ -90,7 +106,7 @@ export function recognizeLine(pts: number[][], nib: number): ShapeFit | null {
   const tip = pts[tipIndex];
   const shaft = pts.slice(0, tipIndex + 1);
   const tail = pts.slice(tipIndex);
-  if (!isStraight(shaft)) return null;
+  if (!isStraight(shaft, zoom)) return null;
   if (pathLength(tail) > Math.max(0.08 * pathLength(shaft), nib)) return null;
   return lineFit('line', start, tip, nib);
 }

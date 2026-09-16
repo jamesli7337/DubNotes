@@ -103,6 +103,8 @@ class NotebookView {
   private pinch: { d0: number; z0: number; mx: number; my: number; cx: number; cy: number } | null = null;
   /** Hand tool, mouse only — touch/pen panning is native (touch-action), see bindHandToolGestures. */
   private handPan: { pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null = null;
+  /** Recomputes the custom scrollbar thumb's size/position (see bindScrollbarThumb); called after anything that changes scrollEl's content height without itself firing a native 'scroll' event (setZoom, syncPages). */
+  private layoutScrollbarThumb: () => void = () => {};
 
   private observer: IntersectionObserver;
   private readonly pcByPage = new Map<string, PageCanvas>();
@@ -402,6 +404,7 @@ class NotebookView {
     blockGestures(this.scrollEl);
     this.bindZoomGestures();
     this.bindHandToolGestures();
+    this.bindScrollbarThumb();
     // scrolling/resizing changes where the selection lands on screen without
     // changing its frame — reposition the callout (if open) to match; a fresh
     // pageRect() picks up the new scroll/zoom, same idea as openModal's
@@ -466,6 +469,7 @@ class NotebookView {
     s.scrollTop = contentY * next - ay;
     this.refreshAutoColors(); // the size dot previews at the on-screen stroke width
     for (const pc of this.pcByPage.values()) pc.zoomChanged(); // a pending line's handles stay screen-sized
+    this.layoutScrollbarThumb(); // zoom changes scrollHeight without firing a native 'scroll' event on its own
   }
 
   /**
@@ -562,6 +566,75 @@ class NotebookView {
     };
     s.addEventListener('pointerup', end);
     s.addEventListener('pointercancel', end);
+  }
+
+  /**
+   * A custom draggable scrollbar thumb over `.nb-scroll`, shown only on
+   * coarse-pointer/no-hover devices (see the `.nb-scrollbar-thumb` CSS) —
+   * i.e. touch/iPad, where the browser's own (`::-webkit-scrollbar`-styled)
+   * scrollbar exists but can't be grabbed and dragged the way a desktop
+   * mouse can drag it natively. Positioned as `position: fixed` against
+   * `scrollEl`'s own live rect (so it tracks the dock/app-bar chrome around
+   * it without hardcoding their heights), the same escape-the-zoomed-subtree
+   * pattern selection.ts and the page manager's own drag use.
+   */
+  private bindScrollbarThumb(): void {
+    const s = this.scrollEl;
+    const thumb = el('div', { class: 'nb-scrollbar-thumb' });
+    document.body.append(thumb);
+
+    const MIN_THUMB = 32;
+    const INSET = 6;
+
+    const layout = (): void => {
+      const track = s.getBoundingClientRect();
+      const trackH = track.height - INSET * 2;
+      const maxScroll = s.scrollHeight - s.clientHeight;
+      if (maxScroll <= 1) {
+        thumb.hidden = true;
+        return;
+      }
+      thumb.hidden = false;
+      const thumbH = Math.min(trackH, Math.max(MIN_THUMB, (s.clientHeight / s.scrollHeight) * trackH));
+      const progress = clamp(s.scrollTop / maxScroll, 0, 1);
+      thumb.style.top = `${track.top + INSET + progress * (trackH - thumbH)}px`;
+      thumb.style.height = `${thumbH}px`;
+      thumb.style.right = `${window.innerWidth - track.right + 3}px`;
+    };
+    this.layoutScrollbarThumb = layout;
+    s.addEventListener('scroll', layout, { passive: true });
+    window.addEventListener('resize', layout);
+    layout();
+
+    let drag: { pointerId: number; startY: number; startScrollTop: number; trackH: number; thumbH: number } | null = null;
+    thumb.addEventListener('pointerdown', (e) => {
+      e.preventDefault();
+      const track = s.getBoundingClientRect();
+      drag = {
+        pointerId: e.pointerId,
+        startY: e.clientY,
+        startScrollTop: s.scrollTop,
+        trackH: track.height - INSET * 2,
+        thumbH: thumb.getBoundingClientRect().height,
+      };
+      try {
+        thumb.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+    });
+    thumb.addEventListener('pointermove', (e) => {
+      if (!drag || e.pointerId !== drag.pointerId) return;
+      const maxScroll = s.scrollHeight - s.clientHeight;
+      const range = drag.trackH - drag.thumbH;
+      const scrollDelta = range > 0 ? ((e.clientY - drag.startY) / range) * maxScroll : 0;
+      s.scrollTop = clamp(drag.startScrollTop + scrollDelta, 0, maxScroll);
+    });
+    const endDrag = (e: PointerEvent): void => {
+      if (drag?.pointerId === e.pointerId) drag = null;
+    };
+    thumb.addEventListener('pointerup', endDrag);
+    thumb.addEventListener('pointercancel', endDrag);
   }
 
   /**
@@ -1720,6 +1793,7 @@ class NotebookView {
 
       this.applyPaperBg(wrap, page);
     });
+    this.layoutScrollbarThumb(); // adding/removing pages changes scrollHeight without firing a native 'scroll' event
   }
 
   private buildPageWrap(page: Page): HTMLElement {

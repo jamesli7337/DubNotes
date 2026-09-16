@@ -8,6 +8,7 @@ import {
   resolveDrawTool,
   SHAPE_CUE_MS,
   SHAPE_HOLD_MS,
+  TAP_SLOP,
   TEXT_DEFAULT_SIZE,
   TEXT_DEFAULT_WIDTH,
   toolState,
@@ -101,11 +102,11 @@ type CoalescingEvent = PointerEvent & { getCoalescedEvents?: () => PointerEvent[
 const PENDING_OPACITY = 0.25;
 /** Opacity of the ghosted line cue shown partway through a line-snap hold, before it snaps. */
 const SHAPE_CUE_OPACITY = 0.35;
-/** Radius of a pending line's endpoint handles (screen px, counter-scaled for zoom), and how close a press must be to grab one. */
-const LINE_HANDLE_R = 7;
+/** How many trailing live points the line-snap hold-still check averages over, instead of comparing only against the single previous sample — see its use in onMove. */
+const STILL_TRAIL = 5;
+/** Radius of a pending line's endpoint handles (screen px, counter-scaled for zoom). Drawn smaller than LINE_HANDLE_HIT (how close a press must be to grab one) on purpose — the grab target stays generous even though the dot itself reads small. */
+const LINE_HANDLE_R = 5;
 const LINE_HANDLE_HIT = 14;
-/** Pointer travel (page units) that turns a tap into a drag. */
-const TAP_SLOP = 4;
 /** Extra hit radius, in page units, when tapping a stroke to select it. */
 const TAP_RADIUS = 6;
 /** Max gap between two taps (ms) and how far apart they may land (page units) to still count as one double-tap — see isDoubleTap. */
@@ -758,15 +759,21 @@ export class PageCanvas {
             this.lineEdit.b = [pt[0], pt[1]];
             break;
           }
-          const last = this.live[this.live.length - 1];
-          const moved = Math.hypot(pt[0] - last[0], pt[1] - last[1]) > 1.5;
+          // compared against a short trailing average rather than just the
+          // immediately previous sample, so one noisy sample (ordinary
+          // input jitter during an otherwise-still hold) can't by itself
+          // read as real movement and restart the whole hold-still timer
+          const trail = this.live.slice(-STILL_TRAIL);
+          const ax = trail.reduce((s, p) => s + p[0], 0) / trail.length;
+          const ay = trail.reduce((s, p) => s + p[1], 0) / trail.length;
+          const moved = Math.hypot(pt[0] - ax, pt[1] - ay) > 1.5;
           this.live.push(this.snapped(pt));
           if (this.shapeMode && moved) {
             if (this.pendingFit) {
               // translucent cue: keep tracking the pen so the ghost's length and
               // direction adjust live as you refine the stroke, rather than
               // freezing or vanishing the moment you move
-              this.pendingFit = recognizeLine(this.live, this.liveTool.size);
+              this.pendingFit = recognizeLine(this.live, this.liveTool.size, this.zoom());
             }
             this.armHold();
           }
@@ -1097,7 +1104,7 @@ export class PageCanvas {
     this.cueTimer = setTimeout(() => {
       this.cueTimer = null;
       if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;
-      const fit = recognizeLine(this.live, this.liveTool.size);
+      const fit = recognizeLine(this.live, this.liveTool.size, this.zoom());
       if (fit) {
         this.pendingFit = fit;
         this.schedule();
@@ -1106,7 +1113,7 @@ export class PageCanvas {
     this.holdTimer = setTimeout(() => {
       this.holdTimer = null;
       if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;
-      const fit = recognizeLine(this.live, this.liveTool.size);
+      const fit = recognizeLine(this.live, this.liveTool.size, this.zoom());
       if (fit) {
         const [a, b] = lineEnds(fit);
         this.lineEdit = { a, b, color: this.liveTool.color, size: this.liveTool.size };
@@ -1645,7 +1652,11 @@ export class PageCanvas {
     } else if (!this.selected.size) {
       return;
     }
-    if (toolState.kind === 'lasso' && this.isDoubleTap(x, y)) {
+    // an active selection was already confirmed above (either a lasso path
+    // with the tap inside it, or any other non-empty selection) — the
+    // double-tap reveal isn't tied to which tool happens to be active right
+    // now, it applies to whatever is currently selected
+    if (this.isDoubleTap(x, y)) {
       const frame = this.lastLassoPath ? { ...aabb(this.lastLassoPath), rot: 0 } : itemsFrame(this.selectedItems());
       if (frame) this.hooks.onSelectionFrame(this, frame);
       return;

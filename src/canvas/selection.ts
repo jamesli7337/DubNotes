@@ -1,3 +1,4 @@
+import { TAP_SLOP } from '../tools';
 import { icon } from '../ui/icon';
 import { rotateAround, type Frame } from './geom';
 
@@ -221,7 +222,19 @@ export class SelectionOverlay {
       this.hooks.onDragEnd(null);
       return;
     }
+    // A body drag (kind 'move') that traveled less than TAP_SLOP still
+    // counts as a tap, not a drag — matches every other tap-vs-drag decision
+    // in the canvas layer. Real pointer input essentially never reports
+    // pixel-exact coordinates between down and up (especially on the fast
+    // second contact of a double-tap); without this tolerance that residual
+    // noise read as an intentional move and got permanently committed via
+    // onDragEnd/endTransform instead of ever reaching onTap. Resize/rotate
+    // handles are unaffected — 'move' is the only kind whose x/y can differ
+    // from the press start without w/h/rot also changing.
+    const tapMove =
+      d.kind === 'move' && this.frame && Math.hypot(this.frame.x - d.start.x, this.frame.y - d.start.y) < TAP_SLOP;
     const moved =
+      !tapMove &&
       this.frame &&
       (this.frame.x !== d.start.x ||
         this.frame.y !== d.start.y ||

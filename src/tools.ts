@@ -54,6 +54,9 @@ export function sizeRange(kind: 'pen' | 'highlighter'): SizeRange {
 /** Extra pointer radius, in screen px (counter-scaled for zoom — see PageCanvas.zoom()), added to a stroke's own width when hit-testing the eraser. */
 export const ERASER_RADIUS = 6;
 
+/** Pointer travel (page units) that turns a tap into a drag — shared by every tap-vs-drag decision in the canvas layer, including SelectionOverlay's box-body handling. */
+export const TAP_SLOP = 4;
+
 /** Whole: a touched stroke goes entirely. Partial: only the touched parts go, splitting the stroke. */
 export type EraserMode = 'whole' | 'partial';
 

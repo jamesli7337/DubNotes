@@ -1280,6 +1280,41 @@ select {
 .nb-scroll--hand:active {
   cursor: grabbing;
 }
+/* Custom draggable scrollbar thumb (see bindScrollbarThumb) — position:
+   fixed so it escapes .nb-scroll's own scrolling, same as every other
+   fixed-position overlay piece that must render independent of the scroller.
+   Hidden by default (and on any device with a real mouse, which can already
+   drag the native ::-webkit-scrollbar thumb above); shown only on coarse-
+   pointer/no-hover devices — i.e. touch/iPad, where a CSS-styled scrollbar
+   exists but isn't draggable at all. */
+.nb-scrollbar-thumb {
+  display: none;
+  position: fixed;
+  /* wider than the visible bar (below) so it's an easy fingertip target;
+     it extends inward from the scroller's edge, not off-screen */
+  width: 24px;
+  touch-action: none;
+  z-index: 40;
+}
+.nb-scrollbar-thumb::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 6px;
+  border-radius: var(--r-full);
+  background: var(--outline);
+  opacity: 0.55;
+}
+.nb-scrollbar-thumb:active::after {
+  opacity: 0.85;
+}
+@media (hover: none) and (pointer: coarse) {
+  .nb-scrollbar-thumb:not([hidden]) {
+    display: block;
+  }
+}
 .nb-empty {
   text-align: center;
   color: var(--on-surface-variant);
