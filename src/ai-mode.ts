@@ -1,22 +1,28 @@
 /**
- * AI mode: turns a page into a live handwritten conversation with Gemini.
+ * AI mode: turns the notebook into a live handwritten conversation with
+ * Gemini. One global on/off switch for the whole notebook (not per page) —
+ * turning it on applies to wherever you currently are, and drawing on *any*
+ * page while it's on inks in the AI accent colour there; turning it off
+ * (the app-bar toggle, or the panel's own ×) ends it everywhere at once,
+ * discarding any unsent ink on every page, not just whichever one is current.
  *
  * Deliberately decoupled from `PageCanvas` — it never touches pointer/canvas
  * internals. It listens to the same `Op` stream `NotebookView` already uses
  * for undo/redo (an `add-stroke` op is "new ink") and reads page content
  * through `store` (which works whether or not the page is currently
- * mounted). Capture/send is per-page (the region below the last turn on
- * *that* page); the reply, though, is notebook-wide: it renders in a single
- * slide-out chat panel (`mountPanel`/`renderConversation`) rather than as
- * page content, so the conversation reads the same regardless of which page
- * you're looking at or scroll to.
+ * mounted). Send always captures the *whole* current page as one image —
+ * whatever pre-existing notes are there plus the new violet ink — so Gemini
+ * always has full context, not just a cropped slice; api/gemini.ts's system
+ * prompt is what tells it to treat the violet ink as the actual question and
+ * everything else as background. The reply, though, is notebook-wide: it
+ * renders in a single slide-out chat panel (`mountPanel`/`renderConversation`)
+ * rather than as page content, so the conversation reads the same regardless
+ * of which page you're looking at or scroll to.
  */
 import { el } from './ui/dom';
 import { icon } from './ui/icon';
 import { confirmDialog } from './ui/dialog';
 import { renderPageRegionImage } from './export/raster';
-import { itemBounds, unionRects } from './canvas/geom';
-import { pageH } from './const';
 import { store } from './store';
 import { clearAiEntries, getAiEntries, putAiEntry } from './db';
 import { renderAiReply } from './ai-render';
@@ -45,20 +51,18 @@ interface ConversationEntry extends AiConversationEntry {
 interface AiPageState {
   pageEl: HTMLElement;
   statusEl: HTMLElement;
-  active: boolean;
-  sending: boolean;
-  /** page-units Y: top of the region the next turn will be read from. */
-  turnTop: number;
-  /** ids of strokes drawn while AI mode was active on this page — ephemeral:
-   * removed once their turn is sent (or discarded if AI mode is turned off
+  /** ids of strokes drawn on this page while AI mode was globally active —
+   * ephemeral: removed once sent (or discarded if AI mode is turned off
    * before that happens). Never holds a stroke the user drew with AI mode
-   * off. */
+   * off. Also what `sendNow` checks to know this page has a question to ask —
+   * position on the page is irrelevant now that a turn always captures the
+   * whole page, not a region below some remembered line. */
   inkIds: Set<string>;
   /** This turn's own undo/redo history — only ever holds the 'add-stroke'/
-   * 'add-items' ops that created this turn's ink (see handleOp), entirely
-   * separate from NotebookView's main undo stack (which never sees AI ink at
-   * all). Cleared whenever the ink itself is cleared: on toggle-off
-   * (discardInk) and once a turn is sent (submitTurn). */
+   * 'add-items' ops that created this page's pending ink (see handleOp),
+   * entirely separate from NotebookView's main undo stack (which never sees
+   * AI ink at all). Cleared whenever the ink itself is cleared: on
+   * deactivation (discardInk) and once sent (submitTurn). */
   aiUndo: Op[];
   aiRedo: Op[];
 }
@@ -67,13 +71,19 @@ interface AiPageState {
 export interface AiModeHost {
   /** Repaints a page's canvas from the store, if it's currently mounted. */
   refreshPage(pageId: string): void;
-  /** A page's active flag changed — lets the app-bar toggle/send buttons refresh if it's the current page. */
-  onActiveChanged(pageId: string, active: boolean): void;
+  /** AI mode's global on/off state changed — lets the app-bar toggle/send buttons refresh. */
+  onActiveChanged(active: boolean): void;
   /** This page's AI-scoped undo/redo stacks changed — lets the app-bar undo/redo buttons refresh (enabled state) if it's the current page. */
   onAiHistoryChanged(pageId: string): void;
 }
 
 export class AiMode {
+  /** The one global on/off switch — see the module doc comment. */
+  private active = false;
+  /** True while a turn is in flight; blocks starting another until it resolves, on any page. */
+  private sending = false;
+  /** Which page a send in flight is for, so only that page's status shows "thinking". */
+  private sendingPageId: string | null = null;
   private readonly pages = new Map<string, AiPageState>();
   private conversation: ConversationEntry[] = [];
   private panelEl: HTMLElement | null = null;
@@ -109,13 +119,11 @@ export class AiMode {
     this.pages.set(pageId, {
       pageEl,
       statusEl,
-      active: false,
-      sending: false,
-      turnTop: 0,
       inkIds: new Set(),
       aiUndo: [],
       aiRedo: [],
     });
+    this.applyVisual(pageId); // a page can mount while AI mode is already on (e.g. scrolling to a new one)
   }
 
   /** Builds the slide-out chat panel once and appends it to `container`. */
@@ -135,6 +143,7 @@ export class AiMode {
     header.append(actions);
 
     const body = el('div', { class: 'ai-panel__body' });
+    this.bindSwipeThrough(body);
 
     panel.append(header, body);
     container.append(panel);
@@ -142,6 +151,68 @@ export class AiMode {
     this.panelBody = body;
     this.hostEl = container;
     this.renderConversation();
+  }
+
+  /**
+   * Lets a vertical drag on the (short, common-case) chat body still switch
+   * notebook pages instead of doing nothing. `.ai-panel` is `position: fixed`
+   * and sits to the left of `.nb-scroll` (a sibling, not an ancestor) — a
+   * touch never falls through one element to whatever's visually behind it,
+   * so once the panel is open, its own screen-width strip (up to 340px/88vw)
+   * silently swallows any swipe that starts there: `.ai-panel__body` has
+   * `overflow-y: auto`, and with a short conversation there's nothing in it
+   * to actually scroll, so the touch just does nothing at all — on a narrow
+   * screen that's a large fraction of the width dead to "swipe to switch
+   * pages". Only kicks in when the body has no scrollable content of its own
+   * (checked fresh at touchstart): a long conversation still scrolls exactly
+   * as before, untouched, and can still reach the page-switch gesture via the
+   * visible page area to the right of the panel, same as always.
+   *
+   * preventDefault() on `touchstart` (not just `touchmove`) is what actually
+   * secures the gesture before the browser's own native-pan recognizer can
+   * claim it — the same non-passive-listener technique page-canvas.ts's
+   * blockNativeGesture uses for the analogous "own this touch before iOS
+   * does" problem.
+   */
+  private bindSwipeThrough(body: HTMLElement): void {
+    let dragging = false;
+    let startY = 0;
+    let startScrollTop = 0;
+
+    const scroller = (): HTMLElement | null => this.hostEl?.querySelector<HTMLElement>('.nb-scroll') ?? null;
+    const hasOwnScroll = (): boolean => body.scrollHeight > body.clientHeight + 1;
+
+    body.addEventListener(
+      'touchstart',
+      (e) => {
+        const s = scroller();
+        if (hasOwnScroll() || e.touches.length !== 1 || !s) {
+          dragging = false;
+          return;
+        }
+        dragging = true;
+        startY = e.touches[0].clientY;
+        startScrollTop = s.scrollTop;
+        e.preventDefault();
+      },
+      { passive: false }
+    );
+    body.addEventListener(
+      'touchmove',
+      (e) => {
+        if (!dragging) return;
+        const s = scroller();
+        if (!s) return;
+        s.scrollTop = startScrollTop - (e.touches[0].clientY - startY);
+        e.preventDefault();
+      },
+      { passive: false }
+    );
+    const end = (): void => {
+      dragging = false;
+    };
+    body.addEventListener('touchend', end);
+    body.addEventListener('touchcancel', end);
   }
 
   /** Confirms, then permanently deletes this notebook's whole chat history. */
@@ -189,15 +260,16 @@ export class AiMode {
     this.hostEl?.classList.toggle('ai-panel-open', open);
   }
 
-  /** Whether AI mode is on for this page — the app-bar toggle button reflects this for the current page. */
-  isActive(pageId: string): boolean {
-    return this.pages.get(pageId)?.active ?? false;
+  /** Whether AI mode is on — one global switch, the same answer regardless of which page you ask about. */
+  isActive(): boolean {
+    return this.active;
   }
 
   /** Feed every committed page op through here. */
   handleOp(op: Op): void {
+    if (!this.active) return;
     const st = this.pages.get(op.pageId);
-    if (!st || !st.active) return;
+    if (!st) return;
     if (op.kind === 'add-stroke') {
       // any stroke drawn while AI mode is active is ephemeral ink, regardless
       // of where on the page it lands — see PageCanvas's isAiActive hook, which
@@ -220,45 +292,42 @@ export class AiMode {
   }
 
   /**
-   * Toggles AI mode for one page — called by the single app-bar button, for
-   * whichever page is current. The panel follows: turning off dismisses it,
-   * turning on reopens it. (The panel's own × goes further — see closeAll.)
+   * Toggles AI mode globally — called by the single app-bar button. The
+   * panel follows: turning off dismisses it, turning on reopens it. (The
+   * panel's own × goes through the same deactivation path — see closeAll.)
    */
-  toggle(pageId: string): void {
-    const st = this.pages.get(pageId);
-    if (!st) return;
-    if (st.active) {
-      this.deactivate(pageId, st);
+  toggle(): void {
+    if (this.active) {
+      this.deactivateAll();
     } else {
-      st.active = true;
-      st.turnTop = 0; // first turn: the whole page so far
-      this.applyVisual(pageId);
-      this.host.onActiveChanged(pageId, true);
+      this.active = true;
+      for (const pageId of this.pages.keys()) this.applyVisual(pageId);
+      this.host.onActiveChanged(true);
     }
-    this.setPanelOpen(st.active);
+    this.setPanelOpen(this.active);
   }
 
   /**
-   * Ends AI mode for every page it's currently active on — not just whichever
-   * one is "current" — since the panel is the one shared, notebook-wide piece
-   * of AI-mode chrome and its × is the obvious "turn this off" affordance.
-   * Without this, closing the panel this way left whichever page's session
-   * was active still `active` underneath (app-bar toggle still lit, unsent
-   * violet ink never discarded) — indistinguishable from AI mode staying on.
+   * Ends AI mode everywhere: every page's unsent violet ink is discarded, not
+   * just whichever one is "current" — this is a single global mode, so there
+   * is no such thing as "still on" for some other page once it's off. Used
+   * both by the app-bar toggle (turning off) and the panel's own × (which
+   * used to just hide the panel while leaving the session running underneath
+   * — indistinguishable from AI mode staying on).
    */
-  private closeAll(): void {
+  private deactivateAll(): void {
+    this.active = false;
     for (const [pageId, st] of this.pages) {
-      if (st.active) this.deactivate(pageId, st);
+      this.discardInk(pageId, st);
+      this.applyVisual(pageId);
     }
-    this.setPanelOpen(false);
+    this.host.onActiveChanged(false);
   }
 
-  /** Turns AI mode off for one page: drops any unsent violet ink (see discardInk) and notifies the host. The only way `active` ever goes false. */
-  private deactivate(pageId: string, st: AiPageState): void {
-    st.active = false;
-    this.discardInk(pageId, st);
-    this.applyVisual(pageId);
-    this.host.onActiveChanged(pageId, false);
+  /** The panel's own close button: ends the session (if any) and hides the panel either way. */
+  private closeAll(): void {
+    if (this.active) this.deactivateAll();
+    this.setPanelOpen(false);
   }
 
   /** True while a page is being torn down for good (not just scrolled out of view). */
@@ -322,10 +391,11 @@ export class AiMode {
     this.host.refreshPage(pageId);
   }
 
-  /** Submits the current turn immediately — the only way a turn is ever sent, called by the app-bar send button, for whichever page is current. */
+  /** Submits the current page's pending turn immediately — the only way a turn is ever sent, called by the app-bar send button, for whichever page is current. */
   sendNow(pageId: string): void {
+    if (!this.active || this.sending) return;
     const st = this.pages.get(pageId);
-    if (!st || !st.active || st.sending) return;
+    if (!st || !st.inkIds.size) return; // nothing new drawn here to ask about
     void this.submitTurn(pageId);
   }
 
@@ -342,26 +412,21 @@ export class AiMode {
   private applyVisual(pageId: string): void {
     const st = this.pages.get(pageId);
     if (!st) return;
-    st.pageEl.classList.toggle('page--ai-active', st.active);
-    st.statusEl.classList.toggle('ai-status--busy', st.sending);
-    st.statusEl.textContent = st.sending ? 'DubNotes AI is thinking…' : st.active ? 'AI mode' : '';
+    const busy = this.sending && this.sendingPageId === pageId;
+    st.pageEl.classList.toggle('page--ai-active', this.active);
+    st.statusEl.classList.toggle('ai-status--busy', busy);
+    st.statusEl.textContent = busy ? 'DubNotes AI is thinking…' : this.active ? 'AI mode' : '';
   }
 
   private async submitTurn(pageId: string): Promise<void> {
     const st = this.pages.get(pageId);
-    if (!st || !st.active || st.sending) return;
+    if (!this.active || this.sending || !st || !st.inkIds.size) return;
 
     const page = store.pageById(pageId);
     if (!page) return;
 
-    const top = st.turnTop;
-    const items = store.itemsOf(pageId).filter((it) => itemBounds(it).y + itemBounds(it).h > top + 0.01);
-    if (!items.length) return; // Send tapped but there's nothing new below the line (e.g. it was erased)
-
-    const bounds = unionRects(items.map(itemBounds))!;
-    const bottom = Math.min(Math.max(bounds.y + bounds.h + 12, top + 1), pageH(page));
-
-    st.sending = true;
+    this.sending = true;
+    this.sendingPageId = pageId;
     this.applyVisual(pageId);
 
     // a placeholder entry shows immediately — opening the panel is how a
@@ -384,24 +449,23 @@ export class AiMode {
     let isError = false;
     let thumbnail = '';
     try {
-      const rendered = await renderPageRegionImage(page, { top, bottom });
+      // always the whole page — every pre-existing note plus the new violet
+      // ink — so Gemini has full context every turn, not just a cropped
+      // slice (see the module doc comment and api/gemini.ts's system prompt,
+      // which is what actually tells it to treat the violet ink as the
+      // question and the rest as background).
+      const rendered = await renderPageRegionImage(page);
       thumbnail = `data:${rendered.mimeType};base64,${rendered.base64}`;
 
-      // the image is captured — this ink's job is done. Discard whatever was
-      // part of this turn (only items we ourselves marked ephemeral; never
-      // touches pre-existing permanent content) so it never persists,
-      // regardless of what the request below does. Freehand ink lands as
-      // 'add-stroke' ops, but a stroke that got snap-recognized into a line
-      // commits as a 'shape' item instead (see PageCanvas.commitLine) — both
-      // end up tracked in inkIds the same way, so both are removed here.
-      const sentIds = new Set(items.map((it) => it.id).filter((id) => st.inkIds.has(id)));
-      if (sentIds.size) {
-        store.removeItems(pageId, sentIds);
-        for (const id of sentIds) st.inkIds.delete(id);
-        this.host.refreshPage(pageId);
-      }
+      // the image is captured — this ink's job is done. Discard it (only
+      // items we ourselves marked ephemeral; never touches pre-existing
+      // permanent content) so it never persists, regardless of what the
+      // request below does.
+      store.removeItems(pageId, st.inkIds);
+      st.inkIds.clear();
+      this.host.refreshPage(pageId);
       // this turn's own undo/redo history referred only to ink that's now
-      // sent (and removed above) — matches discardInk's clearing on toggle-off.
+      // sent (and removed above) — matches discardInk's clearing on deactivation.
       if (st.aiUndo.length || st.aiRedo.length) {
         st.aiUndo.length = 0;
         st.aiRedo.length = 0;
@@ -426,18 +490,8 @@ export class AiMode {
       isError = true;
     }
 
-    st.sending = false;
-    // Next turn starts below whatever is *actually still on the page* now —
-    // not `bottom`, which was this turn's own ephemeral ink's bound before
-    // that ink got deleted above. Reusing `bottom` left turnTop pointing at
-    // a line with nothing above it (the page had gone blank there again), so
-    // a next turn drawn back in that space fell above the line and Send
-    // found nothing to capture. Any non-ephemeral content (e.g. an inserted
-    // image) that's still there past `top` legitimately pushes the line
-    // forward; if nothing remains, the line stays put.
-    const remaining = store.itemsOf(pageId).filter((it) => itemBounds(it).y + itemBounds(it).h > top + 0.01);
-    const remainingBounds = remaining.length ? unionRects(remaining.map(itemBounds)) : null;
-    st.turnTop = remainingBounds ? Math.min(Math.max(remainingBounds.y + remainingBounds.h + 12, top + 1), pageH(page)) : top;
+    this.sending = false;
+    this.sendingPageId = null;
     this.applyVisual(pageId);
 
     entry.pending = false;

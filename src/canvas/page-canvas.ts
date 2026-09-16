@@ -40,8 +40,10 @@ import {
   aabb,
   elementInPolygon,
   itemsFrame,
+  mapPoint,
   nearShapeOutline,
   pointInElement,
+  pointInPolygon,
   strokeInPolygon,
   transformItems,
   translateItems,
@@ -229,6 +231,8 @@ export class PageCanvas {
   private xfFrame: Frame | null = null;
   private xfCur: Frame | null = null;
   private xfLive: PageItem[] | null = null;
+  /** snapshot of lastLassoPath when the drag started (frozen, like xfOrig) — each tick's live outline is remapped from this, never from the previous tick's result, so remaps don't compound */
+  private xfLassoOrig: number[][] | null = null;
   private editor: TextEditor | null = null;
   private lastDim: Set<string> | undefined;
 
@@ -883,21 +887,32 @@ export class PageCanvas {
       }
       const travelled = Math.hypot(pt[0] - this.pressPt[0], pt[1] - this.pressPt[1]);
       if (path.length < 3 || travelled < TAP_SLOP) {
-        // a tap: pick the topmost item under it, or clear
-        const hit = this.topItemAt(pt[0], pt[1]);
-        this.setSelection(hit ? [hit.id] : []);
+        // a tap: if a lasso selection is still active and this tap landed
+        // inside its outline, reveal the Duplicate/Cut/Copy/Delete callout
+        // without disturbing the selection. Otherwise, the usual tap-select-
+        // topmost-or-clear applies — which also covers "tap outside the
+        // lassoed region clears the selection", since a miss (hit == null)
+        // selects nothing.
+        if (this.lastLassoPath && pointInPolygon(pt[0], pt[1], this.lastLassoPath)) {
+          const frame = itemsFrame(this.selectedItems());
+          if (frame) this.hooks.onSelectionFrame(this, frame);
+        } else {
+          const hit = this.topItemAt(pt[0], pt[1]);
+          this.setSelection(hit ? [hit.id] : []);
+        }
       } else {
         const ids: string[] = [];
         for (const it of store.itemsOf(this.page.id)) {
           const inside = isStroke(it) ? strokeInPolygon(it.points, path) : elementInPolygon(it, path);
           if (inside) ids.push(it.id);
         }
-        this.setSelection(ids);
-        this.lastLassoPath = ids.length ? path : null;
-        // blit() below only redraws the cache — it doesn't run the overlay
-        // pass that paints lastLassoPath, so schedule an animation frame for
-        // that (lands before the next paint; no flash of the bare box first)
-        if (this.lastLassoPath) this.schedule();
+        this.setSelection(ids, ids.length ? path : null);
+        // showSelection() (via setSelection) skips the overlay box for a
+        // lasso selection but doesn't itself repaint the canvas — blit()
+        // below only redraws the cache, not the overlay pass that paints
+        // lastLassoPath, so schedule an animation frame for that (lands
+        // before the next paint; no flash of the bare selection first)
+        if (ids.length) this.schedule();
         if (!ids.length) this.hooks.onEmptyLassoSelection(this, { ...aabb(path), rot: 0 });
       }
       this.blit();
@@ -1488,10 +1503,15 @@ export class PageCanvas {
     return items;
   }
 
-  /** Sets the selection. Also clears the decorative lasso outline — the lasso pointerup handler re-sets it right after, when this call is the result of a lasso-shape drag. */
-  private setSelection(ids: string[]): void {
+  /**
+   * Sets the selection. `lassoPath` is the finalized polygon when this
+   * selection came from a lasso drag (non-empty result) — omitted/null for
+   * every other selection path (tap-select, shape-select, text-select),
+   * which clears any previous lasso outline/behaviour.
+   */
+  private setSelection(ids: string[], lassoPath: number[][] | null = null): void {
     this.selected = new Set(ids);
-    this.lastLassoPath = null;
+    this.lastLassoPath = lassoPath;
     this.showSelection();
     this.hooks.onSelection(this, this.selected.size);
   }
@@ -1513,30 +1533,65 @@ export class PageCanvas {
     this.clearSelection();
   }
 
-  /** Draws (or hides) the handles around the current selection. */
+  /**
+   * Draws (or hides) the handles around the current selection, and tells the
+   * notebook the selection's frame (which shows/positions the Duplicate/Cut/
+   * Copy/Delete callout). A lasso selection (this.lastLassoPath set) gets a
+   * frame around the lasso outline itself (aabb of the drawn path) rather
+   * than the tighter itemsFrame, only its four corner handles active, no
+   * rotate grip, and uniform (aspect-locked) scaling on a corner drag so the
+   * group can't be stretched non-uniformly. The frame is still reported as
+   * null here, though, so the callout doesn't auto-open the moment the lasso
+   * finishes — see the pointerup handler's tap branch for how it reappears
+   * on a confirming tap inside the lassoed region.
+   */
   private showSelection(): void {
     const ov = this.overlay;
     if (!ov) return;
     const items = this.selectedItems();
-    const frame = itemsFrame(items);
+    const lasso = this.lastLassoPath;
+    const frame = lasso ? { ...aabb(lasso), rot: 0 } : itemsFrame(items);
     if (!frame) {
       ov.hide();
       this.hooks.onSelectionFrame(this, null);
       return;
     }
-    const single = items.length === 1 && !isStroke(items[0]) ? items[0] : null;
+    const single = !lasso && items.length === 1 && !isStroke(items[0]) ? items[0] : null;
     const isText = single?.kind === 'text';
     ov.show(frame, {
-      rotate: single != null,
-      aspect: isText || single?.kind === 'image', // photos keep their proportions on a corner drag
-      edges: isText ? 'horizontal' : 'all',
+      rotate: single != null, // never for a lasso selection — see above
+      aspect: lasso != null || isText || single?.kind === 'image', // photos (and lasso groups) keep their proportions on a corner drag
+      edges: lasso ? 'none' : isText ? 'horizontal' : 'all',
       passThrough: this.editor != null,
     });
-    this.hooks.onSelectionFrame(this, frame);
+    this.hooks.onSelectionFrame(this, lasso ? null : frame);
   }
 
-  /** A tap on the selection box itself: with the text tool, that re-opens a selected text box for editing. */
+  /**
+   * A tap (no drag) on the selection box itself. For a lasso selection, the
+   * box is only a rectangle around the actual (possibly non-rectangular)
+   * lasso path, so a plain tap anywhere in that rectangle would otherwise
+   * never reach the canvas's own tap handling — the box claims the pointer
+   * event first. So it's routed here instead: inside the drawn lasso path,
+   * reveal the Duplicate/Cut/Copy/Delete callout without touching the
+   * selection; outside the path (but still inside the box's rectangle),
+   * treat it exactly like a tap that landed fully outside the box already
+   * does — select whatever's under it, or clear.
+   *
+   * For every other selection, unchanged: with the text tool, a tap re-opens
+   * a selected text box for editing.
+   */
   private tapSelection(x: number, y: number): void {
+    if (this.lastLassoPath) {
+      if (pointInPolygon(x, y, this.lastLassoPath)) {
+        const frame = itemsFrame(this.selectedItems());
+        if (frame) this.hooks.onSelectionFrame(this, frame);
+      } else {
+        const hit = this.topItemAt(x, y);
+        this.setSelection(hit ? [hit.id] : []);
+      }
+      return;
+    }
     if (toolState.kind !== 'text' || this.editor) return;
     const items = this.selectedItems();
     const el = items.length === 1 && !isStroke(items[0]) ? items[0] : null;
@@ -1606,12 +1661,19 @@ export class PageCanvas {
   // ------------------------------------------------------------ transform
   private beginTransform(): void {
     const items = this.selectedItems();
-    const frame = itemsFrame(items);
+    // must match showSelection()'s frame exactly — the overlay's own drag
+    // math (and the `frame` values it reports to updateTransform) are
+    // relative to whatever frame was last shown, so if this independently
+    // recomputed the tighter itemsFrame for a lasso selection instead, the
+    // two would disagree about what "from" means and distort items on the
+    // very first drag tick.
+    const frame = this.lastLassoPath ? { ...aabb(this.lastLassoPath), rot: 0 } : itemsFrame(items);
     if (!items.length || !frame) return;
     this.xfOrig = items;
     this.xfFrame = frame;
     this.xfCur = frame;
     this.xfLive = items;
+    this.xfLassoOrig = this.lastLassoPath;
     this.rebuild(); // hides the originals; the view paints the live copies
   }
 
@@ -1621,6 +1683,14 @@ export class PageCanvas {
     this.xfLive = same
       ? translateItems(this.xfOrig, frame.x - this.xfFrame.x, frame.y - this.xfFrame.y)
       : transformItems(this.xfOrig, this.xfFrame, frame);
+    // remapped fresh from the frozen pre-drag snapshot each tick (never from
+    // the previous tick's result) so repeated remaps don't compound — same
+    // reasoning as xfLive being recomputed from xfOrig every time, not from
+    // itself
+    if (this.xfLassoOrig) {
+      const from = this.xfFrame;
+      this.lastLassoPath = this.xfLassoOrig.map((p) => mapPoint(p[0], p[1], from, frame));
+    }
     this.xfCur = frame;
     this.syncEditor(this.xfLive[0]);
     this.overlay?.update(frame);
@@ -1631,7 +1701,9 @@ export class PageCanvas {
   private endTransform(frame: Frame | null): void {
     const orig = this.xfOrig;
     const from = this.xfFrame;
+    const lassoOrig = this.xfLassoOrig;
     this.xfOrig = this.xfFrame = this.xfCur = this.xfLive = null;
+    this.xfLassoOrig = null;
     if (!orig || !from) return;
 
     if (frame) {
@@ -1650,6 +1722,15 @@ export class PageCanvas {
         store.replaceItems(this.page.id, after);
         this.hooks.onOp({ kind: 'replace-items', pageId: this.page.id, before: orig, after });
       }
+      // permanently commit the outline's new shape (not just the live view
+      // during the drag) so it doesn't snap back to its pre-drag position on
+      // the next showSelection() below, and a second drag starts consistent
+      // with where the box and items actually ended up
+      if (lassoOrig) this.lastLassoPath = lassoOrig.map((p) => mapPoint(p[0], p[1], from, frame));
+    } else if (lassoOrig) {
+      // cancelled drag: items were never changed, so restore the outline to
+      // its pre-drag shape too, undoing whatever updateTransform() left it at
+      this.lastLassoPath = lassoOrig;
     }
     this.rebuild();
     this.showSelection();

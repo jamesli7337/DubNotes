@@ -213,6 +213,28 @@ export function elementInPolygon(el: PageElement, poly: number[][]): boolean {
 }
 
 /**
+ * Maps a page-space point from where it sits inside `from` to where it lands
+ * inside `to` — rotate, then per-axis scale, then translate. The same
+ * transform `transformItems` applies to every item's points/corners, exposed
+ * standalone for anything that needs to remap raw points without wrapping
+ * them in PageItems first (e.g. PageCanvas's live lasso-outline echo).
+ */
+export function mapPoint(x: number, y: number, from: Frame, to: Frame): [number, number] {
+  const sx = from.w > 0 ? to.w / from.w : 1;
+  const sy = from.h > 0 ? to.h / from.h : 1;
+  const fcx = from.x + from.w / 2;
+  const fcy = from.y + from.h / 2;
+  const tcx = to.x + to.w / 2;
+  const tcy = to.y + to.h / 2;
+  const cos = Math.cos(to.rot);
+  const sin = Math.sin(to.rot);
+  const [lx0, ly0] = rotateAround(x, y, fcx, fcy, -from.rot);
+  const lx = (lx0 - fcx) * sx;
+  const ly = (ly0 - fcy) * sy;
+  return [tcx + lx * cos - ly * sin, tcy + lx * sin + ly * cos];
+}
+
+/**
  * Re-maps items from one frame to another: everything inside `from` is moved,
  * scaled (per axis, in frame-local space) and rotated so it sits identically
  * inside `to`. Stroke nibs, shape outlines and text sizes scale with the box.
@@ -220,20 +242,7 @@ export function elementInPolygon(el: PageElement, poly: number[][]): boolean {
 export function transformItems(items: PageItem[], from: Frame, to: Frame): PageItem[] {
   const sx = from.w > 0 ? to.w / from.w : 1;
   const sy = from.h > 0 ? to.h / from.h : 1;
-  const fcx = from.x + from.w / 2;
-  const fcy = from.y + from.h / 2;
-  const tcx = to.x + to.w / 2;
-  const tcy = to.y + to.h / 2;
   const drot = to.rot - from.rot;
-  const cos = Math.cos(to.rot);
-  const sin = Math.sin(to.rot);
-
-  const map = (x: number, y: number): [number, number] => {
-    const [lx0, ly0] = rotateAround(x, y, fcx, fcy, -from.rot);
-    const lx = (lx0 - fcx) * sx;
-    const ly = (ly0 - fcy) * sy;
-    return [tcx + lx * cos - ly * sin, tcy + lx * sin + ly * cos];
-  };
   const uniform = Math.sqrt(Math.abs(sx * sy));
 
   return items.map((item): PageItem => {
@@ -242,13 +251,13 @@ export function transformItems(items: PageItem[], from: Frame, to: Frame): PageI
         ...item,
         size: item.size * uniform,
         points: item.points.map((p) => {
-          const [x, y] = map(p[0], p[1]);
+          const [x, y] = mapPoint(p[0], p[1], from, to);
           return [x, y, p[2]];
         }),
       };
     }
     const [cx, cy] = elementCenter(item);
-    const [ncx, ncy] = map(cx, cy);
+    const [ncx, ncy] = mapPoint(cx, cy, from, to);
     const w = item.w * sx;
     const h = item.h * sy;
     const box = { x: ncx - w / 2, y: ncy - h / 2, w, h, rotation: item.rotation + drot };

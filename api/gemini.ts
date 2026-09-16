@@ -29,13 +29,23 @@ const GEMINI_MODEL = 'gemini-3.6-flash';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 const SYSTEM_INSTRUCTION =
-  "You're reading a photo of a handwritten notebook page. Interpret the " +
-  'handwritten text, math, questions, and drawings in the image — including ' +
-  'anything circled or annotated — and respond helpfully and concisely, as if ' +
-  "replying to the page's author. Keep the reply short enough to fit on the " +
+  "You're reading a photo of a handwritten notebook page. Some of the ink " +
+  'is a distinct violet/purple colour — that violet handwriting is always ' +
+  "the page author's actual question or instruction to you, and it's the " +
+  'one thing you must directly answer. Everything else on the page (any ' +
+  'other ink colour) is pre-existing notes, there only as background — read ' +
+  "it if it helps you answer the violet part, but don't summarize it, " +
+  'describe it, or respond to it on its own. If there is no violet ink at ' +
+  'all, treat whatever is most clearly a question or instruction as the one ' +
+  'to answer. ' +
+  'Explain things simply: short sentences, plain everyday words, one idea ' +
+  "at a time, as if talking to a beginner seeing this for the first time. " +
+  "Avoid jargon; if a technical term is unavoidable, explain it in a " +
+  'few plain words right there. Keep the reply short enough to fit on the ' +
   'same page: a few sentences, or a short worked answer, not an essay. ' +
   'Use standard LaTeX for math ($...$ for inline, $$...$$ for a displayed ' +
-  'equation, \\frac, \\sqrt, ^, _, etc.) and normal markdown for formatting.';
+  'equation, \\frac, \\sqrt, ^, _, etc.) and simple markdown for formatting ' +
+  "(**bold**, short bullet lists) — don't overuse either.";
 
 /** Every response carries this — the app is a static site on another origin. */
 function setCors(res: ApiResponse, origin: string | string[] | undefined): void {

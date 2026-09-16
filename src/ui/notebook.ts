@@ -190,9 +190,7 @@ class NotebookView {
     this.nb = nb;
     this.aiMode = new AiMode(nb.id, {
       refreshPage: (pageId) => this.rebuildIfMounted(pageId),
-      onActiveChanged: (pageId) => {
-        if (pageId === this.currentPageId) this.refreshAiControls();
-      },
+      onActiveChanged: () => this.refreshAiControls(),
       onAiHistoryChanged: (pageId) => {
         if (pageId === this.currentPageId) this.syncHistory();
       },
@@ -317,8 +315,8 @@ class NotebookView {
     }) as HTMLButtonElement;
     this.aiToggleBtn.append(icon('ai'));
     this.aiToggleBtn.addEventListener('click', () => {
-      // toggle() itself opens/closes the panel to match the resulting state
-      if (this.currentPageId) this.aiMode.toggle(this.currentPageId);
+      // toggle() itself opens/closes the panel to match the resulting state — global, not tied to currentPageId
+      this.aiMode.toggle();
     });
 
     this.aiSendBtn = el('button', {
@@ -462,7 +460,23 @@ class NotebookView {
     for (const pc of this.pcByPage.values()) pc.zoomChanged(); // a pending line's handles stay screen-sized
   }
 
-  /** Pinch with two fingers (native one-finger scrolling is untouched) and ctrl/⌘ + wheel on desktop. */
+  /**
+   * Pinch with two fingers (native one-finger scrolling is untouched) and
+   * ctrl/⌘ + wheel on desktop.
+   *
+   * The pinch session, once started, stays owned for as long as *any* touch
+   * remains — not just while the count reads exactly 2. Real two-finger
+   * releases are rarely simultaneous (one finger lifts a beat early), and a
+   * third finger can graze the glass mid-gesture; re-deriving "are we
+   * pinching" from the instantaneous touch count on every event used to mean
+   * that single frame at the wrong count stopped preventDefault() entirely,
+   * handing the still-moving remaining touch to native pan-x pan-y —
+   * occasionally flinging a completely different page into view. Now, once
+   * `pinch` is set, touchmove keeps suppressing native scroll at any count;
+   * it only actually applies the zoom/pan math while exactly 2 touches are
+   * live, and just holds position (still swallowing the event) otherwise.
+   * The session ends only once every touch is off the glass.
+   */
   private bindZoomGestures(): void {
     const s = this.scrollEl;
     const dist = (t: TouchList): number => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
@@ -479,9 +493,10 @@ class NotebookView {
     s.addEventListener(
       'touchmove',
       (e) => {
+        if (!this.pinch) return;
+        e.preventDefault(); // own the whole gesture until every touch lifts — see doc comment above
+        if (e.touches.length !== 2) return; // no 2-finger baseline right now: hold position, keep suppressing native scroll
         const p = this.pinch;
-        if (!p || e.touches.length !== 2) return;
-        e.preventDefault(); // we own the two-finger gesture: zoom + pan
         const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
         const my = (e.touches[0].clientY + e.touches[1].clientY) / 2;
         this.setZoom((p.z0 * dist(e.touches)) / p.d0, { x: mx, y: my });
@@ -493,7 +508,7 @@ class NotebookView {
       { passive: false }
     );
     const end = (e: TouchEvent): void => {
-      if (e.touches.length < 2) this.pinch = null;
+      if (e.touches.length === 0) this.pinch = null;
     };
     s.addEventListener('touchend', end);
     s.addEventListener('touchcancel', end);
@@ -1577,8 +1592,7 @@ class NotebookView {
         // stack sees it (see AiMode.handleOp). A snapped line lands as an
         // 'add-items' op like any other insertion, so it's only excluded
         // here when PageCanvas itself flagged it as AI ink (aiInk).
-        const isAiInk =
-          this.aiMode.isActive(op.pageId) && (op.kind === 'add-stroke' || (op.kind === 'add-items' && op.aiInk));
+        const isAiInk = this.aiMode.isActive() && (op.kind === 'add-stroke' || (op.kind === 'add-items' && op.aiInk));
         if (!isAiInk) this.pushOp(op);
         this.aiMode.handleOp(op);
       },
@@ -1586,7 +1600,7 @@ class NotebookView {
       onSelectionFrame: (p, frame) => this.onSelectionFrame(p, frame),
       onEmptyLassoSelection: (p, frame) => this.showEmptyLassoCallout(p, frame),
       onTapeTap: (p, tapeId, frame) => this.showTapePopover(p, tapeId, frame),
-      isAiActive: () => this.aiMode.isActive(page.id),
+      isAiActive: () => this.aiMode.isActive(),
     });
     this.pcByPage.set(page.id, pc);
     this.wrapById.set(page.id, wrap);
@@ -1685,9 +1699,9 @@ class NotebookView {
     this.refreshAiControls();
   }
 
-  /** Reflects the current page's AI-mode state on the single app-bar toggle + send buttons, and on undo/redo (which switch to AI-scoped history while active). */
+  /** Reflects AI mode's global state on the single app-bar toggle + send buttons, and on undo/redo (which switch to AI-scoped history while active). */
   private refreshAiControls(): void {
-    const active = this.currentPageId ? this.aiMode.isActive(this.currentPageId) : false;
+    const active = this.aiMode.isActive();
     this.aiToggleBtn.classList.toggle('active', active);
     this.aiToggleBtn.setAttribute('aria-pressed', String(active));
     this.aiSendBtn.hidden = !active;
@@ -1938,7 +1952,7 @@ class NotebookView {
    * to trigger the usual outside-tap dismiss, so it's closed unconditionally
    * here rather than risk it going stale. */
   private undo(): void {
-    if (this.currentPageId && this.aiMode.isActive(this.currentPageId)) {
+    if (this.currentPageId && this.aiMode.isActive()) {
       if (this.aiMode.canUndo(this.currentPageId)) this.hideTapePopover();
       this.aiMode.undo(this.currentPageId);
       return;
@@ -1953,7 +1967,7 @@ class NotebookView {
   }
 
   private redo(): void {
-    if (this.currentPageId && this.aiMode.isActive(this.currentPageId)) {
+    if (this.currentPageId && this.aiMode.isActive()) {
       if (this.aiMode.canRedo(this.currentPageId)) this.hideTapePopover();
       this.aiMode.redo(this.currentPageId);
       return;
@@ -2044,7 +2058,7 @@ class NotebookView {
 
   /** Undo/redo button enabled state — reflects AiMode's turn-scoped stack while it's active on the current page, the main stacks otherwise. */
   private syncHistory(): void {
-    if (this.currentPageId && this.aiMode.isActive(this.currentPageId)) {
+    if (this.currentPageId && this.aiMode.isActive()) {
       this.undoBtn.disabled = !this.aiMode.canUndo(this.currentPageId);
       this.redoBtn.disabled = !this.aiMode.canRedo(this.currentPageId);
       return;

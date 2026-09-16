@@ -117,6 +117,34 @@ function appendPieces(host: HTMLElement, pieces: Piece[]): void {
   }
 }
 
+/**
+ * Merges a paragraph's buffered lines into one flat Piece[], joining adjacent
+ * plain-text runs across the line breaks (with a space, matching how they'd
+ * otherwise be visually joined) instead of keeping each line a separate
+ * string. Inline formatting (appendInline, via appendPieces) is matched
+ * per-string-piece, so a `**bold**`/`*italic*`/code span that happens to wrap
+ * onto the next line — ordinary word-wrap in a model's reply, not a
+ * paragraph break — would otherwise never see both of its markers in the
+ * same piece and would show up as literal, un-rendered asterisks. Math
+ * tokens are left as their own pieces (never merged into a string) so inline
+ * math is untouched.
+ */
+function flattenParaLines(para: Piece[][]): Piece[] {
+  const out: Piece[] = [];
+  const appendStr = (s: string): void => {
+    if (out.length && typeof out[out.length - 1] === 'string') out[out.length - 1] = (out[out.length - 1] as string) + s;
+    else out.push(s);
+  };
+  para.forEach((pieces, i) => {
+    if (i > 0) appendStr(' ');
+    for (const p of pieces) {
+      if (typeof p === 'string') appendStr(p);
+      else out.push(p);
+    }
+  });
+  return out;
+}
+
 /** Strips a line's leading marker (header/bullet/quote) from its first plain-text piece. */
 function withoutLead(line: { pieces: Piece[] }, re: RegExp): Piece[] {
   const [first, ...rest] = line.pieces;
@@ -139,10 +167,7 @@ export function renderAiReply(container: HTMLElement, text: string): void {
   const flushPara = (): void => {
     if (!para) return;
     const p = document.createElement('p');
-    para.forEach((pieces, i) => {
-      if (i > 0) p.append(' ');
-      appendPieces(p, pieces);
-    });
+    appendPieces(p, flattenParaLines(para));
     container.append(p);
     para = null;
   };
