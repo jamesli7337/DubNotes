@@ -108,6 +108,9 @@ const LINE_HANDLE_HIT = 14;
 const TAP_SLOP = 4;
 /** Extra hit radius, in page units, when tapping a stroke to select it. */
 const TAP_RADIUS = 6;
+/** Max gap between two taps (ms) and how far apart they may land (page units) to still count as one double-tap — see isDoubleTap. */
+const DOUBLE_TAP_MS = 350;
+const DOUBLE_TAP_SLOP = 24;
 /** Smallest tape strip a drag can create. */
 export const TAPE_MIN = 12;
 /** Smallest box the Shapes tool places (page units); an arrow only needs this much length. */
@@ -204,6 +207,9 @@ export class PageCanvas {
   private lassoPt: number[] = [0, 0];
   /** the finalized lasso path from the most recent lasso selection, kept only for the decorative outline — set on a non-empty lasso-shape selection, cleared by every other kind of selection change. Purely visual: never read for hit-testing. */
   private lastLassoPath: number[][] | null = null;
+  /** state for isDoubleTap: when/where the previous tap-on-the-selection landed. */
+  private lastTapAt = 0;
+  private lastTapPt: number[] = [0, 0];
   private pressPt: number[] = [0, 0];
   private isMounted = false;
 
@@ -379,6 +385,13 @@ export class PageCanvas {
       this.paintItem(c, it, pending?.has(it.id) ? PENDING_OPACITY : 1);
     }
     this.blit();
+    // blit() above only repaints the committed-items cache, not the overlay
+    // pass that draws the active lasso selection's decorative outline (see
+    // frame()) — without this, that outline vanished the instant any rebuild
+    // ran (e.g. right when a drag/resize/rotate ends), even though the
+    // selection itself was still active. Scheduling a frame keeps it drawn
+    // through every rebuild, not just while a gesture is still in flight.
+    if (this.lastLassoPath) this.schedule();
   }
 
   private paintItem(ctx: CanvasRenderingContext2D, it: PageItem, opacity = 1): void {
@@ -451,12 +464,33 @@ export class PageCanvas {
     }
   };
 
+  /**
+   * Draws the lasso outline. A freehand path (`!closed`) is raw pointer
+   * samples — connecting them with straight `lineTo`s reads as a jagged,
+   * faceted line, so it's smoothed with the standard quadratic-curve-through-
+   * midpoints technique (each segment curves toward the midpoint of the next
+   * one) for a clean, consistent line instead. Box/circle marquees are
+   * already clean geometry (4 rectangle corners, or a 48-point circle) built
+   * in marqueePolygon, not sampled input, so they're drawn as plain straight
+   * segments — smoothing them would just round the box's sharp corners.
+   */
   private strokeLassoPath(v: CanvasRenderingContext2D, path: number[][], closed: boolean): void {
     v.save();
     v.beginPath();
     v.moveTo(path[0][0], path[0][1]);
-    for (let i = 1; i < path.length; i++) v.lineTo(path[i][0], path[i][1]);
-    if (closed) v.closePath();
+    if (closed) {
+      for (let i = 1; i < path.length; i++) v.lineTo(path[i][0], path[i][1]);
+      v.closePath();
+    } else {
+      for (let i = 1; i < path.length - 1; i++) {
+        const mx = (path[i][0] + path[i + 1][0]) / 2;
+        const my = (path[i][1] + path[i + 1][1]) / 2;
+        v.quadraticCurveTo(path[i][0], path[i][1], mx, my);
+      }
+      if (path.length > 1) v.lineTo(path[path.length - 1][0], path[path.length - 1][1]);
+    }
+    v.lineCap = 'round';
+    v.lineJoin = 'round';
     v.setLineDash([6, 4]);
     v.lineWidth = 1.5;
     v.strokeStyle = 'rgba(37, 99, 235, 0.9)';
@@ -888,14 +922,16 @@ export class PageCanvas {
       const travelled = Math.hypot(pt[0] - this.pressPt[0], pt[1] - this.pressPt[1]);
       if (path.length < 3 || travelled < TAP_SLOP) {
         // a tap: if a lasso selection is still active and this tap landed
-        // inside its outline, reveal the Duplicate/Cut/Copy/Delete callout
-        // without disturbing the selection. Otherwise, the usual tap-select-
-        // topmost-or-clear applies — which also covers "tap outside the
-        // lassoed region clears the selection", since a miss (hit == null)
-        // selects nothing.
+        // inside its outline, a second tap close behind it (see isDoubleTap)
+        // reveals the Duplicate/Cut/Copy/Delete callout without disturbing
+        // the selection. Otherwise, the usual tap-select-topmost-or-clear
+        // applies — which also covers "tap outside the lassoed region clears
+        // the selection", since a miss (hit == null) selects nothing.
         if (this.lastLassoPath && pointInPolygon(pt[0], pt[1], this.lastLassoPath)) {
-          const frame = itemsFrame(this.selectedItems());
-          if (frame) this.hooks.onSelectionFrame(this, frame);
+          if (this.isDoubleTap(pt[0], pt[1])) {
+            const frame = itemsFrame(this.selectedItems());
+            if (frame) this.hooks.onSelectionFrame(this, frame);
+          }
         } else {
           const hit = this.topItemAt(pt[0], pt[1]);
           this.setSelection(hit ? [hit.id] : []);
@@ -1534,16 +1570,32 @@ export class PageCanvas {
   }
 
   /**
-   * Draws (or hides) the handles around the current selection, and tells the
-   * notebook the selection's frame (which shows/positions the Duplicate/Cut/
-   * Copy/Delete callout). A lasso selection (this.lastLassoPath set) gets a
-   * frame around the lasso outline itself (aabb of the drawn path) rather
-   * than the tighter itemsFrame, only its four corner handles active, no
-   * rotate grip, and uniform (aspect-locked) scaling on a corner drag so the
-   * group can't be stretched non-uniformly. The frame is still reported as
-   * null here, though, so the callout doesn't auto-open the moment the lasso
-   * finishes — see the pointerup handler's tap branch for how it reappears
-   * on a confirming tap inside the lassoed region.
+   * True on the second of two taps landing close together in time and
+   * space — used to gate the Duplicate/Cut/Copy/Delete callout so it only
+   * ever appears on a deliberate double-tap of an already-selected group,
+   * never from the initial select or from a drag/resize/rotate. Consumes
+   * the pair (resets the clock) so a third rapid tap needs its own new pair
+   * rather than chaining off the one that just fired.
+   */
+  private isDoubleTap(x: number, y: number): boolean {
+    const now = performance.now();
+    const isDouble =
+      now - this.lastTapAt <= DOUBLE_TAP_MS && Math.hypot(x - this.lastTapPt[0], y - this.lastTapPt[1]) <= DOUBLE_TAP_SLOP;
+    this.lastTapAt = isDouble ? 0 : now;
+    this.lastTapPt = [x, y];
+    return isDouble;
+  }
+
+  /**
+   * Draws (or hides) the handles around the current selection. A lasso
+   * selection (this.lastLassoPath set) gets a frame around the lasso outline
+   * itself (aabb of the drawn path) rather than the tighter itemsFrame, only
+   * its four corner handles active, no rotate grip, and uniform (aspect-
+   * locked) scaling on a corner drag so the group can't be stretched
+   * non-uniformly. The frame is never reported to the notebook from here —
+   * the Duplicate/Cut/Copy/Delete callout only ever opens from an explicit
+   * double-tap (see isDoubleTap, tapSelection and the pointerup tap branch),
+   * never automatically from selecting, dragging, resizing or rotating.
    */
   private showSelection(): void {
     const ov = this.overlay;
@@ -1564,7 +1616,7 @@ export class PageCanvas {
       edges: lasso ? 'none' : isText ? 'horizontal' : 'all',
       passThrough: this.editor != null,
     });
-    this.hooks.onSelectionFrame(this, lasso ? null : frame);
+    this.hooks.onSelectionFrame(this, null);
   }
 
   /**
@@ -1573,26 +1625,32 @@ export class PageCanvas {
    * lasso path, so a plain tap anywhere in that rectangle would otherwise
    * never reach the canvas's own tap handling — the box claims the pointer
    * event first. So it's routed here instead: inside the drawn lasso path,
-   * reveal the Duplicate/Cut/Copy/Delete callout without touching the
-   * selection; outside the path (but still inside the box's rectangle),
-   * treat it exactly like a tap that landed fully outside the box already
-   * does — select whatever's under it, or clear.
+   * a double-tap (see isDoubleTap) reveals the Duplicate/Cut/Copy/Delete
+   * callout without touching the selection; outside the path (but still
+   * inside the box's rectangle), treat it exactly like a tap that landed
+   * fully outside the box already does — select whatever's under it, or
+   * clear. A single (non-lasso) selected item gets the same double-tap
+   * treatment.
    *
    * For every other selection, unchanged: with the text tool, a tap re-opens
    * a selected text box for editing.
    */
   private tapSelection(x: number, y: number): void {
     if (this.lastLassoPath) {
-      if (pointInPolygon(x, y, this.lastLassoPath)) {
-        const frame = itemsFrame(this.selectedItems());
-        if (frame) this.hooks.onSelectionFrame(this, frame);
-      } else {
+      if (!pointInPolygon(x, y, this.lastLassoPath)) {
         const hit = this.topItemAt(x, y);
         this.setSelection(hit ? [hit.id] : []);
+        return;
       }
+    } else if (!this.selected.size) {
       return;
     }
-    if (toolState.kind !== 'text' || this.editor) return;
+    if (toolState.kind === 'lasso' && this.isDoubleTap(x, y)) {
+      const frame = this.lastLassoPath ? { ...aabb(this.lastLassoPath), rot: 0 } : itemsFrame(this.selectedItems());
+      if (frame) this.hooks.onSelectionFrame(this, frame);
+      return;
+    }
+    if (this.lastLassoPath || toolState.kind !== 'text' || this.editor) return;
     const items = this.selectedItems();
     const el = items.length === 1 && !isStroke(items[0]) ? items[0] : null;
     if (el?.kind === 'text' && pointInElement(el, x, y)) this.startEdit(el, false);
@@ -1674,6 +1732,7 @@ export class PageCanvas {
     this.xfCur = frame;
     this.xfLive = items;
     this.xfLassoOrig = this.lastLassoPath;
+    this.hooks.onSelectionFrame(this, null); // moving/resizing/rotating must never trigger or keep open the callout
     this.rebuild(); // hides the originals; the view paints the live copies
   }
 
@@ -1694,7 +1753,6 @@ export class PageCanvas {
     this.xfCur = frame;
     this.syncEditor(this.xfLive[0]);
     this.overlay?.update(frame);
-    this.hooks.onSelectionFrame(this, frame);
     this.schedule();
   }
 

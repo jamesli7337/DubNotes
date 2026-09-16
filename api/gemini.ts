@@ -1,7 +1,17 @@
 /**
- * POST /api/gemini — reads a handwritten page image and returns Gemini's
- * reply text. Vercel serverless function (Node.js runtime); deployed
- * alongside the static Vite build, see README "Deploy the Gemini endpoint".
+ * POST /api/gemini — reads a handwritten page and returns Gemini's reply
+ * text. Vercel serverless function (Node.js runtime); deployed alongside the
+ * static Vite build, see README "Deploy the Gemini endpoint".
+ *
+ * Takes two images, not one: `question` is just the user's violet AI-mode
+ * ink (already cropped to it by the client — see ai-mode.ts's
+ * `renderItemsImage`), `context` is the whole page. They're sent to Gemini
+ * as two separate labeled parts (see `contents` below) rather than composited
+ * into one picture, so the model is never asked to itself pick the question
+ * out of a mixed image by colour — a previous version relied on a system-
+ * prompt instruction ("the violet ink is the question") over one merged
+ * screenshot, which asked Gemini to reliably notice a colour distinction
+ * rather than just being told which image was which.
  *
  * This file lives outside `src/` and outside tsconfig's `include`, so
  * `npm run build`'s `tsc` step does not type-check it — Vercel's own build
@@ -29,15 +39,13 @@ const GEMINI_MODEL = 'gemini-3.6-flash';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
 const SYSTEM_INSTRUCTION =
-  "You're reading a photo of a handwritten notebook page. Some of the ink " +
-  'is a distinct violet/purple colour — that violet handwriting is always ' +
-  "the page author's actual question or instruction to you, and it's the " +
-  'one thing you must directly answer. Everything else on the page (any ' +
-  'other ink colour) is pre-existing notes, there only as background — read ' +
-  "it if it helps you answer the violet part, but don't summarize it, " +
-  'describe it, or respond to it on its own. If there is no violet ink at ' +
-  'all, treat whatever is most clearly a question or instruction as the one ' +
-  'to answer. ' +
+  'You will be given two images from a handwritten notebook page. The ' +
+  "first is cropped to show ONLY the page author's actual question or " +
+  "instruction to you — that crop is the one thing you must directly " +
+  'answer. The second is a photo of the whole page, given purely as ' +
+  "background — read it if it helps you answer the question in the first " +
+  "image, but don't summarize it, describe it, or respond to anything in " +
+  "it on its own; it may repeat what's in the first image, which is normal. " +
   'Explain things simply: short sentences, plain everyday words, one idea ' +
   "at a time, as if talking to a beginner seeing this for the first time. " +
   "Avoid jargon; if a technical term is unavoidable, explain it in a " +
@@ -84,11 +92,11 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
-  const body = req.body as { image?: unknown; mimeType?: unknown } | null;
-  const image = body?.image;
-  const mimeType = typeof body?.mimeType === 'string' ? body.mimeType : 'image/png';
-  if (typeof image !== 'string' || !image) {
-    res.status(400).json({ error: 'Missing or invalid "image" (base64 string) in request body.' });
+  const body = req.body as { question?: unknown; context?: unknown } | null;
+  const question = parseImage(body?.question);
+  const context = parseImage(body?.context);
+  if (!question || !context) {
+    res.status(400).json({ error: 'Missing or invalid "question"/"context" image (each needs a base64 "image" string) in request body.' });
     return;
   }
 
@@ -99,7 +107,17 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-        contents: [{ role: 'user', parts: [{ inline_data: { mime_type: mimeType, data: image } }] }],
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: 'Image 1 of 2 — the question (answer this):' },
+              { inline_data: { mime_type: question.mimeType, data: question.image } },
+              { text: 'Image 2 of 2 — the whole page, background only:' },
+              { inline_data: { mime_type: context.mimeType, data: context.image } },
+            ],
+          },
+        ],
       }),
     });
   } catch {
@@ -129,6 +147,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   }
 
   res.status(200).json({ text });
+}
+
+/** Validates one `{ image, mimeType }` field of the request body. */
+function parseImage(v: unknown): { image: string; mimeType: string } | null {
+  const obj = v as { image?: unknown; mimeType?: unknown } | null;
+  const image = obj?.image;
+  if (typeof image !== 'string' || !image) return null;
+  const mimeType = typeof obj?.mimeType === 'string' ? obj.mimeType : 'image/png';
+  return { image, mimeType };
 }
 
 /** Pulls the reply text out of a generateContent response, defensively. */

@@ -1,5 +1,6 @@
 import { drawBackground, drawElement, loadImage } from '../canvas/elements';
 import { drawStroke } from '../canvas/freehand';
+import { itemBounds, unionRects } from '../canvas/geom';
 import { drawTemplate } from '../canvas/templates';
 import { pageH, pageW } from '../const';
 import { ensurePdfPage } from '../pdf-render';
@@ -82,6 +83,40 @@ export async function renderPageRegionImage(
   scale = 1.5
 ): Promise<{ base64: string; mimeType: string }> {
   const c = await renderPageCanvas(page, scale, region);
+  const dataUrl = c.toDataURL('image/png');
+  return { base64: dataUrl.slice(dataUrl.indexOf(',') + 1), mimeType: 'image/png' };
+}
+
+/**
+ * Rasterizes just the given items — no paper template, no page background,
+ * no other ink — on a plain white canvas cropped tightly to their own
+ * combined bounding box (plus a little padding). Used by AI mode to send its
+ * violet "question" ink as its own image, structurally separate from the
+ * full-page context image, rather than relying on Gemini to visually pick
+ * the right ink out of one mixed picture (see ai-mode.ts / api/gemini.ts).
+ * `itemIds` must be non-empty.
+ */
+export async function renderItemsImage(
+  page: Page,
+  itemIds: Set<string>,
+  scale = 1.5
+): Promise<{ base64: string; mimeType: string }> {
+  const items = store.itemsOf(page.id).filter((it) => itemIds.has(it.id));
+  const pad = 24;
+  const bounds = unionRects(items.map(itemBounds))!;
+  const c = document.createElement('canvas');
+  c.width = Math.round((bounds.w + pad * 2) * scale);
+  c.height = Math.round((bounds.h + pad * 2) * scale);
+  const ctx = c.getContext('2d');
+  if (!ctx) throw new Error('Could not create a canvas.');
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.scale(scale, scale);
+  ctx.translate(pad - bounds.x, pad - bounds.y);
+  for (const it of items) {
+    if (isStroke(it)) drawStroke(ctx, it, page.paper);
+    else drawElement(ctx, it, page.paper);
+  }
   const dataUrl = c.toDataURL('image/png');
   return { base64: dataUrl.slice(dataUrl.indexOf(',') + 1), mimeType: 'image/png' };
 }

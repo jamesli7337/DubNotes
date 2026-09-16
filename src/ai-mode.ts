@@ -10,11 +10,12 @@
  * internals. It listens to the same `Op` stream `NotebookView` already uses
  * for undo/redo (an `add-stroke` op is "new ink") and reads page content
  * through `store` (which works whether or not the page is currently
- * mounted). Send always captures the *whole* current page as one image —
- * whatever pre-existing notes are there plus the new violet ink — so Gemini
- * always has full context, not just a cropped slice; api/gemini.ts's system
- * prompt is what tells it to treat the violet ink as the actual question and
- * everything else as background. The reply, though, is notebook-wide: it
+ * mounted). Send captures *two* images: the violet ink alone (cropped to
+ * just those strokes, via `renderItemsImage`) as the actual question, and
+ * the whole current page (via `renderPageRegionImage`) as background
+ * context — sent to api/gemini.ts as two structurally distinct request
+ * fields, not pixels mixed into one picture, so Gemini is never asked to
+ * itself pick the question out of a mixed photo. The reply, though, is notebook-wide: it
  * renders in a single slide-out chat panel (`mountPanel`/`renderConversation`)
  * rather than as page content, so the conversation reads the same regardless
  * of which page you're looking at or scroll to.
@@ -22,7 +23,7 @@
 import { el } from './ui/dom';
 import { icon } from './ui/icon';
 import { confirmDialog } from './ui/dialog';
-import { renderPageRegionImage } from './export/raster';
+import { renderItemsImage, renderPageRegionImage } from './export/raster';
 import { store } from './store';
 import { clearAiEntries, getAiEntries, putAiEntry } from './db';
 import { renderAiReply } from './ai-render';
@@ -449,15 +450,19 @@ export class AiMode {
     let isError = false;
     let thumbnail = '';
     try {
-      // always the whole page — every pre-existing note plus the new violet
-      // ink — so Gemini has full context every turn, not just a cropped
-      // slice (see the module doc comment and api/gemini.ts's system prompt,
-      // which is what actually tells it to treat the violet ink as the
-      // question and the rest as background).
-      const rendered = await renderPageRegionImage(page);
-      thumbnail = `data:${rendered.mimeType};base64,${rendered.base64}`;
+      // Two separate captures, sent as two separate request fields (see
+      // api/gemini.ts) — never merged into one image. `question` is just the
+      // violet ink itself (cropped to it, on a blank canvas), so it's the
+      // actual thing to answer; `context` is the whole page (every
+      // pre-existing note plus the new ink, same as always — see the module
+      // doc comment), there purely as background. Both captured before the
+      // ink is removed below, since `question` needs it to still be on the
+      // page to render.
+      const question = await renderItemsImage(page, st.inkIds);
+      const context = await renderPageRegionImage(page);
+      thumbnail = `data:${context.mimeType};base64,${context.base64}`;
 
-      // the image is captured — this ink's job is done. Discard it (only
+      // both images are captured — this ink's job is done. Discard it (only
       // items we ourselves marked ephemeral; never touches pre-existing
       // permanent content) so it never persists, regardless of what the
       // request below does.
@@ -475,7 +480,10 @@ export class AiMode {
       const res = await fetch(GEMINI_ENDPOINT, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'X-NoteApp-Secret': PROXY_SECRET },
-        body: JSON.stringify({ image: rendered.base64, mimeType: rendered.mimeType }),
+        body: JSON.stringify({
+          question: { image: question.base64, mimeType: question.mimeType },
+          context: { image: context.base64, mimeType: context.mimeType },
+        }),
       });
       const data: { text?: unknown; error?: unknown } | null = await res.json().catch(() => null);
       if (res.ok && typeof data?.text === 'string' && data.text) {

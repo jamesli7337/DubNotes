@@ -46,6 +46,14 @@ type ViewOp = Op | { kind: 'del-page'; page: Page; strokes: Stroke[]; elements: 
 /** Offset applied when pasting back onto the page the items were copied from. */
 const PASTE_OFFSET = 24;
 
+/** Size-slider magnetic snap: a dragged value within this much of a whole number lands exactly on it, so a whole size is easy to hit despite the slider's finer 0.1 step. */
+const SIZE_SNAP_RADIUS = 0.25;
+
+/** How long a press must be held, without much movement, before it arms a drag-to-reorder (page manager card, or a page in the main view). */
+const LONG_PRESS_MS = 380;
+/** Pointer movement, in px, allowed during the long-press window before it's treated as a scroll/tap instead of a hold. */
+const LONG_PRESS_SLOP = 8;
+
 /** The lasso's selection shapes, in dock order. */
 const LASSO_OPTIONS: Record<LassoShape, { icon: IconName; label: string }> = {
   free: { icon: 'lasso', label: 'Freehand lasso' },
@@ -554,6 +562,156 @@ class NotebookView {
     };
     s.addEventListener('pointerup', end);
     s.addEventListener('pointercancel', end);
+  }
+
+  /**
+   * Generic hold-then-drag reorder, shared by the page manager's cards and
+   * the main view's pages: press `trigger` and hold it still (within
+   * LONG_PRESS_SLOP) for LONG_PRESS_MS to arm a drag of `item` among its
+   * siblings inside `scroller` (direct children matching `itemSelector`).
+   * Below the long-press threshold, or if the pointer moves first, nothing
+   * happens and `trigger`'s own tap/click behaviour (if any) fires as usual.
+   *
+   * Once armed, `item` floats as `position: fixed` (escaping `scroller`'s
+   * own clipping/scrolling the same way selection.ts's fixed-position pieces
+   * escape the zoomed page subtree) and follows the pointer, while a
+   * same-sized placeholder marks its live slot in `scroller` and is shuffled
+   * as the pointer crosses other items. Dropping calls `onDrop` with the
+   * placeholder's final index among `scroller`'s matching children;
+   * `onDragStart` (if given) fires once the drag actually begins, so a
+   * caller whose trigger is also a tap/click target (e.g. "go to this page")
+   * can suppress the click that would otherwise follow the drag's pointerup.
+   */
+  private bindLongPressReorder(opts: {
+    trigger: HTMLElement;
+    item: HTMLElement;
+    scroller: HTMLElement;
+    itemSelector: string;
+    onDragStart?: () => void;
+    onDrop: (finalIndex: number) => void;
+  }): void {
+    const { trigger, item, scroller, itemSelector, onDragStart, onDrop } = opts;
+    let armTimer = 0;
+    let dragCtx: { pointerId: number; placeholder: HTMLElement; offsetX: number; offsetY: number; lastClientY: number } | null =
+      null;
+    let autoscrollRaf = 0;
+    const AUTOSCROLL_EDGE = 56;
+    const AUTOSCROLL_SPEED = 12;
+
+    const autoscrollTick = (): void => {
+      if (!dragCtx) {
+        autoscrollRaf = 0;
+        return;
+      }
+      const r = scroller.getBoundingClientRect();
+      const y = dragCtx.lastClientY;
+      if (y < r.top + AUTOSCROLL_EDGE) scroller.scrollTop -= AUTOSCROLL_SPEED;
+      else if (y > r.bottom - AUTOSCROLL_EDGE) scroller.scrollTop += AUTOSCROLL_SPEED;
+      autoscrollRaf = requestAnimationFrame(autoscrollTick);
+    };
+
+    const beginDrag = (e: PointerEvent): void => {
+      const rect = item.getBoundingClientRect();
+      // also carries itemSelector's own class so it counts as a match in the
+      // scroller.querySelectorAll(itemSelector) lists used for index math below
+      // (a plain 'reorder-placeholder' div would silently vanish from every
+      // one of those lists, breaking both the live hover-swap and the final
+      // drop-index calculation)
+      const placeholder = el('div', { class: `reorder-placeholder ${itemSelector.slice(1)}` });
+      placeholder.style.width = `${rect.width}px`;
+      placeholder.style.height = `${rect.height}px`;
+      item.before(placeholder);
+      document.body.append(item);
+      item.classList.add('reorder-dragging');
+      Object.assign(item.style, {
+        position: 'fixed',
+        left: `${rect.left}px`,
+        top: `${rect.top}px`,
+        width: `${rect.width}px`,
+        pointerEvents: 'none',
+        zIndex: '10000',
+      });
+      dragCtx = {
+        pointerId: e.pointerId,
+        placeholder,
+        offsetX: e.clientX - rect.left,
+        offsetY: e.clientY - rect.top,
+        lastClientY: e.clientY,
+      };
+      try {
+        trigger.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      if (!autoscrollRaf) autoscrollRaf = requestAnimationFrame(autoscrollTick);
+      onDragStart?.();
+    };
+
+    const endDrag = (commit: boolean): void => {
+      const ctx = dragCtx;
+      if (!ctx) return;
+      dragCtx = null;
+      if (autoscrollRaf) {
+        cancelAnimationFrame(autoscrollRaf);
+        autoscrollRaf = 0;
+      }
+      const finalIndex = [...scroller.querySelectorAll(itemSelector)].indexOf(ctx.placeholder);
+      ctx.placeholder.replaceWith(item);
+      item.classList.remove('reorder-dragging');
+      item.style.cssText = '';
+      if (commit && finalIndex >= 0) onDrop(finalIndex);
+    };
+
+    trigger.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || dragCtx) return;
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const pointerId = e.pointerId;
+      const cleanup = (): void => {
+        trigger.removeEventListener('pointermove', onMoveBeforeArm);
+        trigger.removeEventListener('pointerup', onEndBeforeArm);
+        trigger.removeEventListener('pointercancel', onEndBeforeArm);
+      };
+      const onMoveBeforeArm = (me: PointerEvent): void => {
+        if (me.pointerId !== pointerId) return;
+        if (Math.hypot(me.clientX - startX, me.clientY - startY) > LONG_PRESS_SLOP) {
+          clearTimeout(armTimer);
+          cleanup();
+        }
+      };
+      const onEndBeforeArm = (me: PointerEvent): void => {
+        if (me.pointerId !== pointerId) return;
+        clearTimeout(armTimer);
+        cleanup();
+      };
+      trigger.addEventListener('pointermove', onMoveBeforeArm);
+      trigger.addEventListener('pointerup', onEndBeforeArm);
+      trigger.addEventListener('pointercancel', onEndBeforeArm);
+      armTimer = window.setTimeout(() => {
+        cleanup();
+        beginDrag(e);
+      }, LONG_PRESS_MS);
+    });
+
+    trigger.addEventListener('pointermove', (e) => {
+      if (!dragCtx || e.pointerId !== dragCtx.pointerId) return;
+      dragCtx.lastClientY = e.clientY;
+      item.style.left = `${e.clientX - dragCtx.offsetX}px`;
+      item.style.top = `${e.clientY - dragCtx.offsetY}px`;
+      const hovered = document.elementFromPoint(e.clientX, e.clientY)?.closest(itemSelector) as HTMLElement | null;
+      if (hovered && hovered !== dragCtx.placeholder && hovered.parentElement === scroller) {
+        const children = [...scroller.querySelectorAll(itemSelector)];
+        if (children.indexOf(hovered) > children.indexOf(dragCtx.placeholder)) hovered.after(dragCtx.placeholder);
+        else hovered.before(dragCtx.placeholder);
+      }
+    });
+
+    const finish = (e: PointerEvent): void => {
+      if (!dragCtx || e.pointerId !== dragCtx.pointerId) return;
+      endDrag(true);
+    };
+    trigger.addEventListener('pointerup', finish);
+    trigger.addEventListener('pointercancel', finish);
   }
 
   // --------------------------------------------------------------- export
@@ -1480,9 +1638,10 @@ class NotebookView {
   }
 
   /**
-   * The slider panel shown inside the popover: continuous range (no snapping),
-   * a tick layer, and the numeric readout. Drag updates `toolState`, the readout
-   * and the dock dot via `onLiveSize` — never a dock re-render; saved on release.
+   * The slider panel shown inside the popover: a continuous range with a
+   * magnetic snap to whole numbers (see SIZE_SNAP_RADIUS), a tick layer, and
+   * the numeric readout. Drag updates `toolState`, the readout and the dock
+   * dot via `onLiveSize` — never a dock re-render; saved on release.
    * `refreshTicks` (re)builds the tick layer from the input's real rendered size.
    */
   private buildSizePanel(
@@ -1510,7 +1669,12 @@ class NotebookView {
     valueEl.textContent = current.toFixed(1);
 
     input.addEventListener('input', () => {
-      const v = clamp(parseFloat(input.value), range.min, range.max);
+      let v = clamp(parseFloat(input.value), range.min, range.max);
+      const whole = Math.round(v);
+      if (whole >= range.min && whole <= range.max && Math.abs(v - whole) <= SIZE_SNAP_RADIUS) {
+        v = whole;
+        input.value = String(v); // snaps the visible thumb to the tick, not just the stored value
+      }
       if (isPen) toolState.penSize = v;
       else toolState.hiSize = v;
       valueEl.textContent = v.toFixed(1);
@@ -1567,12 +1731,25 @@ class NotebookView {
     wrap.style.setProperty('--ph', `${pageH(page)}px`);
 
     const headEl = el('div', { class: 'page-head' });
-    headEl.append(el('span', { text: `Page ${page.index + 1}` }));
+    const headLabel = el('span', { text: `Page ${page.index + 1}` });
+    headEl.append(headLabel);
     // grouped so `.page-head`'s space-between only ever sees two children —
     // the label and this group — regardless of how many action buttons live here
     // (the "Paper" link that used to open here moved to the app bar, top right)
     const headActions = el('div', { class: 'page-head__actions' });
     headEl.append(headActions);
+    // holding the label arms a drag-to-reorder of this page among the
+    // notebook's others — kept off headActions so it never fights the AI
+    // toggle button's own tap
+    this.bindLongPressReorder({
+      trigger: headLabel,
+      item: wrap,
+      scroller: this.scrollEl,
+      itemSelector: '.page-wrap',
+      onDrop: (finalIndex) => {
+        if (store.reorderPage(page.id, finalIndex)) this.syncPages();
+      },
+    });
 
     const pageEl = el('div', { class: 'page' });
     pageEl.dataset.pageId = page.id;
@@ -1822,12 +1999,11 @@ class NotebookView {
 
   /**
    * Full-screen page manager: every page as a thumbnail, in order — reorder
-   * (move up/down; drag-and-drop was skipped in favour of buttons, which are
-   * simpler to get right across mouse/touch/pen than a DnD implementation,
-   * per the task's own suggested fallback), duplicate, delete, or tap one to
-   * jump to it. Thumbnails are rendered once per open and cached in `thumbs`
-   * for the rest of the session — reordering/deleting just redraws the list
-   * from the cache; only a freshly duplicated page renders new pixels.
+   * (hold a thumbnail to drag it, or the up/down arrows), duplicate, delete,
+   * or tap one to jump to it. Thumbnails are rendered once per open and
+   * cached in `thumbs` for the rest of the session — reordering/deleting
+   * just redraws the list from the cache; only a freshly duplicated page
+   * renders new pixels.
    */
   private async openPageManager(): Promise<void> {
     const { renderPageCanvas } = await import('../export/raster'); // pulls in the (lazy) export/render code only when this opens
@@ -1876,9 +2052,29 @@ class NotebookView {
         const thumbBox = el('span', { class: 'pagemgr__thumb' });
         thumbBox.style.aspectRatio = `${pageW(page)} / ${pageH(page)}`; // a landscape-imported page thumbnails at its own shape, not the default portrait box
         thumbBtn.append(thumbBox, el('span', { class: 'pagemgr__num', text: `Page ${i + 1}` }));
+        let suppressClick = false;
         thumbBtn.addEventListener('click', () => {
+          if (suppressClick) {
+            suppressClick = false;
+            return;
+          }
           modal.close();
           this.goToPage(page.id);
+        });
+        this.bindLongPressReorder({
+          trigger: thumbBtn,
+          item: card,
+          scroller: grid,
+          itemSelector: '.pagemgr__card',
+          onDragStart: () => {
+            suppressClick = true;
+          },
+          onDrop: (finalIndex) => {
+            if (store.reorderPage(page.id, finalIndex)) {
+              this.syncPages();
+              render();
+            }
+          },
         });
 
         const cached = thumbs.get(page.id);

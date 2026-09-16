@@ -1248,6 +1248,29 @@ select {
   touch-action: pan-x pan-y;
   overscroll-behavior: contain;
   padding: 118px 0 40vh;
+  /* a persistent, theme-coloured scrollbar rather than relying on the OS's
+     auto-hide default (e.g. macOS's "only while scrolling") — Firefox via
+     scrollbar-width/color, Chromium/desktop-Safari via ::-webkit-scrollbar
+     below. iOS/iPadOS Safari has no CSS hook for this: touch scrollbars there
+     are always transient, regardless of these rules. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--outline-variant) transparent;
+}
+.nb-scroll::-webkit-scrollbar {
+  width: 10px;
+}
+.nb-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.nb-scroll::-webkit-scrollbar-thumb {
+  background: var(--outline-variant);
+  border-radius: var(--r-full);
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.nb-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--outline);
+  background-clip: padding-box;
 }
 /* Hand tool active: a grab cursor for the mouse-drag-to-pan path (see
    bindHandToolGestures) — touch/pen panning is native and has no cursor. */
@@ -1297,6 +1320,13 @@ select {
   color: var(--on-surface-variant);
   padding: 0 4px 6px;
 }
+/* holding the label arms a drag-to-reorder (see bindLongPressReorder) —
+   without this, a touch hold here is claimed by .nb-scroll's own native
+   panning before our long-press timer ever fires (see CLAUDE.md's
+   touch-action note). */
+.page-head > span {
+  touch-action: none;
+}
 .page-head .link {
   border: none;
   background: none;
@@ -1322,6 +1352,15 @@ select {
 /* .iconbtn:hover's own colour would otherwise win over .active on hover (equal
    specificity, declared earlier) and flash the toggle back to the default tint. */
 .ai-toggle.active:hover {
+  color: #6d28d9;
+}
+/* the send button always matches the AI accent (AI_COLOR in ai-mode.ts) rather
+   than the default .iconbtn tint, since it only ever appears while AI mode is
+   active on the current page. */
+.ai-send {
+  color: #6d28d9;
+}
+.ai-send:hover:not(:disabled) {
   color: #6d28d9;
 }
 /* the bare `button { display: inline-flex }` rule above is an author-origin
@@ -1427,7 +1466,12 @@ select {
 .ai-panel__thumb {
   width: 100%;
   max-height: 140px;
-  object-fit: cover;
+  /* contain, not cover: the captured image is the whole (tall, portrait)
+     page — cover would scale it to fill this short, wide box and crop away
+     most of the page's height, showing only a thin cropped slice instead of
+     what was actually sent to Gemini. Letterboxing (empty side space) is the
+     trade-off for actually showing the whole thing. */
+  object-fit: contain;
   border-radius: var(--r-lg);
   box-shadow: inset 0 0 0 1px var(--outline-variant);
   background: var(--surface-c);
@@ -2078,6 +2122,10 @@ select {
   padding: 0;
   border-radius: var(--r-lg);
   text-align: left;
+  /* holding it arms a drag-to-reorder (see bindLongPressReorder) — without
+     this, a touch hold here is claimed by the grid's own native scrolling
+     before our long-press timer ever fires (see CLAUDE.md's touch-action note) */
+  touch-action: none;
 }
 .pagemgr__thumb {
   display: block;
@@ -2109,6 +2157,19 @@ select {
 .pagemgr__actions .icon {
   width: 17px;
   height: 17px;
+}
+/* shared by bindLongPressReorder's two uses (page manager cards, main-view
+   pages): the floated, actively-dragged element and the placeholder marking
+   its live drop slot. */
+.reorder-dragging {
+  box-shadow: var(--sh-2);
+  opacity: 0.95;
+  user-select: none;
+}
+.reorder-placeholder {
+  border-radius: var(--r-lg);
+  border: 2px dashed var(--outline-variant);
+  background: var(--surface-c);
 }
 
 .seg {
