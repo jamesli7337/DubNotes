@@ -114,7 +114,7 @@ const DOUBLE_TAP_MS = 350;
 const DOUBLE_TAP_SLOP = 24;
 /** Smallest tape strip a drag can create. */
 export const TAPE_MIN = 12;
-/** Smallest box the Shapes tool places (page units); an arrow only needs this much length. */
+/** Smallest box the Shapes tool places (screen px, counter-scaled for zoom — see shapeFromDrag); an arrow only needs this much length. */
 const SHAPE_MIN = 12;
 /** An inserted image is fitted into this fraction of the page width. */
 const IMAGE_FIT = 0.6;
@@ -296,7 +296,6 @@ export class PageCanvas {
         onDrag: (f) => this.updateTransform(f),
         onDragEnd: (f) => this.endTransform(f),
         onTap: (x, y) => this.tapSelection(x, y),
-        onDelete: () => this.deleteSelection(),
       },
       this.pw,
       this.ph
@@ -787,7 +786,7 @@ export class PageCanvas {
           break;
         case 'shape-press':
           // moved: it's a new shape starting from the press point, not a tap on the old one
-          if (Math.hypot(pt[0] - this.pressPt[0], pt[1] - this.pressPt[1]) < TAP_SLOP) break;
+          if (Math.hypot(pt[0] - this.pressPt[0], pt[1] - this.pressPt[1]) < TAP_SLOP / this.zoom()) break;
           this.shapeHit = null;
           this.clearSelection();
           this.beginShapeDrag(this.pressPt);
@@ -809,7 +808,7 @@ export class PageCanvas {
           break;
         case 'tape-tap': {
           // moved off the strip: it wasn't a tap after all — carry on with the real tool
-          if (Math.hypot(pt[0] - this.pressPt[0], pt[1] - this.pressPt[1]) < TAP_SLOP) break;
+          if (Math.hypot(pt[0] - this.pressPt[0], pt[1] - this.pressPt[1]) < TAP_SLOP / this.zoom()) break;
           this.tapeHit = null;
           const kind = toolState.kind;
           if (kind === 'eraser') {
@@ -845,7 +844,7 @@ export class PageCanvas {
         case 'text-press': {
           const dx = pt[0] - this.pressPt[0];
           const dy = pt[1] - this.pressPt[1];
-          if (!this.xfOrig && Math.hypot(dx, dy) < TAP_SLOP) break;
+          if (!this.xfOrig && Math.hypot(dx, dy) < TAP_SLOP / this.zoom()) break;
           if (!this.xfOrig) this.beginTransform();
           if (this.xfOrig && this.xfFrame) {
             this.updateTransform({ ...this.xfFrame, x: this.xfFrame.x + dx, y: this.xfFrame.y + dy });
@@ -863,7 +862,7 @@ export class PageCanvas {
       this.touchTap = null;
       if (tap && tap.pointerId === e.pointerId && e.type === 'pointerup') {
         const pt = this.toLocal(e);
-        if (Math.hypot(pt[0] - tap.x, pt[1] - tap.y) < TAP_SLOP * 2) this.handleTapeTap(tap.id);
+        if (Math.hypot(pt[0] - tap.x, pt[1] - tap.y) < (TAP_SLOP * 2) / this.zoom()) this.handleTapeTap(tap.id);
       }
       return;
     }
@@ -927,13 +926,15 @@ export class PageCanvas {
         return;
       }
       const travelled = Math.hypot(pt[0] - this.pressPt[0], pt[1] - this.pressPt[1]);
-      if (path.length < 3 || travelled < TAP_SLOP) {
-        // a tap: if a lasso selection is still active and this tap landed
-        // inside its outline, a second tap close behind it (see isDoubleTap)
-        // reveals the Duplicate/Cut/Copy/Delete callout without disturbing
-        // the selection. Otherwise, the usual tap-select-topmost-or-clear
-        // applies — which also covers "tap outside the lassoed region clears
-        // the selection", since a miss (hit == null) selects nothing.
+      if (path.length < 3 || travelled < TAP_SLOP / this.zoom()) {
+        // a tap: when a lasso selection is active, its box (SelectionOverlay)
+        // covers the whole lasso path's bounding rect, so a tap landing
+        // inside that rect — lasso path included — is normally claimed by
+        // the box first and handled by tapSelection() instead (single-tap
+        // reveals there now). This branch only ever runs for a tap outside
+        // the box (hence also outside the lasso path), so the isDoubleTap
+        // check below is effectively unreachable in practice; left as-is.
+        // The tap-outside-clears fallback below still applies normally.
         if (this.lastLassoPath && pointInPolygon(pt[0], pt[1], this.lastLassoPath)) {
           if (this.isDoubleTap(pt[0], pt[1])) {
             const frame = itemsFrame(this.selectedItems());
@@ -1238,13 +1239,14 @@ export class PageCanvas {
     const b = this.live[this.live.length - 1];
     const kind = toolState.shapeKind;
     const { color, size } = this.liveTool;
+    const shapeMin = SHAPE_MIN / this.zoom();
     if (kind === 'arrow') {
-      if (Math.hypot(b[0] - a[0], b[1] - a[1]) < SHAPE_MIN) return null;
+      if (Math.hypot(b[0] - a[0], b[1] - a[1]) < shapeMin) return null;
       return this.shapeFromFit(lineFit('arrow', a, b, size), color, size);
     }
     const w = Math.abs(b[0] - a[0]);
     const h = Math.abs(b[1] - a[1]);
-    if (w < SHAPE_MIN || h < SHAPE_MIN) return null;
+    if (w < shapeMin || h < shapeMin) return null;
     const fit: ShapeFit = { shape: kind, x: Math.min(a[0], b[0]), y: Math.min(a[1], b[1]), w, h, rotation: 0 };
     if (kind === 'triangle') fit.pts = [[0.5, 0], [1, 1], [0, 1]]; // apex up, base along the bottom
     return this.shapeFromFit(fit, color, size);
@@ -1632,39 +1634,36 @@ export class PageCanvas {
    * lasso path, so a plain tap anywhere in that rectangle would otherwise
    * never reach the canvas's own tap handling — the box claims the pointer
    * event first. So it's routed here instead: inside the drawn lasso path,
-   * a double-tap (see isDoubleTap) reveals the Duplicate/Cut/Copy/Delete
-   * callout without touching the selection; outside the path (but still
-   * inside the box's rectangle), treat it exactly like a tap that landed
-   * fully outside the box already does — select whatever's under it, or
-   * clear. A single (non-lasso) selected item gets the same double-tap
-   * treatment.
-   *
-   * For every other selection, unchanged: with the text tool, a tap re-opens
-   * a selected text box for editing.
+   * a single tap reveals the Duplicate/Cut/Copy/Delete callout without
+   * touching the selection; outside the path (but still inside the box's
+   * rectangle), treat it exactly like a tap that landed fully outside the
+   * box already does — select whatever's under it, or clear. Any other
+   * (non-lasso) selected item gets the same single-tap-reveals-the-callout
+   * treatment, with one priority exception: with the text tool, a tap on a
+   * selected text box re-opens it for editing instead of showing the callout.
    */
   private tapSelection(x: number, y: number): void {
     if (this.lastLassoPath) {
-      if (!pointInPolygon(x, y, this.lastLassoPath)) {
+      if (pointInPolygon(x, y, this.lastLassoPath)) {
+        const frame = { ...aabb(this.lastLassoPath), rot: 0 };
+        this.hooks.onSelectionFrame(this, frame);
+      } else {
         const hit = this.topItemAt(x, y);
         this.setSelection(hit ? [hit.id] : []);
+      }
+      return;
+    }
+    if (!this.selected.size) return;
+    if (toolState.kind === 'text' && !this.editor) {
+      const items = this.selectedItems();
+      const el = items.length === 1 && !isStroke(items[0]) ? items[0] : null;
+      if (el?.kind === 'text' && pointInElement(el, x, y)) {
+        this.startEdit(el, false);
         return;
       }
-    } else if (!this.selected.size) {
-      return;
     }
-    // an active selection was already confirmed above (either a lasso path
-    // with the tap inside it, or any other non-empty selection) — the
-    // double-tap reveal isn't tied to which tool happens to be active right
-    // now, it applies to whatever is currently selected
-    if (this.isDoubleTap(x, y)) {
-      const frame = this.lastLassoPath ? { ...aabb(this.lastLassoPath), rot: 0 } : itemsFrame(this.selectedItems());
-      if (frame) this.hooks.onSelectionFrame(this, frame);
-      return;
-    }
-    if (this.lastLassoPath || toolState.kind !== 'text' || this.editor) return;
-    const items = this.selectedItems();
-    const el = items.length === 1 && !isStroke(items[0]) ? items[0] : null;
-    if (el?.kind === 'text' && pointInElement(el, x, y)) this.startEdit(el, false);
+    const frame = itemsFrame(this.selectedItems());
+    if (frame) this.hooks.onSelectionFrame(this, frame);
   }
 
   deleteSelection(): void {

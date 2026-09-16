@@ -1649,8 +1649,7 @@ select {
   pointer-events: none; /* while editing text the box lets taps reach the textarea… */
 }
 .sel-box--pass .sel-h,
-.sel-box--pass .sel-rot,
-.sel-box--pass .sel-del {
+.sel-box--pass .sel-rot {
   pointer-events: auto; /* …but its handles still work */
 }
 .sel-h {
@@ -1668,7 +1667,6 @@ select {
    stay the same size on screen (and don't swallow a thin selection's body) */
 .sel-h,
 .sel-rot,
-.sel-del,
 .guide__rot {
   transform: scale(calc(1 / var(--zoom, 1)));
 }
@@ -1697,24 +1695,6 @@ select {
   box-shadow: var(--sh-1);
   cursor: grab;
   touch-action: none;
-}
-.sel-del {
-  position: absolute;
-  right: -12px;
-  top: -12px;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border-radius: 50%;
-  border: none;
-  background: var(--error);
-  color: #fff;
-  box-shadow: var(--sh-1);
-  cursor: pointer;
-}
-.sel-del .icon {
-  width: 14px;
-  height: 14px;
 }
 
 /* ------------------------------------------------- lasso selection callout

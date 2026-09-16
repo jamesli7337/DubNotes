@@ -27,16 +27,17 @@ export interface OverlayHooks {
   onDragEnd: (frame: Frame | null) => void;
   /** a press on the box body that never moved — page-space point */
   onTap: (x: number, y: number) => void;
-  onDelete: () => void;
 }
 
 /**
  * The bounding box drawn around a selection: a rotated, absolutely positioned
- * div with resize handles on its edges, a rotate grip above it and a delete
- * button at its corner. It owns the handle geometry — dragging the body moves
- * the frame, a handle resizes it (anchored on the opposite side, in the frame's
- * own rotated space) and the grip rotates it — and reports the resulting frame
- * to its hooks; the page canvas maps that onto the selected items.
+ * div with resize handles on its edges and a rotate grip above it. It owns
+ * the handle geometry — dragging the body moves the frame, a handle resizes
+ * it (anchored on the opposite side, in the frame's own rotated space) and
+ * the grip rotates it — and reports the resulting frame to its hooks; the
+ * page canvas maps that onto the selected items. Deleting the selection is
+ * the callout's job (its Delete button calls PageCanvas.deleteSelection()
+ * directly) — this overlay doesn't have its own delete affordance.
  */
 export class SelectionOverlay {
   private readonly host: HTMLElement;
@@ -82,16 +83,6 @@ export class SelectionOverlay {
     this.rotEl.title = 'Rotate';
     this.rotEl.append(icon('rotate', 'sm'));
     this.box.append(this.rotEl);
-
-    const del = document.createElement('button');
-    del.type = 'button';
-    del.className = 'sel-del';
-    del.title = 'Delete';
-    del.setAttribute('aria-label', 'Delete selection');
-    del.append(icon('close', 'sm'));
-    del.addEventListener('pointerdown', (e) => e.stopPropagation());
-    del.addEventListener('click', () => this.hooks.onDelete());
-    this.box.append(del);
 
     this.box.addEventListener('pointerdown', this.onDown);
     this.box.addEventListener('pointermove', this.onMove);
@@ -158,6 +149,11 @@ export class SelectionOverlay {
     ];
   }
 
+  /** Screen px per page unit for the page this overlay is on — the same ratio toPage() already reverses, exposed so a screen-px tolerance (TAP_SLOP) can be converted to page units without a separate zoom parameter threaded in from outside. */
+  private zoom(): number {
+    return this.host.getBoundingClientRect().width / this.pw;
+  }
+
   private onDown = (e: PointerEvent): void => {
     if (this.drag || !this.frame) return;
     const target = e.target as HTMLElement;
@@ -222,17 +218,22 @@ export class SelectionOverlay {
       this.hooks.onDragEnd(null);
       return;
     }
-    // A body drag (kind 'move') that traveled less than TAP_SLOP still
-    // counts as a tap, not a drag — matches every other tap-vs-drag decision
-    // in the canvas layer. Real pointer input essentially never reports
-    // pixel-exact coordinates between down and up (especially on the fast
-    // second contact of a double-tap); without this tolerance that residual
-    // noise read as an intentional move and got permanently committed via
-    // onDragEnd/endTransform instead of ever reaching onTap. Resize/rotate
-    // handles are unaffected — 'move' is the only kind whose x/y can differ
-    // from the press start without w/h/rot also changing.
+    // A body drag (kind 'move') that traveled less than TAP_SLOP (converted
+    // from its screen-px meaning via zoom(), like every other on-screen
+    // tolerance in this codebase — a fixed page-unit comparison would be
+    // tighter in screen terms the more zoomed out the view is) still counts
+    // as a tap, not a drag — matches every other tap-vs-drag decision in the
+    // canvas layer. Real pointer input essentially never reports pixel-exact
+    // coordinates between down and up (especially on a fast second tap);
+    // without this tolerance that residual noise read as an intentional move
+    // and got permanently committed via onDragEnd/endTransform instead of
+    // ever reaching onTap. Resize/rotate handles are unaffected — 'move' is
+    // the only kind whose x/y can differ from the press start without
+    // w/h/rot also changing.
     const tapMove =
-      d.kind === 'move' && this.frame && Math.hypot(this.frame.x - d.start.x, this.frame.y - d.start.y) < TAP_SLOP;
+      d.kind === 'move' &&
+      this.frame &&
+      Math.hypot(this.frame.x - d.start.x, this.frame.y - d.start.y) < TAP_SLOP / this.zoom();
     const moved =
       !tapMove &&
       this.frame &&
