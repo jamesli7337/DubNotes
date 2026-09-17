@@ -42,6 +42,8 @@ import { blockGestures, el } from './dom';
 import { icon, type IconName } from './icon';
 
 type ViewOp = Op | { kind: 'del-page'; page: Page; strokes: Stroke[]; elements: PageElement[] };
+/** WebKit-only, non-standard: tags a Touch as a stylus contact — see bindZoomGestures and page-canvas.ts's own copy of this type. */
+type WebKitTouch = Touch & { touchType?: 'direct' | 'stylus' };
 
 /** Offset applied when pasting back onto the page the items were copied from. */
 const PASTE_OFFSET = 24;
@@ -98,6 +100,10 @@ class NotebookView {
   /** Single app-bar AI-mode controls, acting on whichever page is "current" (see setCurrentPage). */
   private aiToggleBtn!: HTMLButtonElement;
   private aiSendBtn!: HTMLButtonElement;
+  /** The app bar's right-hand button group (everything but back/title) — queried in applyAiToolbarLockdown to disable every button there but aiToggleBtn/aiSendBtn while AI mode is on. */
+  private appBarRightGroup!: HTMLElement;
+  /** The dock's own Pen button — the one tool button AI mode leaves enabled (and turns violet); set fresh by renderTools each rebuild. */
+  private penToolBtn!: HTMLButtonElement;
   /** View zoom (1 = 100%); pages are CSS-scaled, so pointer maths stays in page units. */
   private zoom = 1;
   private pinch: { d0: number; z0: number; mx: number; my: number; cx: number; cy: number } | null = null;
@@ -392,6 +398,7 @@ class NotebookView {
     const rightGroup = el('div', { class: 'nb-appbar__right' });
     rightGroup.append(this.aiToggleBtn, this.aiSendBtn, imgBtn, pdfBtn, exportBtn, pagesBtn, paperBtn);
     bar.append(back, this.titleEl, rightGroup);
+    this.appBarRightGroup = rightGroup;
 
     // Notability-style dock: a fixed top row (tools + undo/redo, never reflows)
     // and a fixed-height options row below it for the active tool's own
@@ -488,14 +495,27 @@ class NotebookView {
    * it only actually applies the zoom/pan math while exactly 2 touches are
    * live, and just holds position (still swallowing the event) otherwise.
    * The session ends only once every touch is off the glass.
+   *
+   * A stylus contact (WebKit tags a `Touch` with `touchType: 'stylus'`) is
+   * never eligible as one of the two pinch touches, at start or mid-gesture —
+   * a finger scrolling when the Apple Pencil comes down is two touches by
+   * count alone, but treating that as a pinch corrupted the scroll and raced
+   * page-canvas.ts's own stylus-promotion path (startPress/capture) for the
+   * same contact, aborting the pencil's stroke. If a stylus joins (or was
+   * already present) once a pinch is already active, the session ends
+   * outright rather than just skipping the zoom/pan math for that tick, so a
+   * still-down finger falls back to plain native scrolling and the pencil's
+   * own contact is left uncontested.
    */
   private bindZoomGestures(): void {
     const s = this.scrollEl;
     const dist = (t: TouchList): number => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    const hasStylus = (t: TouchList): boolean =>
+      Array.from(t).some((touch) => (touch as WebKitTouch).touchType === 'stylus');
     s.addEventListener(
       'touchstart',
       (e) => {
-        if (e.touches.length !== 2) return;
+        if (e.touches.length !== 2 || hasStylus(e.touches)) return;
         const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
         const my = (e.touches[0].clientY + e.touches[1].clientY) / 2;
         this.pinch = { d0: dist(e.touches), z0: this.zoom, mx, my, cx: mx, cy: my };
@@ -506,6 +526,13 @@ class NotebookView {
       'touchmove',
       (e) => {
         if (!this.pinch) return;
+        if (hasStylus(e.touches)) {
+          // the pencil joined (or was already down) mid-gesture: bail out
+          // entirely rather than just skipping this tick's zoom/pan math —
+          // see doc comment above.
+          this.pinch = null;
+          return;
+        }
         e.preventDefault(); // own the whole gesture until every touch lifts — see doc comment above
         if (e.touches.length !== 2) return; // no 2-finger baseline right now: hold position, keep suppressing native scroll
         const p = this.pinch;
@@ -625,6 +652,11 @@ class NotebookView {
 
     let drag: { pointerId: number; startY: number; startScrollTop: number; trackH: number; thumbH: number } | null = null;
     thumb.addEventListener('pointerdown', (e) => {
+      // a pinch's second finger can land on the thumb's own hit strip (both
+      // only ever active on the same coarse-pointer/no-hover devices) —
+      // refuse to start a competing drag of our own while bindZoomGestures
+      // owns the gesture; see its own doc comment for how long that is.
+      if (this.pinch) return;
       e.preventDefault();
       const track = s.getBoundingClientRect();
       drag = {
@@ -642,6 +674,14 @@ class NotebookView {
     });
     thumb.addEventListener('pointermove', (e) => {
       if (!drag || e.pointerId !== drag.pointerId) return;
+      // a pinch can start after this drag already grabbed a pointer (the
+      // thumb's own pointerdown races bindZoomGestures' touchstart) — bail
+      // out rather than keep fighting it over scrollTop for the rest of the
+      // gesture.
+      if (this.pinch) {
+        drag = null;
+        return;
+      }
       const maxScroll = s.scrollHeight - s.clientHeight;
       const range = drag.trackH - drag.thumbH;
       const scrollDelta = range > 0 ? ((e.clientY - drag.startY) / range) * maxScroll : 0;
@@ -923,8 +963,11 @@ class NotebookView {
       });
       return b;
     };
+    // kept so applyAiToolbarLockdown can leave just this one enabled (and
+    // colour it violet) while AI mode is on — see its own doc comment.
+    this.penToolBtn = toolBtn('pen', 'pen', 'Pen') as HTMLButtonElement;
     top.append(
-      toolBtn('pen', 'pen', 'Pen'),
+      this.penToolBtn,
       toolBtn('highlighter', 'highlighter', 'Highlighter'),
       toolBtn('eraser', 'eraser', 'Eraser'),
       toolBtn('lasso', 'lasso', 'Lasso select'),
@@ -1077,6 +1120,9 @@ class NotebookView {
     };
     top.append(guideBtn('ruler', 'ruler', 'Ruler'), guideBtn('protractor', 'protractor', 'Protractor'));
     top.append(el('span', { class: 'divider' }), this.undoBtn, this.redoBtn);
+    // a rebuild discards and recreates every button above — reapply the AI
+    // lockdown (and the pen's violet colouring) to the fresh ones right away.
+    this.applyAiToolbarLockdown();
   }
 
   /** Reads a picked photo / GIF and drops it on the page in view, selected, with the lasso tool active. */
@@ -1996,7 +2042,39 @@ class NotebookView {
     this.aiToggleBtn.classList.toggle('active', active);
     this.aiToggleBtn.setAttribute('aria-pressed', String(active));
     this.aiSendBtn.hidden = !active;
+    this.applyAiToolbarLockdown();
     this.syncHistory();
+  }
+
+  /**
+   * While AI mode is on, every toolbar/app-bar button is genuinely disabled
+   * (not just dimmed) except the pen, Undo/Redo, the AI toggle and the Send
+   * button — AI mode is meant to be a focused "just draw, undo/redo, and
+   * send" surface, not a place to also switch tools, insert images, manage
+   * pages, etc. `button:disabled` already renders greyed-out and inert (see
+   * styles.css), so this only needs to set the attribute on the right
+   * elements. Undo/redo are left alone here and handled by syncHistory
+   * instead (it already owns their disabled state the rest of the time), so
+   * they keep reflecting AiMode's own per-page canUndo/canRedo rather than
+   * being force-disabled like everything else. Reapplied on every dock
+   * rebuild too (renderTools), since that discards and recreates all of
+   * these as fresh elements.
+   */
+  private applyAiToolbarLockdown(): void {
+    const active = this.aiMode.isActive();
+    if (active) this.sizePopover?.close(); // its trigger is about to be disabled too
+    this.penToolBtn?.classList.toggle('tool--ai', active);
+    for (const b of this.toolsTopEl.querySelectorAll('button')) {
+      if (b === this.penToolBtn || b === this.undoBtn || b === this.redoBtn) continue;
+      (b as HTMLButtonElement).disabled = active;
+    }
+    for (const b of this.toolsOptionsEl.querySelectorAll('button')) {
+      (b as HTMLButtonElement).disabled = active;
+    }
+    for (const b of this.appBarRightGroup.querySelectorAll('button')) {
+      if (b === this.aiToggleBtn || b === this.aiSendBtn) continue;
+      (b as HTMLButtonElement).disabled = active;
+    }
   }
 
   /** Paper of the page currently in view, for resolving the "auto" ink token. */
@@ -2378,7 +2456,7 @@ class NotebookView {
     if (this.mounted.has(pageId)) this.pcByPage.get(pageId)?.refresh();
   }
 
-  /** Undo/redo button enabled state — reflects AiMode's turn-scoped stack while it's active on the current page, the main stacks otherwise. */
+  /** Undo/redo button enabled state — reflects AiMode's turn-scoped stack while it's active on the current page (Undo/Redo are exceptions to the toolbar lockdown, see applyAiToolbarLockdown), the main stacks otherwise. */
   private syncHistory(): void {
     if (this.currentPageId && this.aiMode.isActive()) {
       this.undoBtn.disabled = !this.aiMode.canUndo(this.currentPageId);

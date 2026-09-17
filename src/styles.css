@@ -926,6 +926,16 @@ select {
   background: var(--primary-container);
   color: var(--on-primary);
 }
+/* the pen while AI mode is on — matches the violet ink it's about to draw
+   (see applyAiToolbarLockdown); wins over .active's own colouring too, since
+   the pen is usually still the selected tool at that point. */
+.nb-dock .tool--ai {
+  color: #6d28d9;
+}
+.nb-dock .tool--ai.active {
+  background: rgba(109, 40, 217, 0.15);
+  color: #6d28d9;
+}
 .nb-dock .dock-group {
   display: flex;
   align-items: center;

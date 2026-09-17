@@ -196,6 +196,8 @@ export class PageCanvas {
   private shapeHit: string | null = null;
   /** a finger resting on a tape: becomes a peel/cover tap if it lifts without moving */
   private touchTap: { id: string; pointerId: number; x: number; y: number } | null = null;
+  /** a touch-classified pointerdown, held only until blockNativeGesture's matching touchstart says whether it's actually a stylus — see onDown/blockNativeGesture */
+  private pendingTouchDown: PointerEvent | null = null;
   private pointerId = -1;
   private live: number[][] = [];
   private liveTool: { kind: 'pen' | 'highlighter'; color: string; size: number } = {
@@ -576,14 +578,29 @@ export class PageCanvas {
    * contact of a new stroke is covered too, not just the ones after — a
    * finger's touchstart (`touchType: 'direct'`) is never matched by this, so
    * finger-scrolling between strokes is untouched.
+   *
+   * That `touchType` check isn't reliable on every browser/device, or
+   * necessarily on every event of a sequence even where it is — so it isn't
+   * relied on alone any more. A confirmed stylus touchstart here also
+   * promotes the matching pointerdown onDown stashed (pendingTouchDown) into
+   * a real captured stroke via startPress, exactly the path 'pen' takes
+   * directly — once that capture() lands, the rest of the stroke is
+   * protected by pointer capture + touch-action:none regardless of what
+   * touchType any later event in the sequence reports.
    */
   private blockNativeGesture = (e: TouchEvent): void => {
     // Hand tool: the whole point of blocking the native gesture the rest of
     // the time is to make a stylus draw instead of pan — here we want the
     // opposite, so let WebKit's own recognizer (and touch-action) take it.
     if (toolState.kind === 'hand') return;
-    const stylus = Array.from(e.changedTouches).some((t) => (t as WebKitTouch).touchType === 'stylus');
-    if (this.mode === 'draw' || stylus) e.preventDefault();
+    const stylusTouch = Array.from(e.changedTouches).find((t) => (t as WebKitTouch).touchType === 'stylus');
+    if (e.type === 'touchstart' && stylusTouch && this.pendingTouchDown?.pointerId === stylusTouch.identifier) {
+      const pd = this.pendingTouchDown;
+      this.pendingTouchDown = null;
+      this.touchTap = null; // this contact is a stroke, not a tape-tap candidate
+      this.startPress(pd);
+    }
+    if (this.mode === 'draw' || stylusTouch) e.preventDefault();
   };
 
   private onDown = (e: PointerEvent): void => {
@@ -598,17 +615,32 @@ export class PageCanvas {
     if (toolState.kind === 'hand') return;
     if (e.pointerType === 'touch') {
       // finger drags scroll; a finger *tap* on a tape strip still peels /
-      // covers it. blockNativeGesture (above) is what actually keeps a
-      // mid-stroke touch (a palm, or a stylus contact WebKit hands us as
-      // 'touch') from triggering a native pan; this preventDefault is just
-      // cheap, harmless, redundant insurance on top of that.
+      // covers it. Can't yet tell a plain finger from a stylus contact
+      // WebKit hands us as 'touch' — that only shows up on the matching
+      // TouchEvent (touchType), which fires just after this pointerdown, not
+      // before — so this is stashed for blockNativeGesture to promote into a
+      // real stroke (startPress, same as 'pen' falls into below) if it turns
+      // out to be one; this preventDefault is cheap, harmless, redundant
+      // insurance on top of blockNativeGesture's own for the already-drawing case.
       if (this.mode === 'draw') e.preventDefault();
       const pt = this.toLocal(e);
       const tape = this.topTapeAt(pt[0], pt[1]);
       this.touchTap = tape ? { id: tape.id, pointerId: e.pointerId, x: pt[0], y: pt[1] } : null;
+      this.pendingTouchDown = e;
       return;
     }
 
+    this.startPress(e);
+  };
+
+  /**
+   * The actual "a pointer went down, dispatch by tool" logic — every
+   * pointerType but 'touch' reaches this straight from onDown; a 'touch'
+   * pointerdown that blockNativeGesture confirms is a stylus reaches it from
+   * there instead, retroactively, once that's known. Identical either way:
+   * whichever tool is active starts its own press/drag, capture(e) included.
+   */
+  private startPress(e: PointerEvent): void {
     e.preventDefault();
     if (this.mode || this.xfOrig) return;
 
@@ -719,7 +751,7 @@ export class PageCanvas {
     this.capture(e);
     if (this.mode === 'erase') this.eraseAt(pt);
     this.schedule();
-  };
+  }
 
   /**
    * Blocks native pan/scroll for this contact via the `.page--capturing` class
@@ -861,7 +893,12 @@ export class PageCanvas {
   };
 
   private onUp = (e: PointerEvent): void => {
-    if (e.pointerType === 'touch') {
+    // A touch pointer that never got promoted to a captured stroke (see
+    // onDown/blockNativeGesture) is only ever a tape-tap candidate. One that
+    // *was* promoted (this.mode set, this.pointerId captured it) falls
+    // through to the normal handling below instead, same as 'pen'/'mouse' —
+    // otherwise the stroke it started would never get finalized on lift.
+    if (e.pointerType === 'touch' && !(this.mode && e.pointerId === this.pointerId)) {
       const tap = this.touchTap;
       this.touchTap = null;
       if (tap && tap.pointerId === e.pointerId && e.type === 'pointerup') {
