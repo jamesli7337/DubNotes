@@ -200,34 +200,26 @@ function polygonsOverlap(a: number[][], b: number[][]): boolean {
 }
 
 /**
- * Does a stroke count as inside the lasso? Consecutive points are tested as
- * segments, not sampled individually — a segment counts as "inside" if
- * either endpoint is inside the polygon, or the segment itself crosses the
- * polygon's boundary (reusing segmentsIntersect, same as polygonsOverlap).
- * That catches a sparse stroke that jumps clean across the lasso between two
- * widely-spaced samples, which pure point-sampling would miss entirely. The
- * majority is decided by path length inside vs. total, not segment count, so
- * a handful of long segments aren't outvoted by a cluster of short ones.
+ * Does a stroke count as inside the lasso? Any single point inside the
+ * polygon selects the whole stroke; failing that, any segment between
+ * consecutive points that crosses the polygon's boundary also selects it
+ * (reusing segmentsIntersect, same as polygonsOverlap) — that catches a
+ * sparse stroke that jumps clean across the lasso between two widely-spaced
+ * samples, which point-sampling alone would miss. No majority requirement:
+ * the smallest bit of the stroke touching the lasso is enough, matching how
+ * elementInPolygon/polygonsOverlap already treat any overlap as a hit.
  */
 export function strokeInPolygon(points: number[][], poly: number[][]): boolean {
   if (!points.length) return false;
-  if (points.length === 1) return pointInPolygon(points[0][0], points[0][1], poly);
-  let insideLen = 0;
-  let totalLen = 0;
+  if (points.some((p) => pointInPolygon(p[0], p[1], poly))) return true;
   for (let i = 0; i < points.length - 1; i++) {
     const a = points[i];
     const b = points[i + 1];
-    const segLen = Math.hypot(b[0] - a[0], b[1] - a[1]);
-    totalLen += segLen;
-    let crosses = pointInPolygon(a[0], a[1], poly) || pointInPolygon(b[0], b[1], poly);
-    for (let j = 0; !crosses && j < poly.length; j++) {
-      crosses = segmentsIntersect(a, b, poly[j], poly[(j + 1) % poly.length]);
+    for (let j = 0; j < poly.length; j++) {
+      if (segmentsIntersect(a, b, poly[j], poly[(j + 1) % poly.length])) return true;
     }
-    if (crosses) insideLen += segLen;
   }
-  // a zero-length stroke (every point coincides) has nothing to weigh by path
-  // length — fall back to a plain point test at its one effective location
-  return totalLen > 0 ? insideLen * 2 >= totalLen : pointInPolygon(points[0][0], points[0][1], poly);
+  return false;
 }
 
 /** Does an element count as inside the lasso? True when its actual (rotated) box overlaps the lasso's drawn polygon — not just when a sampled corner or centre happens to land inside it. */

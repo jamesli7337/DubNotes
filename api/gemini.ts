@@ -1,17 +1,31 @@
 /**
- * POST /api/gemini — reads a handwritten page and returns Gemini's reply
- * text. Vercel serverless function (Node.js runtime); deployed alongside the
- * static Vite build, see README "Deploy the Gemini endpoint".
+ * POST /api/gemini — one endpoint, three request `kind`s (see `Body` below),
+ * all proxying to Gemini. Vercel serverless function (Node.js runtime);
+ * deployed alongside the static Vite build, see README "Deploy the Gemini
+ * endpoint". One function rather than three (one per kind) deliberately —
+ * this project's Vercel deploy is a manual `npx vercel --prod` step, not
+ * triggered by a git push the way the static site's GitHub Pages deploy is;
+ * a client/server version-skew incident already happened once from that
+ * (the client shipped a new request shape before this function was
+ * redeployed), so keeping everything Gemini-facing in one function halves
+ * the ways client and server can drift out of sync, and `kind` defaults to
+ * `'ask'` when absent (below) so an old client talking to a new function
+ * still degrades to working rather than erroring.
  *
- * Takes two images, not one: `question` is just the user's violet AI-mode
- * ink (already cropped to it by the client — see ai-mode.ts's
- * `renderItemsImage`), `context` is the whole page. They're sent to Gemini
- * as two separate labeled parts (see `contents` below) rather than composited
- * into one picture, so the model is never asked to itself pick the question
- * out of a mixed image by colour — a previous version relied on a system-
- * prompt instruction ("the violet ink is the question") over one merged
- * screenshot, which asked Gemini to reliably notice a colour distinction
- * rather than just being told which image was which.
+ * - `'ask'` (default when `kind` is omitted, for the reason above): the
+ *   original AI-mode flow. Takes two images — `question` is just the user's
+ *   violet AI-mode ink (already cropped to it by the client — see
+ *   ai-mode.ts's `renderItemsImage`), `context` is the whole page. They're
+ *   sent to Gemini as two separate labeled parts (see `contents` in
+ *   `buildAsk`) rather than composited into one picture, so the model is
+ *   never asked to itself pick the question out of a mixed image by colour.
+ * - `'transcribe'`: one image (handwriting from a branched thread's own
+ *   input pad — see ai-thread.ts), returns plain transcribed text (LaTeX for
+ *   math), nothing else — so the app can show what it understood *before*
+ *   sending it on as a question, per that feature's whole point.
+ * - `'thread'`: a branched thread's own follow-up turn. No images — plain
+ *   multi-turn text (`history`), seeded by the caller with the original
+ *   reply being branched from as the first turn.
  *
  * This file lives outside `src/` and outside tsconfig's `include`, so
  * `npm run build`'s `tsc` step does not type-check it — Vercel's own build
@@ -38,14 +52,8 @@ interface ApiResponse {
 const GEMINI_MODEL = 'gemini-3.6-flash';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
-const SYSTEM_INSTRUCTION =
-  'You will be given two images from a handwritten notebook page. The ' +
-  "first is cropped to show ONLY the page author's actual question or " +
-  "instruction to you — that crop is the one thing you must directly " +
-  'answer. The second is a photo of the whole page, given purely as ' +
-  "background — read it if it helps you answer the question in the first " +
-  "image, but don't summarize it, describe it, or respond to anything in " +
-  "it on its own; it may repeat what's in the first image, which is normal. " +
+/** Shared by 'ask' and 'thread' — 'transcribe' doesn't answer/explain anything, so it skips this. */
+const EXPLAIN_SIMPLY =
   'Explain things simply: short sentences, plain everyday words, one idea ' +
   "at a time, as if talking to a beginner seeing this for the first time. " +
   "Avoid jargon; if a technical term is unavoidable, explain it in a " +
@@ -54,6 +62,31 @@ const SYSTEM_INSTRUCTION =
   'Use standard LaTeX for math ($...$ for inline, $$...$$ for a displayed ' +
   'equation, \\frac, \\sqrt, ^, _, etc.) and simple markdown for formatting ' +
   "(**bold**, short bullet lists) — don't overuse either.";
+
+const ASK_SYSTEM_INSTRUCTION =
+  'You will be given two images from a handwritten notebook page. The ' +
+  "first is cropped to show ONLY the page author's actual question or " +
+  "instruction to you — that crop is the one thing you must directly " +
+  'answer. The second is a photo of the whole page, given purely as ' +
+  "background — read it if it helps you answer the question in the first " +
+  "image, but don't summarize it, describe it, or respond to anything in " +
+  "it on its own; it may repeat what's in the first image, which is normal. " +
+  EXPLAIN_SIMPLY;
+
+/** One image of handwriting only — no answering, no context, just OCR (LaTeX for math). Used by a branched thread's handwriting input pad so the app can show what it understood before sending it on as a question. */
+const TRANSCRIBE_SYSTEM_INSTRUCTION =
+  'Transcribe the handwriting in this image into plain text, exactly as ' +
+  'written — do not answer it, solve it, comment on it, or add anything. ' +
+  'If it contains math, use standard LaTeX ($...$ inline, $$...$$ ' +
+  'displayed, \\frac, \\sqrt, ^, _, etc.) for that part. Output only the ' +
+  'transcription itself, nothing else — no preamble, no quotes around it.';
+
+/** A branched thread's own follow-up turn: plain multi-turn text, no images — see the 'thread' request kind. */
+const THREAD_SYSTEM_INSTRUCTION =
+  "You're continuing a conversational thread that branched off an earlier " +
+  'reply to a handwritten notebook page — the first message here is that ' +
+  'original reply, given for context. Answer the newest message the same way. ' +
+  EXPLAIN_SIMPLY;
 
 /** Every response carries this — the app is a static site on another origin. */
 function setCors(res: ApiResponse, origin: string | string[] | undefined): void {
@@ -92,11 +125,59 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
-  const body = req.body as { question?: unknown; context?: unknown } | null;
-  const question = parseImage(body?.question);
-  const context = parseImage(body?.context);
-  if (!question || !context) {
-    res.status(400).json({ error: 'Missing or invalid "question"/"context" image (each needs a base64 "image" string) in request body.' });
+  // `kind` defaults to 'ask' when absent — see the module doc comment for why
+  // (an old client, from before this discriminator existed, still works).
+  const body = req.body as { kind?: unknown } | null;
+  const kind = typeof body?.kind === 'string' ? body.kind : 'ask';
+
+  let geminiBody: Record<string, unknown>;
+  if (kind === 'ask') {
+    const b = req.body as { question?: unknown; context?: unknown };
+    const question = parseImage(b?.question);
+    const context = parseImage(b?.context);
+    if (!question || !context) {
+      res
+        .status(400)
+        .json({ error: 'Missing or invalid "question"/"context" image (each needs a base64 "image" string) in request body.' });
+      return;
+    }
+    geminiBody = {
+      system_instruction: { parts: [{ text: ASK_SYSTEM_INSTRUCTION }] },
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { text: 'Image 1 of 2 — the question (answer this):' },
+            { inline_data: { mime_type: question.mimeType, data: question.image } },
+            { text: 'Image 2 of 2 — the whole page, background only:' },
+            { inline_data: { mime_type: context.mimeType, data: context.image } },
+          ],
+        },
+      ],
+    };
+  } else if (kind === 'transcribe') {
+    const image = parseImage((req.body as { image?: unknown })?.image);
+    if (!image) {
+      res.status(400).json({ error: 'Missing or invalid "image" (base64 string) in request body.' });
+      return;
+    }
+    geminiBody = {
+      system_instruction: { parts: [{ text: TRANSCRIBE_SYSTEM_INSTRUCTION }] },
+      contents: [{ role: 'user', parts: [{ inline_data: { mime_type: image.mimeType, data: image.image } }] }],
+      generationConfig: { temperature: 0 },
+    };
+  } else if (kind === 'thread') {
+    const history = parseHistory((req.body as { history?: unknown })?.history);
+    if (!history) {
+      res.status(400).json({ error: 'Missing or invalid "history" (a non-empty array of {role, text}) in request body.' });
+      return;
+    }
+    geminiBody = {
+      system_instruction: { parts: [{ text: THREAD_SYSTEM_INSTRUCTION }] },
+      contents: history.map((h) => ({ role: h.role, parts: [{ text: h.text }] })),
+    };
+  } else {
+    res.status(400).json({ error: `Unknown request "kind": ${kind}.` });
     return;
   }
 
@@ -105,20 +186,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     upstream = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              { text: 'Image 1 of 2 — the question (answer this):' },
-              { inline_data: { mime_type: question.mimeType, data: question.image } },
-              { text: 'Image 2 of 2 — the whole page, background only:' },
-              { inline_data: { mime_type: context.mimeType, data: context.image } },
-            ],
-          },
-        ],
-      }),
+      body: JSON.stringify(geminiBody),
     });
   } catch {
     res.status(502).json({ error: 'Could not reach Gemini.' });
@@ -156,6 +224,19 @@ function parseImage(v: unknown): { image: string; mimeType: string } | null {
   if (typeof image !== 'string' || !image) return null;
   const mimeType = typeof obj?.mimeType === 'string' ? obj.mimeType : 'image/png';
   return { image, mimeType };
+}
+
+/** Validates a 'thread' request's `history`: a non-empty array of `{role: 'user'|'model', text}`. */
+function parseHistory(v: unknown): { role: 'user' | 'model'; text: string }[] | null {
+  if (!Array.isArray(v) || !v.length) return null;
+  const out: { role: 'user' | 'model'; text: string }[] = [];
+  for (const item of v) {
+    const role = (item as { role?: unknown })?.role;
+    const text = (item as { text?: unknown })?.text;
+    if ((role !== 'user' && role !== 'model') || typeof text !== 'string' || !text) return null;
+    out.push({ role, text });
+  }
+  return out;
 }
 
 /** Pulls the reply text out of a generateContent response, defensively. */

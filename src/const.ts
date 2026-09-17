@@ -10,6 +10,14 @@ export const PAGE_H = 1060;
 /** Backing-store scale, capped so huge notebooks stay within memory. */
 export const DPR = Math.min(Math.max(window.devicePixelRatio || 1, 1), 3);
 
+/** The one AI accent colour — the page border, in-progress AI-mode ink, and
+ * a branched thread's own handwriting pad all use exactly this, so "AI"
+ * reads as one consistent identity everywhere it shows up. Lives here
+ * (rather than on ai-mode.ts, which re-exports it for page-canvas.ts's
+ * existing import) so ai-thread.ts can use it without importing ai-mode.ts
+ * at all — see ai-mode.ts's own module doc comment on avoiding a cycle. */
+export const AI_COLOR = '#6d28d9';
+
 import type { Page, Paper } from './types';
 
 /** Paper for a brand-new page when there is no preceding page to copy. */

@@ -61,7 +61,9 @@ export type Op =
   | { kind: 'remove-items'; pageId: string; items: PageItem[] }
   | { kind: 'replace-items'; pageId: string; before: PageItem[]; after: PageItem[] }
   /** some items went away and others (with different ids) took their place — e.g. a partial erase splitting strokes */
-  | { kind: 'edit'; pageId: string; removed: PageItem[]; added: PageItem[] };
+  | { kind: 'edit'; pageId: string; removed: PageItem[]; added: PageItem[] }
+  /** a selection was dragged off its page onto another one — `before`/`after` are the same items, with the old/new pageId and coordinates */
+  | { kind: 'move-page'; fromPageId: string; toPageId: string; before: PageItem[]; after: PageItem[] };
 
 export interface PageHooks {
   onOp: (op: Op) => void;
@@ -94,6 +96,8 @@ export interface PageHooks {
   onTapeTap: (pc: PageCanvas, tapeId: string, frame: Frame) => void;
   /** true while AI mode is on for this page — a fresh pen/highlighter stroke inks in AI_COLOR instead of the tool's own colour. */
   isAiActive: () => boolean;
+  /** A cross-page drag (see endTransform) just changed another page's items directly in the store — repaint that page's own PageCanvas if it's mounted (a no-op otherwise; it'll read the fresh store on its next mount). */
+  refreshPage: (pageId: string) => void;
 }
 
 type CoalescingEvent = PointerEvent & { getCoalescedEvents?: () => PointerEvent[] };
@@ -1766,6 +1770,34 @@ export class PageCanvas {
     this.schedule();
   }
 
+  /**
+   * If `frame` (a just-finished pure-move drag, in this page's own local
+   * units) is centred over a *different* page's own DOM rect, returns that
+   * page's id plus the translation needed to re-express `frame` in that
+   * page's local space. Every page renders at the same on-screen zoom (see
+   * `zoom()`), so this is a plain re-origin against the other page's rect,
+   * never a rescale. Returns null for a same-page drop (the common case) or
+   * a release that doesn't land over any page's rect at all (e.g. the gap
+   * between two pages).
+   */
+  private destPageFor(frame: Frame): { id: string; dx: number; dy: number } | null {
+    const r = this.pageRect();
+    if (!r) return null;
+    const z = this.zoom();
+    const cx = frame.x + frame.w / 2;
+    const cy = frame.y + frame.h / 2;
+    const sx = r.left + cx * z;
+    const sy = r.top + cy * z;
+    for (const el of document.querySelectorAll<HTMLElement>('.page')) {
+      const id = el.dataset.pageId;
+      if (!id || id === this.page.id) continue;
+      const pr = el.getBoundingClientRect();
+      if (sx < pr.left || sx > pr.right || sy < pr.top || sy > pr.bottom) continue;
+      return { id, dx: (sx - pr.left) / z - cx, dy: (sy - pr.top) / z - cy };
+    }
+    return null;
+  }
+
   private endTransform(frame: Frame | null): void {
     const orig = this.xfOrig;
     const from = this.xfFrame;
@@ -1774,6 +1806,7 @@ export class PageCanvas {
     this.xfLassoOrig = null;
     if (!orig || !from) return;
 
+    let crossedPage = false;
     if (frame) {
       const same = frame.w === from.w && frame.h === from.h && frame.rot === from.rot;
       const after = same
@@ -1782,7 +1815,21 @@ export class PageCanvas {
             !isStroke(it) && it.kind === 'text' ? { ...it, h: textHeight(it) } : it
           );
       const ed = this.editor;
-      if (ed && orig.length === 1 && orig[0].id === ed.el.id) {
+      const midEdit = ed && orig.length === 1 && orig[0].id === ed.el.id;
+      // only a pure move can hop pages — resize/rotate (same === false) and a
+      // mid-edit text box (not committed to the store yet) always stay same-page
+      const dest = same && !midEdit ? this.destPageFor(frame) : null;
+      if (dest) {
+        const moved = translateItems(after, dest.dx, dest.dy).map((it) => ({ ...it, pageId: dest.id }));
+        store.removeItems(this.page.id, new Set(orig.map((it) => it.id)));
+        store.addItems(moved);
+        this.hooks.onOp({ kind: 'move-page', fromPageId: this.page.id, toPageId: dest.id, before: orig, after: moved });
+        this.hooks.refreshPage(dest.id);
+        // the dragged items are no longer this page's — drop the selection
+        // (and any lasso outline) instead of resurrecting it below
+        this.setSelection([]);
+        crossedPage = true;
+      } else if (midEdit) {
         // mid-edit: keep the geometry on the working copy; commitEdit records
         // the whole edit (typing + moves) as a single undo step
         ed.el = after[0] as TextElement;
@@ -1794,7 +1841,7 @@ export class PageCanvas {
       // during the drag) so it doesn't snap back to its pre-drag position on
       // the next showSelection() below, and a second drag starts consistent
       // with where the box and items actually ended up
-      if (lassoOrig) this.lastLassoPath = lassoOrig.map((p) => mapPoint(p[0], p[1], from, frame));
+      if (!crossedPage && lassoOrig) this.lastLassoPath = lassoOrig.map((p) => mapPoint(p[0], p[1], from, frame));
     } else if (lassoOrig) {
       // cancelled drag: items were never changed, so restore the outline to
       // its pre-drag shape too, undoing whatever updateTransform() left it at

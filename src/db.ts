@@ -17,8 +17,10 @@ import type {
 const DB_NAME = 'noteapp';
 /** IndexedDB schema version: 2 added `elements`; 3 added `folders` + `dividers`; 4 added `assets`;
  * 5 added `aiConversations` (AI-mode chat history — deliberately outside the
- * backup format's store list, see ALL_STORES below). */
-const DB_VERSION = 5;
+ * backup format's store list, see ALL_STORES below); 6 added a
+ * `branchedFromEntryId` index on `aiConversations` (branched AI-mode
+ * threads — see getThreadEntries). */
+const DB_VERSION = 6;
 
 /**
  * Logical data-format version, independent of the IndexedDB schema version.
@@ -42,6 +44,11 @@ const DB_VERSION = 5;
  *       remain valid; nothing to migrate.
  *   8 — TextElement gained optional `bg` (a tint painted behind the text,
  *       used by AI-mode replies). Additive; nothing to migrate.
+ *
+ * AiConversationEntry's own fields (including `branchedFromEntryId` /
+ * `questionText`, added for branched AI-mode threads — schema v6 above)
+ * don't bump this: `aiConversations` is outside the backup format entirely
+ * (see ALL_STORES), so nothing about its shape affects Backup's shape.
  */
 export const FORMAT_VERSION = 8;
 
@@ -185,6 +192,15 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('aiConversations')) {
         db.createObjectStore('aiConversations', { keyPath: 'id' }).createIndex('notebookId', 'notebookId');
       }
+      // v6: branched AI-mode threads — an entry's `branchedFromEntryId` looks
+      // up every entry in the thread it started (see getThreadEntries). The
+      // store already exists on an upgrade from v5, so the index is added to
+      // it via the upgrade transaction rather than createObjectStore, which
+      // only applies to a store being created fresh in this same upgrade.
+      const aiConversations = req.transaction!.objectStore('aiConversations');
+      if (!aiConversations.indexNames.contains('branchedFromEntryId')) {
+        aiConversations.createIndex('branchedFromEntryId', 'branchedFromEntryId');
+      }
       if (!db.objectStoreNames.contains('meta')) {
         db.createObjectStore('meta', { keyPath: 'key' });
       }
@@ -320,12 +336,24 @@ export async function putAiEntry(e: AiConversationEntry): Promise<void> {
   return txDone(t);
 }
 
-/** A notebook's AI-mode chat history, oldest first. */
+/** A notebook's AI-mode chat history, oldest first — main-conversation and thread entries mixed; callers split on `branchedFromEntryId` (see AiMode.loadConversation). */
 export async function getAiEntries(notebookId: string): Promise<AiConversationEntry[]> {
   const db = await openDB();
   const t = db.transaction('aiConversations', 'readonly');
   const rows = await reqP(
     t.objectStore('aiConversations').index('notebookId').getAll(IDBKeyRange.only(notebookId)) as IDBRequest<
+      AiConversationEntry[]
+    >
+  );
+  return rows.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/** One branched thread's own entries, oldest first — everything sharing `branchedFromEntryId` (the id of the main-conversation entry it branched from; see AiConversationEntry's doc comment). */
+export async function getThreadEntries(branchedFromEntryId: string): Promise<AiConversationEntry[]> {
+  const db = await openDB();
+  const t = db.transaction('aiConversations', 'readonly');
+  const rows = await reqP(
+    t.objectStore('aiConversations').index('branchedFromEntryId').getAll(IDBKeyRange.only(branchedFromEntryId)) as IDBRequest<
       AiConversationEntry[]
     >
   );

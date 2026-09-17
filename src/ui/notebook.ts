@@ -586,23 +586,40 @@ class NotebookView {
     const MIN_THUMB = 32;
     const INSET = 6;
 
+    // trackH/thumbH/maxScroll only change with the scroller's own geometry
+    // (resize, zoom, page add/remove) — layout() recomputes them and the
+    // thumb's base `top`. Scrolling itself never touches any of that, so the
+    // 'scroll' listener only calls reposition(), which reads these cached
+    // values and moves the thumb purely via `transform`, keeping every
+    // scroll-tick update on the compositor thread instead of triggering
+    // layout/paint (the cause of the iOS ghosting this replaced).
+    let trackH = 0;
+    let thumbH = 0;
+    let maxScroll = 0;
+
+    const reposition = (): void => {
+      if (thumb.hidden) return;
+      const progress = clamp(s.scrollTop / maxScroll, 0, 1);
+      thumb.style.transform = `translate3d(0, ${progress * (trackH - thumbH)}px, 0)`;
+    };
+
     const layout = (): void => {
       const track = s.getBoundingClientRect();
-      const trackH = track.height - INSET * 2;
-      const maxScroll = s.scrollHeight - s.clientHeight;
+      trackH = track.height - INSET * 2;
+      maxScroll = s.scrollHeight - s.clientHeight;
       if (maxScroll <= 1) {
         thumb.hidden = true;
         return;
       }
       thumb.hidden = false;
-      const thumbH = Math.min(trackH, Math.max(MIN_THUMB, (s.clientHeight / s.scrollHeight) * trackH));
-      const progress = clamp(s.scrollTop / maxScroll, 0, 1);
-      thumb.style.top = `${track.top + INSET + progress * (trackH - thumbH)}px`;
+      thumbH = Math.min(trackH, Math.max(MIN_THUMB, (s.clientHeight / s.scrollHeight) * trackH));
+      thumb.style.top = `${track.top + INSET}px`;
       thumb.style.height = `${thumbH}px`;
       thumb.style.right = `${window.innerWidth - track.right + 3}px`;
+      reposition();
     };
     this.layoutScrollbarThumb = layout;
-    s.addEventListener('scroll', layout, { passive: true });
+    s.addEventListener('scroll', reposition, { passive: true });
     window.addEventListener('resize', layout);
     layout();
 
@@ -1874,6 +1891,7 @@ class NotebookView {
       onEmptyLassoSelection: (p, frame) => this.showEmptyLassoCallout(p, frame),
       onTapeTap: (p, tapeId, frame) => this.showTapePopover(p, tapeId, frame),
       isAiActive: () => this.aiMode.isActive(),
+      refreshPage: (pageId) => this.rebuildIfMounted(pageId),
     });
     this.pcByPage.set(page.id, pc);
     this.wrapById.set(page.id, wrap);
@@ -2300,6 +2318,12 @@ class NotebookView {
         store.addItems(op.removed.map((it) => ({ ...it })));
         this.rebuildIfMounted(op.pageId);
         break;
+      case 'move-page':
+        store.removeItems(op.toPageId, new Set(op.after.map((it) => it.id)));
+        store.addItems(op.before.map((it) => ({ ...it })));
+        this.rebuildIfMounted(op.fromPageId);
+        this.rebuildIfMounted(op.toPageId);
+        break;
       case 'del-page':
         store.insertPage({ ...op.page }, op.page.index);
         for (const s of op.strokes) store.addStroke({ ...s });
@@ -2335,6 +2359,12 @@ class NotebookView {
         store.removeItems(op.pageId, new Set(op.removed.map((it) => it.id)));
         store.addItems(op.added.map((it) => ({ ...it })));
         this.rebuildIfMounted(op.pageId);
+        break;
+      case 'move-page':
+        store.removeItems(op.fromPageId, new Set(op.before.map((it) => it.id)));
+        store.addItems(op.after.map((it) => ({ ...it })));
+        this.rebuildIfMounted(op.fromPageId);
+        this.rebuildIfMounted(op.toPageId);
         break;
       case 'del-page':
         store.deletePage(op.page.id);
