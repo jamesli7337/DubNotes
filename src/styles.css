@@ -185,7 +185,7 @@ select {
 }
 
 /* ================================================================ App header
- * Shared by both screens. */
+ * library.ts only — the notebook-editing screen has its own .nb-appbar. */
 .app-header {
   position: sticky;
   top: 0;
@@ -194,16 +194,16 @@ select {
   align-items: center;
   gap: 8px;
   height: calc(var(--header-h) + env(safe-area-inset-top));
-  padding: env(safe-area-inset-top) 12px 0;
-  background: color-mix(in srgb, var(--surface) 85%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
-  box-shadow: var(--sh-2);
+  padding: env(safe-area-inset-top) 16px 0;
+  background: color-mix(in srgb, var(--lib-bg) 78%, transparent);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border-bottom: 1px solid var(--lib-border);
 }
 .app-header__brand {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 11px;
   min-width: 0;
   flex: 1;
 }
@@ -211,16 +211,17 @@ select {
   width: 34px;
   height: 34px;
   border-radius: var(--r-lg);
-  background: var(--primary);
-  color: var(--on-primary);
+  background: linear-gradient(135deg, var(--lib-accent-dark), var(--lib-accent) 60%, #6ea1ff);
+  color: #fff;
   display: flex;
   align-items: center;
   justify-content: center;
   flex: none;
+  box-shadow: 0 4px 10px -2px color-mix(in srgb, var(--lib-accent) 45%, transparent);
 }
 .app-header__mark .icon {
-  width: 19px;
-  height: 19px;
+  width: 18px;
+  height: 18px;
 }
 .app-header__titles {
   display: flex;
@@ -229,10 +230,11 @@ select {
 }
 .app-header__title {
   font-family: var(--font-head);
-  font-weight: 600;
-  font-size: 18px;
-  line-height: 22px;
-  color: var(--primary);
+  font-weight: 700;
+  font-size: 17px;
+  line-height: 20px;
+  letter-spacing: -0.01em;
+  color: var(--lib-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -240,9 +242,9 @@ select {
 .app-header__sub {
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.09em;
   text-transform: uppercase;
-  color: var(--on-surface-variant);
+  color: var(--lib-text-faint);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -250,60 +252,157 @@ select {
 .app-header__actions {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
   flex: none;
 }
-
-/* ==================================================================== Library */
-.lib {
-  height: 100%;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  display: flex;
-  flex-direction: column;
-}
-.lib-body {
-  width: 100%;
-  max-width: 720px;
-  margin: 0 auto;
-  padding: 16px 16px 120px;
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-}
-
-.lib-persist {
-  font-size: 12px;
-  color: var(--on-surface-variant);
-  margin: -8px 2px 0;
-}
-
-.section-label {
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  color: var(--on-surface-variant);
-  margin-bottom: 10px;
+/* header action buttons (Import file / Export / Restore backup): a small
+   labelled pill rather than the app-wide bare-icon .iconbtn, matching the
+   reference design's header controls — scoped to this header, so the shared
+   .iconbtn used everywhere else (dock, page-head, cards, …) is untouched. */
+.lib-hdrbtn {
   display: flex;
   align-items: center;
   gap: 6px;
+  padding: 7px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--lib-text-dim);
+  background: var(--lib-card);
+  border: 1px solid var(--lib-border);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-1);
 }
-.section-label.accent {
-  color: var(--secondary);
+.lib-hdrbtn:hover:not(:disabled) {
+  color: var(--lib-accent);
+  border-color: color-mix(in srgb, var(--lib-accent) 35%, var(--lib-border));
+}
+.lib-hdrbtn .icon {
+  width: 15px;
+  height: 15px;
+}
+@media (max-width: 560px) {
+  .lib-hdrbtn__label {
+    display: none;
+  }
+  .lib-hdrbtn {
+    padding: 8px;
+  }
+}
+
+/* ==================================================================== Library
+ * A few extra tokens layered on the shared design system, just for this
+ * screen's cooler/flatter look — never redefined at :root, so nothing
+ * outside .lib is affected. */
+.lib {
+  --lib-accent: #2550eb;
+  --lib-accent-dark: #1d40d7;
+  --lib-bg: #f3f5f9;
+  --lib-card: #ffffff;
+  --lib-border: rgba(15, 23, 42, 0.09);
+  --lib-text: #10182b;
+  --lib-text-dim: #57647d;
+  --lib-text-faint: #93a0b8;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--lib-bg);
+  color: var(--lib-text);
+}
+.lib-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+/* -------------------------------------------------------------- sidebar */
+.lib-sidebar {
+  width: 252px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 18px 14px;
+  overflow-y: auto;
+  background: color-mix(in srgb, var(--lib-card) 70%, transparent);
+  border-right: 1px solid var(--lib-border);
+}
+.lib-persist {
+  margin: auto 2px 2px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--lib-text-faint);
+}
+
+.section-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--lib-text-faint);
+  margin-bottom: 10px;
+  padding: 0 2px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+.section-label.accent::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--lib-accent);
+}
+
+/* -------------------------------------------------------------- content */
+.lib-content {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 24px 28px 130px;
+  display: flex;
+  flex-direction: column;
+  gap: 26px;
+}
+
+@media (max-width: 760px) {
+  .lib-main {
+    flex-direction: column;
+    overflow-y: auto;
+    overflow-x: hidden;
+  }
+  .lib-sidebar {
+    width: auto;
+    border-right: none;
+    border-bottom: 1px solid var(--lib-border);
+    overflow-y: visible;
+  }
+  .lib-persist {
+    margin-top: 4px;
+  }
+  .lib-content {
+    overflow-y: visible;
+    padding: 20px 16px 130px;
+  }
 }
 
 /* featured "resume" card */
 .featured {
   position: relative;
   display: flex;
-  gap: 14px;
-  padding: 16px 16px 16px 20px;
-  background: var(--surface-c-lowest);
+  gap: 16px;
+  padding: 18px 20px 18px 22px;
+  background: var(--lib-card);
+  border: 1px solid color-mix(in srgb, var(--lib-accent) 18%, var(--lib-border));
   border-radius: var(--r-xl);
-  box-shadow: var(--sh-3);
+  box-shadow: var(--sh-1);
   cursor: pointer;
   overflow: hidden;
+  transition: box-shadow 0.15s ease;
+}
+.featured:hover {
+  box-shadow: var(--sh-2);
 }
 .featured::before {
   content: '';
@@ -311,8 +410,8 @@ select {
   left: 0;
   top: 0;
   bottom: 0;
-  width: 8px;
-  background: var(--secondary-container);
+  width: 5px;
+  background: linear-gradient(to bottom, #fbbf24, var(--lib-accent) 55%, var(--lib-accent-dark));
 }
 .featured:active {
   transform: scale(0.99);
@@ -324,7 +423,7 @@ select {
   background: #fff;
   flex: none;
   overflow: hidden;
-  box-shadow: var(--sh-1);
+  border: 1px solid var(--lib-border);
 }
 .featured__thumb canvas {
   width: 100%;
@@ -338,14 +437,18 @@ select {
 .featured__body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 7px;
   min-width: 0;
   flex: 1;
+  justify-content: center;
 }
 .featured__title {
-  font-size: 18px;
-  line-height: 22px;
-  color: var(--primary);
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: 19px;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  color: var(--lib-text);
 }
 
 /* notebook grid */
@@ -358,56 +461,67 @@ select {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  margin-bottom: 4px;
+  margin-bottom: 2px;
 }
 .section-head h2 {
-  font-size: 18px;
-  color: var(--primary);
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: 19px;
+  letter-spacing: -0.01em;
+  color: var(--lib-text);
 }
 .section-head .count {
-  font-size: 12px;
-  color: var(--on-surface-variant);
-  font-weight: 600;
+  font-size: 11px;
+  color: var(--lib-text-dim);
+  font-weight: 700;
+  padding: 2px 9px;
+  border-radius: var(--r-full);
+  background: color-mix(in srgb, var(--lib-text-faint) 16%, transparent);
 }
 
 .nb-card {
   position: relative;
   display: flex;
   gap: 14px;
-  padding: 14px;
-  background: var(--surface-c-lowest);
+  padding: 13px 14px;
+  background: var(--lib-card);
+  border: 1px solid var(--lib-border);
   border-radius: var(--r-xl);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.nb-card:hover {
+  border-color: color-mix(in srgb, var(--lib-accent) 30%, var(--lib-border));
   box-shadow: var(--sh-1);
-  overflow: hidden;
 }
 .nb-card__accent {
   position: absolute;
   left: 0;
   top: 0;
   bottom: 0;
-  width: 6px;
+  width: 4px;
+  border-radius: var(--r) 0 0 var(--r);
 }
 .nb-card__accent--blank {
-  background: var(--primary-fixed-dim);
+  background: var(--lib-text-faint);
 }
 .nb-card__accent--ruled {
-  background: var(--tertiary-fixed-dim);
+  background: #38bdf8;
 }
 .nb-card__accent--grid {
-  background: var(--secondary-container);
+  background: #fbbf24;
 }
 .nb-card__accent--dot {
-  background: var(--secondary-fixed-dim);
+  background: #a78bfa;
 }
 
 .nb-card__thumb {
-  width: 84px;
-  height: 104px;
+  width: 72px;
+  height: 92px;
   border-radius: var(--r-lg);
   background: #fff;
   flex: none;
   overflow: hidden;
-  box-shadow: var(--sh-1);
+  border: 1px solid var(--lib-border);
 }
 .nb-card__thumb canvas {
   width: 100%;
@@ -435,7 +549,7 @@ select {
   padding: 2px 0;
   border-radius: 0;
   align-items: stretch;
-  justify-content: flex-start;
+  justify-content: center;
 }
 .nb-card__body .nb-card__actions {
   position: absolute;
@@ -451,45 +565,47 @@ select {
 .nb-card__toprow {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 8px;
 }
 .tag {
   padding: 2px 9px;
-  border-radius: var(--r-full);
-  background: var(--surface-c);
-  color: var(--on-surface-variant);
+  border-radius: var(--r) ;
+  background: color-mix(in srgb, var(--lib-text-faint) 14%, transparent);
+  color: var(--lib-text-dim);
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.03em;
   text-transform: capitalize;
 }
 .tag--tpl {
-  background: var(--secondary-fixed);
-  color: var(--on-secondary-fixed);
+  background: color-mix(in srgb, var(--lib-accent) 12%, transparent);
+  color: var(--lib-accent-dark);
 }
 .nb-card__pages {
   font-size: 11px;
   font-weight: 600;
-  color: var(--on-surface-variant);
+  color: var(--lib-text-faint);
   white-space: nowrap;
 }
 .nb-card__title {
   font-family: var(--font-head);
-  font-weight: 600;
-  font-size: 16px;
-  line-height: 1.25;
-  color: var(--primary);
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.3;
+  letter-spacing: -0.005em;
+  color: var(--lib-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.nb-card:hover .nb-card__title {
+  color: var(--lib-accent-dark);
 }
 .nb-card__foot {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-top: auto;
-  color: var(--on-surface-variant);
+  color: var(--lib-text-faint);
 }
 .nb-card__date {
   font-size: 11px;
@@ -502,6 +618,11 @@ select {
 .nb-card__actions .iconbtn {
   width: 32px;
   height: 32px;
+  color: var(--lib-text-faint);
+}
+.nb-card__actions .iconbtn:hover:not(:disabled) {
+  color: var(--lib-accent);
+  background: color-mix(in srgb, var(--lib-accent) 10%, transparent);
 }
 .nb-card__actions .icon {
   width: 17px;
@@ -510,7 +631,7 @@ select {
 
 .lib-empty {
   text-align: center;
-  color: var(--on-surface-variant);
+  color: var(--lib-text-faint);
   padding: 48px 0;
 }
 
@@ -518,7 +639,7 @@ select {
 .nb-card__thumb.has-cover,
 .featured__thumb.has-cover {
   padding: 7px;
-  background-color: var(--primary);
+  background-color: var(--lib-accent-dark);
 }
 .nb-card__thumb.has-cover canvas,
 .featured__thumb.has-cover canvas {
@@ -526,7 +647,7 @@ select {
   box-shadow: 0 1px 3px rgba(4, 21, 52, 0.25);
 }
 .featured {
-  --cover: var(--secondary-container);
+  --cover: var(--lib-accent);
 }
 .featured::before {
   background: var(--cover);
@@ -536,30 +657,33 @@ select {
 .tree {
   display: flex;
   flex-direction: column;
-  gap: 2px;
-  padding: 6px;
-  background: var(--surface-c-lowest);
-  border-radius: var(--r-xl);
-  box-shadow: var(--sh-1);
+  gap: 1px;
 }
 .tree__row {
   display: flex;
   align-items: center;
   gap: 2px;
-  padding-left: calc(var(--depth, 0) * 18px);
+  padding-left: calc(var(--depth, 0) * 16px);
   border-radius: var(--r-lg);
 }
+.tree__row:not(.active):hover {
+  background: color-mix(in srgb, var(--lib-text-faint) 12%, transparent);
+}
 .tree__row.active {
-  background: var(--surface-c);
+  background: var(--lib-accent);
+  box-shadow: 0 4px 10px -3px color-mix(in srgb, var(--lib-accent) 45%, transparent);
 }
 .tree__toggle {
-  width: 28px;
+  width: 26px;
   height: 32px;
   padding: 0;
   border: none;
   background: transparent;
-  color: var(--on-surface-variant);
+  color: var(--lib-text-faint);
   transition: transform 0.15s ease;
+}
+.tree__row.active .tree__toggle {
+  color: #fff;
 }
 .tree__toggle.open {
   transform: rotate(90deg);
@@ -569,18 +693,22 @@ select {
   min-width: 0;
   justify-content: flex-start;
   gap: 8px;
-  padding: 7px 8px;
+  padding: 7px 6px;
   border: none;
   background: transparent;
   border-radius: var(--r-lg);
+  font-size: 13px;
   font-weight: 600;
-  color: var(--on-surface);
+  color: var(--lib-text-dim);
 }
 .tree__row.active .tree__main {
-  color: var(--primary);
+  color: #fff;
 }
 .tree__main .icon {
-  color: var(--secondary);
+  color: var(--lib-text-faint);
+}
+.tree__row.active .tree__main .icon {
+  color: #fff;
 }
 .tree__name {
   flex: 1;
@@ -591,19 +719,32 @@ select {
   text-overflow: ellipsis;
 }
 .tree__count {
-  font-size: 11px;
-  color: var(--on-surface-variant);
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--lib-text-faint);
   padding: 1px 8px;
   border-radius: var(--r-full);
-  background: var(--surface-c);
+  background: color-mix(in srgb, var(--lib-text-faint) 16%, transparent);
+}
+.tree__row.active .tree__count {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.22);
 }
 .tree__more {
-  width: 32px;
-  height: 32px;
+  width: 30px;
+  height: 30px;
+  color: var(--lib-text-faint);
+}
+.tree__row.active .tree__more {
+  color: rgba(255, 255, 255, 0.85);
+}
+.tree__row.active .tree__more:hover:not(:disabled) {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.22);
 }
 .tree__more .icon {
-  width: 17px;
-  height: 17px;
+  width: 16px;
+  height: 16px;
 }
 
 /* divider row between notebooks */
@@ -618,14 +759,14 @@ select {
   content: '';
   flex: 1;
   height: 1px;
-  background: var(--outline-variant);
+  background: var(--lib-border);
 }
 .lib-divider__label {
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.09em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--secondary);
+  color: var(--lib-text-dim);
 }
 .lib-divider .iconbtn {
   width: 30px;
@@ -705,24 +846,40 @@ select {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  bottom: calc(16px + env(safe-area-inset-bottom));
+  bottom: calc(18px + env(safe-area-inset-bottom));
   z-index: 40;
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 8px 10px;
-  background: color-mix(in srgb, var(--surface-c-lowest) 92%, transparent);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  gap: 10px;
+  padding: 8px;
+  background: color-mix(in srgb, var(--lib-card) 85%, transparent);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  border: 1px solid rgba(255, 255, 255, 0.7);
   border-radius: var(--r-full);
-  box-shadow: 0 8px 24px -4px rgba(4, 21, 52, 0.22);
+  box-shadow: 0 14px 32px -8px rgba(15, 23, 42, 0.28), 0 4px 10px -4px rgba(15, 23, 42, 0.12);
 }
 .fab-dock button:active {
   transform: scale(0.95);
 }
+/* without this, the flex layout lets "New notebook"/"New folder" shrink
+   below their natural text width and wrap to two lines at Split View's
+   narrower widths (confirmed down to 320px CSS width) even though the dock
+   has room to stay single-line there. */
+.fab-dock button {
+  white-space: nowrap;
+}
 .fab-dock button .icon {
-  width: 18px;
-  height: 18px;
+  width: 17px;
+  height: 17px;
+}
+.fab-dock .primary {
+  background: var(--lib-accent-dark);
+  border-color: var(--lib-accent-dark);
+}
+.fab-dock .primary:hover {
+  background: var(--lib-accent);
+  border-color: var(--lib-accent);
 }
 
 /* =================================================================== Notebook */
@@ -773,6 +930,22 @@ select {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* without min-width: 0, a grid item's floor is its content's min-content
+     size — with 7 non-shrinking 40px icon buttons that's ~316px, which at
+     Split View's narrower widths (confirmed down to ~375px CSS width) forced
+     this whole column, and so the entire app bar and page, wider than the
+     viewport. overflow-x lets it scroll internally instead, the same
+     fallback .nb-dock__row already uses for the same reason. */
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.nb-appbar__right::-webkit-scrollbar {
+  display: none;
+}
+.nb-appbar__right .iconbtn {
+  flex: none;
 }
 .nb-appbar .add-page {
   padding: 8px 14px;
@@ -1452,7 +1625,11 @@ select {
   bottom: 0;
   left: 0;
   z-index: 60;
-  width: min(340px, 88vw);
+  /* the third term keeps at least 100px of page visible/interactive next to
+     the panel even at Split View's narrower widths — without it, 88vw alone
+     left as little as ~28px of page visible at a 320px CSS-width viewport
+     (confirmed), which is a sliver too thin to draw on or even read. */
+  width: min(340px, 88vw, calc(100% - 100px));
   display: flex;
   flex-direction: column;
   background: var(--surface-c-lowest);
@@ -1470,7 +1647,8 @@ select {
    page slides alongside it rather than jumping. The app bar itself is left
    alone — see the AI-mode report for why that's a separate, smaller residual. */
 .nb.ai-panel-open .nb-scroll {
-  margin-left: min(340px, 88vw);
+  /* kept in sync with .ai-panel's own width above — see its comment */
+  margin-left: min(340px, 88vw, calc(100% - 100px));
   transition: margin-left 0.25s ease;
 }
 .ai-panel__header {

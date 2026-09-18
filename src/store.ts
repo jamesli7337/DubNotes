@@ -98,8 +98,8 @@ class Store {
     return [...this.notebooks.values()].sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
-  /** New notebooks go to the top of their folder's list. */
-  createNotebook(name: string, folderId: string | null = null): Notebook {
+  /** New notebooks go to the top of their folder's list. `paper`, if given, becomes the starting page's paper (instead of DEFAULT_PAPER) — every later page still inherits from whichever page precedes it, same as always (see addPage). */
+  createNotebook(name: string, folderId: string | null = null, paper?: Paper): Notebook {
     const now = Date.now();
     const nb: Notebook = {
       id: uid(),
@@ -111,7 +111,8 @@ class Store {
     };
     this.notebooks.set(nb.id, nb);
     this.dirtyNb.add(nb.id);
-    this.addPage(nb.id);
+    const page = this.addPage(nb.id);
+    if (paper) page.paper = { ...paper };
     this.schedule();
     return nb;
   }

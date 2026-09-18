@@ -461,19 +461,43 @@ class NotebookView {
   }
 
   // ----------------------------------------------------------------- zoom
+  /**
+   * Keeps whatever's under `anchor` (viewport/client coordinates; defaults to
+   * the scroller's own centre) fixed on screen across the zoom change.
+   * `.nb-scroll`'s scrollTop/scrollLeft aren't purely zoom × content-position
+   * — fixed, unzoomed offsets are baked into the layout too (the 118px top
+   * padding, each page-wrap's 22px bottom margin) — so treating the whole
+   * scroll position as if it scaled with zoom drifts by however many such
+   * offsets sit above the anchor (worse the further down the notebook you
+   * are). Sidestepped entirely by measuring the anchor against whichever
+   * *page* it's actually over, in that page's own zoom-independent units,
+   * then re-placing that same page-local point at the same screen position
+   * after the zoom change — no need to know about any of those fixed offsets.
+   * An anchor that isn't over any page (the top/bottom padding, the gap
+   * between pages) has nothing to anchor against, so the zoom just applies.
+   */
   private setZoom(z: number, anchor?: { x: number; y: number }): void {
     const next = clamp(Math.round(z * 100) / 100, ZOOM_MIN, ZOOM_MAX);
     const prev = this.zoom;
     const s = this.scrollEl;
-    // keep the content under `anchor` (viewport point) where it is
-    const ax = anchor ? anchor.x - s.getBoundingClientRect().left : s.clientWidth / 2;
-    const ay = anchor ? anchor.y - s.getBoundingClientRect().top : s.clientHeight / 2;
-    const contentX = (s.scrollLeft + ax) / prev;
-    const contentY = (s.scrollTop + ay) / prev;
-    this.zoom = next;
-    s.style.setProperty('--zoom', String(next));
-    s.scrollLeft = contentX * next - ax;
-    s.scrollTop = contentY * next - ay;
+    const rect = s.getBoundingClientRect();
+    const ax = anchor ? anchor.x : rect.left + s.clientWidth / 2;
+    const ay = anchor ? anchor.y : rect.top + s.clientHeight / 2;
+
+    const pageEl = document.elementFromPoint(ax, ay)?.closest<HTMLElement>('.page');
+    if (pageEl) {
+      const before = pageEl.getBoundingClientRect();
+      const offX = (ax - before.left) / prev;
+      const offY = (ay - before.top) / prev;
+      this.zoom = next;
+      s.style.setProperty('--zoom', String(next));
+      const after = pageEl.getBoundingClientRect(); // forces layout at the new zoom
+      s.scrollLeft += after.left + offX * next - ax;
+      s.scrollTop += after.top + offY * next - ay;
+    } else {
+      this.zoom = next;
+      s.style.setProperty('--zoom', String(next));
+    }
     this.refreshAutoColors(); // the size dot previews at the on-screen stroke width
     for (const pc of this.pcByPage.values()) pc.zoomChanged(); // a pending line's handles stay screen-sized
     this.layoutScrollbarThumb(); // zoom changes scrollHeight without firing a native 'scroll' event on its own

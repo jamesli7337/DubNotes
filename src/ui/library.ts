@@ -1,7 +1,8 @@
 import { exportAll, importAll } from '../db';
 import { IMPORT_ACCEPT, importFile } from '../import-file';
+import { DEFAULT_PAPER } from '../const';
 import { store, type FolderItem } from '../store';
-import type { Backup, Divider, Folder, Notebook, NotebookCover, PaperTemplate } from '../types';
+import type { Backup, Divider, Folder, Notebook, NotebookCover, Paper, PaperColor, PaperSpacing, PaperTemplate } from '../types';
 import { download, timestamp } from '../util';
 import { COVER_COLORS, COVER_PATTERNS, coverBackground } from './covers';
 import { alertDialog, confirmDialog, openAnchoredModal, openModal, textPrompt, type Modal } from './dialog';
@@ -19,7 +20,7 @@ const OPEN_KEY = 'noteapp.folders.open';
 export function mountLibrary(root: HTMLElement, folderId: string | null): void {
   const folder = folderId ? store.folders.get(folderId) ?? null : null;
   const wrap = el('div', { class: 'lib' });
-  wrap.append(buildHeader(folder), buildBody(root, folder), buildFab(root, folder));
+  wrap.append(buildHeader(folder), buildMain(root, folder), buildFab(root, folder));
   root.replaceChildren(wrap);
 }
 
@@ -42,8 +43,8 @@ function buildHeader(folder: Folder | null): HTMLElement {
 
   const actions = el('div', { class: 'app-header__actions' });
 
-  const exportBtn = el('button', { class: 'iconbtn', title: 'Export backup', 'aria-label': 'Export backup' });
-  exportBtn.append(icon('export'));
+  const exportBtn = el('button', { class: 'lib-hdrbtn', title: 'Export backup', 'aria-label': 'Export backup' });
+  exportBtn.append(icon('export'), el('span', { class: 'lib-hdrbtn__label', text: 'Export' }));
   exportBtn.addEventListener('click', async () => {
     const data = await exportAll();
     download(`noteapp-backup-${timestamp()}.json`, JSON.stringify(data));
@@ -54,8 +55,8 @@ function buildHeader(folder: Folder | null): HTMLElement {
     accept: 'application/json,.json',
     style: 'display:none',
   }) as HTMLInputElement;
-  const importBtn = el('button', { class: 'iconbtn', title: 'Import backup', 'aria-label': 'Import backup' });
-  importBtn.append(icon('import'));
+  const importBtn = el('button', { class: 'lib-hdrbtn', title: 'Import backup', 'aria-label': 'Import backup' });
+  importBtn.append(icon('import'), el('span', { class: 'lib-hdrbtn__label', text: 'Restore' }));
   importBtn.addEventListener('click', () => importInput.click());
   importInput.addEventListener('change', async () => {
     const file = importInput.files?.[0];
@@ -86,8 +87,8 @@ function buildHeader(folder: Folder | null): HTMLElement {
     accept: IMPORT_ACCEPT,
     style: 'display:none',
   }) as HTMLInputElement;
-  const fileBtn = el('button', { class: 'iconbtn', title: 'Import file', 'aria-label': 'Import file' });
-  fileBtn.append(icon('import'));
+  const fileBtn = el('button', { class: 'lib-hdrbtn', title: 'Import file', 'aria-label': 'Import file' });
+  fileBtn.append(icon('import'), el('span', { class: 'lib-hdrbtn__label', text: 'Import' }));
   fileBtn.addEventListener('click', () => fileInput.click());
   fileInput.addEventListener('change', async () => {
     const file = fileInput.files?.[0];
@@ -101,9 +102,17 @@ function buildHeader(folder: Folder | null): HTMLElement {
   return header;
 }
 
-// --------------------------------------------------------------------- body
-function buildBody(root: HTMLElement, folder: Folder | null): HTMLElement {
-  const body = el('div', { class: 'lib-body' });
+// --------------------------------------------------------------------- main
+/** Below the header: a folder-navigation sidebar plus the scrolling content area. */
+function buildMain(root: HTMLElement, folder: Folder | null): HTMLElement {
+  const main = el('div', { class: 'lib-main' });
+  main.append(buildSidebar(root, folder), buildContent(root, folder));
+  return main;
+}
+
+function buildSidebar(root: HTMLElement, folder: Folder | null): HTMLElement {
+  const sidebar = el('aside', { class: 'lib-sidebar' });
+  sidebar.append(el('div', { class: 'section-label', text: 'Library' }), buildTree(root, folder));
 
   const persist = el('p', { class: 'lib-persist', text: 'Notes are stored on this device.' });
   navigator.storage
@@ -114,9 +123,13 @@ function buildBody(root: HTMLElement, folder: Folder | null): HTMLElement {
         : 'Storage is best-effort — add to Home Screen and keep JSON backups.';
     })
     .catch(() => persist.remove());
-  body.append(persist);
+  sidebar.append(persist);
 
-  body.append(buildTree(root, folder));
+  return sidebar;
+}
+
+function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
+  const content = el('div', { class: 'lib-content' });
 
   const recent = store.notebookList()[0];
   if (!folder && recent) {
@@ -124,7 +137,7 @@ function buildBody(root: HTMLElement, folder: Folder | null): HTMLElement {
     const featSection = el('div');
     featSection.append(el('div', { class: 'section-label accent', text: 'Resume drawing' }));
     featSection.append(buildFeatured(recent));
-    body.append(featSection);
+    content.append(featSection);
   }
 
   const items = store.folderItems(folder?.id ?? null);
@@ -147,9 +160,9 @@ function buildBody(root: HTMLElement, folder: Folder | null): HTMLElement {
   for (const it of items) {
     grid.append(it.kind === 'notebook' ? buildCard(it.nb, root, folder) : buildDivider(it.divider, root, folder));
   }
-  body.append(grid);
+  content.append(grid);
 
-  return body;
+  return content;
 }
 
 // --------------------------------------------------------------------- tree
@@ -557,20 +570,124 @@ function field(label: string, control: HTMLElement): HTMLElement {
   return f;
 }
 
+/** A row of mutually-exclusive pill buttons; calls `onPick` with the chosen index. Duplicated from notebook.ts's own copy — the two UI modules don't share these small dialog-building helpers (see field() above, likewise duplicated). */
+function segmented(labels: string[], activeIndex: number, onPick: (i: number) => void): HTMLElement {
+  const row = el('div', { class: 'seg' });
+  const btns: HTMLButtonElement[] = [];
+  labels.forEach((label, i) => {
+    const b = el('button', {
+      type: 'button',
+      class: 'seg__btn' + (i === activeIndex ? ' active' : ''),
+      text: label,
+    }) as HTMLButtonElement;
+    b.addEventListener('click', () => {
+      for (const x of btns) x.classList.remove('active');
+      b.classList.add('active');
+      onPick(i);
+    });
+    btns.push(b);
+    row.append(b);
+  });
+  return row;
+}
+
+/** Dims a `segmented()` row without removing it — its buttons pick up the shared button:disabled style. */
+function setSegmentedDisabled(row: HTMLElement, disabled: boolean): void {
+  for (const b of row.querySelectorAll<HTMLButtonElement>('.seg__btn')) b.disabled = disabled;
+}
+
+/**
+ * "New notebook": name plus the same paper controls as the in-notebook paper
+ * menu (see notebook.ts's openPaperMenu) — Template / Line spacing / Paper
+ * color, minus its "Apply to" scope (there's only ever the one starting page
+ * yet). The chosen paper becomes that first page's paper; every later page
+ * inherits from whichever page precedes it (see store.addPage), so this is
+ * really "set the notebook's starting paper" rather than a separate stored
+ * per-notebook default.
+ */
+function newNotebookDialog(): Promise<{ name: string; paper: Paper } | null> {
+  return new Promise((resolve) => {
+    const TEMPLATES: PaperTemplate[] = ['blank', 'ruled', 'grid', 'dot'];
+    const SPACINGS: PaperSpacing[] = ['narrow', 'medium', 'wide'];
+    const COLORS: PaperColor[] = ['white', 'cream', 'dark'];
+    let draft: Paper = { ...DEFAULT_PAPER };
+
+    const form = document.createElement('form');
+    form.className = 'dlg';
+
+    const input = el('input', {
+      class: 'dlg__input',
+      type: 'text',
+      autocomplete: 'off',
+      placeholder: 'Notebook name',
+    }) as HTMLInputElement;
+
+    const spacingRow = segmented(['Narrow', 'Medium', 'Wide'], SPACINGS.indexOf(draft.spacing), (i) => {
+      draft = { ...draft, spacing: SPACINGS[i] };
+    });
+    setSegmentedDisabled(spacingRow, draft.template === 'blank');
+
+    const templateRow = segmented(['Blank', 'Ruled', 'Grid', 'Dot'], TEMPLATES.indexOf(draft.template), (i) => {
+      draft = { ...draft, template: TEMPLATES[i] };
+      setSegmentedDisabled(spacingRow, TEMPLATES[i] === 'blank');
+    });
+
+    const colorRow = segmented(['White', 'Cream', 'Dark'], COLORS.indexOf(draft.color), (i) => {
+      draft = { ...draft, color: COLORS[i] };
+    });
+
+    const cancelBtn = el('button', { type: 'button', class: 'dlg__cancel', text: 'Cancel' });
+    const okBtn = el('button', { type: 'submit', class: 'primary dlg__ok', text: 'Create' });
+    const row = el('div', { class: 'dlg__row' });
+    row.append(cancelBtn, okBtn);
+
+    form.append(
+      el('h2', { class: 'dlg__title', text: 'New notebook' }),
+      el('label', { class: 'dlg__label', text: 'Notebook name' }),
+      input,
+      field('Template', templateRow),
+      field('Line spacing', spacingRow),
+      field('Paper color', colorRow),
+      row
+    );
+
+    let settled = false;
+    const finish = (v: { name: string; paper: Paper } | null): void => {
+      if (settled) return;
+      settled = true;
+      resolve(v);
+      modal.close();
+    };
+    const modal = openModal(form, {
+      dismissable: false,
+      onClose: () => {
+        if (!settled) {
+          settled = true;
+          resolve(null);
+        }
+      },
+    });
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      finish({ name: input.value.trim(), paper: draft });
+    });
+    cancelBtn.addEventListener('click', () => finish(null));
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  });
+}
+
 // ---------------------------------------------------------------------- fab
 function buildFab(root: HTMLElement, folder: Folder | null): HTMLElement {
   const dock = el('div', { class: 'fab-dock' });
   const newBtn = el('button', { class: 'primary', text: 'New notebook' });
   newBtn.prepend(icon('plus'));
   newBtn.addEventListener('click', async () => {
-    const name = await textPrompt({
-      title: 'New notebook',
-      placeholder: 'Notebook name',
-      confirmText: 'Create',
-      dismissable: false,
-    });
-    if (name == null) return;
-    const nb = store.createNotebook(name, folder?.id ?? null);
+    const result = await newNotebookDialog();
+    if (!result) return;
+    const nb = store.createNotebook(result.name, folder?.id ?? null, result.paper);
     location.hash = `#/nb/${nb.id}`;
   });
   const folderBtn = el('button', { text: 'New folder', title: 'New folder' });
