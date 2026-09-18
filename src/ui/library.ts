@@ -13,6 +13,31 @@ import { lazyThumb } from './thumb';
 /** Which folder rows are expanded in the tree (remembered per device). */
 const OPEN_KEY = 'noteapp.folders.open';
 
+/** How the notebook grid is ordered (remembered per device; default is the manual order). */
+const SORT_KEY = 'noteapp.notebooks.sort';
+type SortKey = 'manual' | 'updated' | 'created' | 'name';
+const SORT_OPTIONS: Array<[SortKey, string]> = [
+  ['manual', 'Manual order'],
+  ['updated', 'Date modified'],
+  ['created', 'Date created'],
+  ['name', 'Name (A–Z)'],
+];
+function sortKey(): SortKey {
+  try {
+    const v = localStorage.getItem(SORT_KEY);
+    return SORT_OPTIONS.some(([k]) => k === v) ? (v as SortKey) : 'manual';
+  } catch {
+    return 'manual';
+  }
+}
+function saveSortKey(k: SortKey): void {
+  try {
+    localStorage.setItem(SORT_KEY, k);
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
  * The library screen for one folder (`null` = the root): a folder tree at the
  * top, then that folder's notebooks and dividers in their manual order.
@@ -143,12 +168,31 @@ function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
   const items = store.folderItems(folder?.id ?? null);
   const notebooks = items.filter((it): it is Extract<FolderItem, { kind: 'notebook' }> => it.kind === 'notebook');
   const grid = el('div', { class: 'nb-grid' });
+
   const head = el('div', { class: 'section-head' });
-  head.append(
+  const titleGroup = el('div', { class: 'section-head__title' });
+  titleGroup.append(
     el('h2', { text: folder ? 'Notebooks' : 'All notebooks' }),
     el('span', { class: 'count', text: `${notebooks.length}` })
   );
+  head.append(titleGroup);
+
+  if (notebooks.length > 1) {
+    const sort = sortKey();
+    const sortWrap = el('div', { class: 'sort-select' });
+    sortWrap.append(el('span', { class: 'sort-select__label', text: 'Sort' }));
+    const select = el('select', { 'aria-label': 'Sort notebooks' }) as HTMLSelectElement;
+    for (const [value, label] of SORT_OPTIONS) select.append(el('option', { value, text: label }));
+    select.value = sort;
+    select.addEventListener('change', () => {
+      saveSortKey(select.value as SortKey);
+      rerender(root, folder);
+    });
+    sortWrap.append(select);
+    head.append(sortWrap);
+  }
   grid.append(head);
+
   if (!items.length) {
     grid.append(
       el('p', {
@@ -157,7 +201,19 @@ function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
       })
     );
   }
-  for (const it of items) {
+
+  // "Manual order" keeps dividers in their place; any other sort re-orders just
+  // the notebooks by that field and drops the (inherently manual) dividers.
+  const sort = notebooks.length > 1 ? sortKey() : 'manual';
+  const ordered: FolderItem[] =
+    sort === 'manual'
+      ? items
+      : [...notebooks].sort((a, b) => {
+          if (sort === 'name') return a.nb.name.localeCompare(b.nb.name);
+          if (sort === 'created') return b.nb.createdAt - a.nb.createdAt;
+          return b.nb.updatedAt - a.nb.updatedAt;
+        });
+  for (const it of ordered) {
     grid.append(it.kind === 'notebook' ? buildCard(it.nb, root, folder) : buildDivider(it.divider, root, folder));
   }
   content.append(grid);
