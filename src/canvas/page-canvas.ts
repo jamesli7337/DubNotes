@@ -48,9 +48,10 @@ import {
   strokeInPolygon,
   transformItems,
   translateItems,
+  type Camera,
   type Frame,
 } from './geom';
-import { SelectionOverlay } from './selection';
+import type { OverlayOptions } from './selection';
 import { drawTemplate } from './templates';
 
 /** Undo-able edits a page can produce. Page add/delete is handled by NotebookView. */
@@ -98,6 +99,19 @@ export interface PageHooks {
   isAiActive: () => boolean;
   /** A cross-page drag (see endTransform) just changed another page's items directly in the store — repaint that page's own PageCanvas if it's mounted (a no-op otherwise; it'll read the fresh store on its next mount). */
   refreshPage: (pageId: string) => void;
+  /**
+   * Shows (or re-places) this page's selection in the single, notebook-level
+   * SelectionOverlay — there's one shared instance, not one per page, so a
+   * selection dragged across a page boundary never has to fight a per-page
+   * stacking context (see selection.ts's own doc comment). `frame` is in
+   * this page's own units; the notebook converts it to screen space itself
+   * via the shared camera and this page's own world position.
+   */
+  showSelection: (pc: PageCanvas, frame: Frame, opts: OverlayOptions) => void;
+  /** Re-places the shared overlay's current frame without changing its handle set (e.g. as text grows while typing) — a no-op if the overlay isn't currently showing this page's selection. */
+  updateSelection: (pc: PageCanvas, frame: Frame) => void;
+  /** Hides the shared overlay — a no-op if it's currently showing a *different* page's selection (see onSelectionFrame's own doc comment for why that distinction matters). */
+  hideSelection: (pc: PageCanvas) => void;
 }
 
 type CoalescingEvent = PointerEvent & { getCoalescedEvents?: () => PointerEvent[] };
@@ -164,7 +178,8 @@ export class PageCanvas {
   private cache: HTMLCanvasElement | null = null;
   private vctx: CanvasRenderingContext2D | null = null;
   private cctx: CanvasRenderingContext2D | null = null;
-  private overlay: SelectionOverlay | null = null;
+  /** The shared, notebook-level camera { x, y, zoom } — see geom.ts's own doc comment. A stable object reference NotebookView mutates in place; PageCanvas never writes to it, only reads. */
+  private readonly camera: Camera;
 
   private raf = 0;
   private mode:
@@ -249,12 +264,13 @@ export class PageCanvas {
   private editor: TextEditor | null = null;
   private lastDim: Set<string> | undefined;
 
-  constructor(page: Page, nb: Notebook, hooks: PageHooks) {
+  constructor(page: Page, nb: Notebook, hooks: PageHooks, camera: Camera) {
     this.page = page;
     this.pw = pageW(page);
     this.ph = pageH(page);
     this.nb = nb;
     this.hooks = hooks;
+    this.camera = camera;
   }
 
   get mounted(): boolean {
@@ -295,17 +311,6 @@ export class PageCanvas {
     clip.appendChild(view);
     host.appendChild(clip);
     this.clip = clip;
-    this.overlay = new SelectionOverlay(
-      host,
-      {
-        onDragStart: () => this.beginTransform(),
-        onDrag: (f) => this.updateTransform(f),
-        onDragEnd: (f) => this.endTransform(f),
-        onTap: (x, y) => this.tapSelection(x, y),
-      },
-      this.pw,
-      this.ph
-    );
 
     view.addEventListener('pointerdown', this.onDown);
     view.addEventListener('pointermove', this.onMove);
@@ -340,8 +345,6 @@ export class PageCanvas {
     }
     this.host?.removeEventListener('touchstart', this.blockNativeGesture);
     this.host?.removeEventListener('touchmove', this.blockNativeGesture);
-    this.overlay?.destroy();
-    this.overlay = null;
     this.guide?.destroy();
     this.guide = null;
     this.clip?.remove();
@@ -1202,13 +1205,13 @@ export class PageCanvas {
   }
 
   /**
-   * The view zoom the page is drawn at (the scroller's `--zoom`, inherited by
-   * the canvas). Anything meant to stay a fixed size on screen — the line's
-   * endpoint handles, like the selection overlay's DOM handles — divides by it.
+   * The view zoom the page is drawn at — the shared camera's own zoom, not a
+   * per-page value. Anything meant to stay a fixed size on screen — the
+   * line's endpoint handles, like the selection overlay's DOM handles —
+   * divides by it.
    */
   private zoom(): number {
-    const z = this.view ? parseFloat(getComputedStyle(this.view).getPropertyValue('--zoom')) : 1;
-    return z > 0 ? z : 1;
+    return this.camera.zoom > 0 ? this.camera.zoom : 1;
   }
 
   /** The pending line and its two endpoint handles. */
@@ -1606,7 +1609,7 @@ export class PageCanvas {
     this.commitEdit();
     if (!this.selected.size) {
       this.lastLassoPath = null;
-      this.overlay?.hide();
+      this.hooks.hideSelection(this);
       this.hooks.onSelectionFrame(this, null);
       return;
     }
@@ -1648,19 +1651,17 @@ export class PageCanvas {
    * never automatically from selecting, dragging, resizing or rotating.
    */
   private showSelection(): void {
-    const ov = this.overlay;
-    if (!ov) return;
     const items = this.selectedItems();
     const lasso = this.lastLassoPath;
     const frame = lasso ? { ...aabb(lasso), rot: 0 } : itemsFrame(items);
     if (!frame) {
-      ov.hide();
+      this.hooks.hideSelection(this);
       this.hooks.onSelectionFrame(this, null);
       return;
     }
     const single = !lasso && items.length === 1 && !isStroke(items[0]) ? items[0] : null;
     const isText = single?.kind === 'text';
-    ov.show(frame, {
+    this.hooks.showSelection(this, frame, {
       rotate: single != null, // never for a lasso selection — see above
       aspect: lasso != null || isText || single?.kind === 'image', // photos (and lasso groups) keep their proportions on a corner drag
       edges: lasso ? 'none' : isText ? 'horizontal' : 'all',
@@ -1683,7 +1684,8 @@ export class PageCanvas {
    * treatment, with one priority exception: with the text tool, a tap on a
    * selected text box re-opens it for editing instead of showing the callout.
    */
-  private tapSelection(x: number, y: number): void {
+  /** Called by the shared SelectionOverlay's onTap hook when this page's selection is showing. */
+  tapSelection(x: number, y: number): void {
     if (this.lastLassoPath) {
       if (pointInPolygon(x, y, this.lastLassoPath)) {
         const frame = { ...aabb(this.lastLassoPath), rot: 0 };
@@ -1723,7 +1725,7 @@ export class PageCanvas {
     this.selected = new Set();
     this.lastLassoPath = null;
     const removed = store.removeItems(this.page.id, ids);
-    this.overlay?.hide();
+    this.hooks.hideSelection(this);
     this.rebuild();
     this.hooks.onSelection(this, 0);
     this.hooks.onSelectionFrame(this, null);
@@ -1768,7 +1770,8 @@ export class PageCanvas {
   }
 
   // ------------------------------------------------------------ transform
-  private beginTransform(): void {
+  /** Called by the shared SelectionOverlay's onDragStart hook when this page's selection is showing. */
+  beginTransform(): void {
     const items = this.selectedItems();
     // must match showSelection()'s frame exactly — the overlay's own drag
     // math (and the `frame` values it reports to updateTransform) are
@@ -1787,7 +1790,8 @@ export class PageCanvas {
     this.rebuild(); // hides the originals; the view paints the live copies
   }
 
-  private updateTransform(frame: Frame): void {
+  /** Called by the shared SelectionOverlay's onDrag hook (or directly, e.g. text-press dragging) when this page's selection is showing. */
+  updateTransform(frame: Frame): void {
     if (!this.xfOrig || !this.xfFrame) return;
     const same = frame.w === this.xfFrame.w && frame.h === this.xfFrame.h && frame.rot === this.xfFrame.rot;
     this.xfLive = same
@@ -1803,39 +1807,42 @@ export class PageCanvas {
     }
     this.xfCur = frame;
     this.syncEditor(this.xfLive[0]);
-    this.overlay?.update(frame);
+    this.hooks.updateSelection(this, frame);
     this.schedule();
   }
 
   /**
    * If `frame` (a just-finished pure-move drag, in this page's own local
-   * units) is centred over a *different* page's own DOM rect, returns that
-   * page's id plus the translation needed to re-express `frame` in that
-   * page's local space. Every page renders at the same on-screen zoom (see
-   * `zoom()`), so this is a plain re-origin against the other page's rect,
-   * never a rescale. Returns null for a same-page drop (the common case) or
-   * a release that doesn't land over any page's rect at all (e.g. the gap
-   * between two pages).
+   * units) is centred over a *different* page, returns that page's id plus
+   * the translation needed to re-express `frame` in that page's local space.
+   * Compared entirely in world space — each page's own offsetLeft/offsetTop
+   * within `.nb-camera` (plain, transform-agnostic layout, not a live rect)
+   * plus this page's own world origin for `frame`'s centre — so it needs no
+   * screen-space conversion (no camera, no zoom) at all: a page-local point
+   * plus its page's own world offset already *is* that point's world
+   * position, comparable directly against any other page's world rect.
+   * Returns null for a same-page drop (the common case) or a release that
+   * doesn't land over any page's rect at all (e.g. the gap between two pages).
    */
   private destPageFor(frame: Frame): { id: string; dx: number; dy: number } | null {
-    const r = this.pageRect();
-    if (!r) return null;
-    const z = this.zoom();
+    const host = this.host;
+    if (!host) return null;
     const cx = frame.x + frame.w / 2;
     const cy = frame.y + frame.h / 2;
-    const sx = r.left + cx * z;
-    const sy = r.top + cy * z;
+    const wx = host.offsetLeft + cx;
+    const wy = host.offsetTop + cy;
     for (const el of document.querySelectorAll<HTMLElement>('.page')) {
       const id = el.dataset.pageId;
       if (!id || id === this.page.id) continue;
-      const pr = el.getBoundingClientRect();
-      if (sx < pr.left || sx > pr.right || sy < pr.top || sy > pr.bottom) continue;
-      return { id, dx: (sx - pr.left) / z - cx, dy: (sy - pr.top) / z - cy };
+      if (wx < el.offsetLeft || wx > el.offsetLeft + el.offsetWidth || wy < el.offsetTop || wy > el.offsetTop + el.offsetHeight)
+        continue;
+      return { id, dx: wx - el.offsetLeft - cx, dy: wy - el.offsetTop - cy };
     }
     return null;
   }
 
-  private endTransform(frame: Frame | null): void {
+  /** Called by the shared SelectionOverlay's onDragEnd hook when this page's selection is showing. */
+  endTransform(frame: Frame | null): void {
     const orig = this.xfOrig;
     const from = this.xfFrame;
     const lassoOrig = this.xfLassoOrig;
@@ -1929,7 +1936,7 @@ export class PageCanvas {
       ed.el = { ...ed.el, text: area.value, h: layoutText(area.value, ed.el.fontSize, ed.el.w).height };
       this.syncEditor();
       const f = itemsFrame([ed.el]);
-      if (f) this.overlay?.update(f);
+      if (f) this.hooks.updateSelection(this, f);
     });
     area.addEventListener('keydown', (e) => {
       e.stopPropagation(); // typing must not trigger app shortcuts
@@ -1983,7 +1990,7 @@ export class PageCanvas {
       }
       this.selected = new Set();
       this.lastLassoPath = null;
-      this.overlay?.hide();
+      this.hooks.hideSelection(this);
       this.rebuild();
       this.hooks.onSelection(this, 0);
       return;

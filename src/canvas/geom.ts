@@ -13,6 +13,33 @@ export interface Frame extends Rect {
   rot: number;
 }
 
+/**
+ * The single source of truth for pan/zoom: `x`/`y` is the world-space point
+ * currently at the top-left of the viewport (`.nb-scroll`'s own content box),
+ * `zoom` scales distances from there. Applied to `.nb-camera` as one CSS
+ * transform (`scale(zoom) translate(-x, -y)`, transform-origin 0 0) instead
+ * of native scroll mixed with a per-page CSS scale — see NotebookView's own
+ * camera-model doc comment. "World space" is just each `.page`'s own
+ * offsetLeft/offsetTop within `.nb-camera` (plain, transform-agnostic layout,
+ * not a separately-tracked coordinate system) plus that page's own local
+ * (page-unit) coordinates.
+ */
+export interface Camera {
+  x: number;
+  y: number;
+  zoom: number;
+}
+
+/** World-space point → screen-space point, relative to `.nb-scroll`'s own top-left (its content box, since `.nb-camera` starts flush against it). */
+export function worldToScreen(camera: Camera, wx: number, wy: number): [number, number] {
+  return [(wx - camera.x) * camera.zoom, (wy - camera.y) * camera.zoom];
+}
+
+/** The inverse of worldToScreen. */
+export function screenToWorld(camera: Camera, sx: number, sy: number): [number, number] {
+  return [sx / camera.zoom + camera.x, sy / camera.zoom + camera.y];
+}
+
 export function rotateAround(x: number, y: number, cx: number, cy: number, ang: number): [number, number] {
   if (!ang) return [x, y];
   const c = Math.cos(ang);

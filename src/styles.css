@@ -1437,67 +1437,36 @@ select {
   font-variant-numeric: tabular-nums;
 }
 
-/* page scroller. Top padding reserves resting clearance under the floating
-   dock (`.nb-dock`, position: fixed) so the page never rests touching or
-   under it — only overlaps once actually scrolled past this margin, which is
-   the intended trade-off (see the dock's own comment). This lives on
-   `.nb-scroll` itself, which sits *outside* the zoom transform entirely (only
-   .page-wrap/.page-frame/.page below it read `--zoom` — see the zoom comment
-   further down) — so this padding is already real, unzoomed screen pixels
-   and needs no zoom-dependent recalculation: it reserves the same actual
-   on-screen gap under the dock whether the page content above it and below
-   is rendered at 50% or 300%. Sized for the dock's tallest state (options
-   row open: ~8px above the app bar + ~100px tall, ~108px total — see
-   .nb-dock__row--options) plus a small but clearly visible margin on top —
-   not the common collapsed ~54px, since the dock's options row now only
-   closes on an explicit re-tap (see toggleDockOptions) and can stay open
-   indefinitely while still scrolled to the top. */
+/* page viewport. No longer a real scrolling element — pan/zoom is a single
+   explicit camera { x, y, zoom } (NotebookView) applied as ONE transform on
+   `.nb-camera` below, not native scroll mixed with a per-page CSS scale. This
+   is just the clipping window onto that transformed content; `position:
+   relative` so `.nb-camera`'s transform-origin (0 0) — and every `.page`'s
+   offsetTop/Left, which the camera math treats as that page's world
+   position — resolve against this element specifically. `touch-action: none`
+   because every gesture here (one-finger pan, two-finger pinch, a stylus
+   stroke) is now recognized and preventDefault()ed by our own JS
+   (bindZoomGestures / PageCanvas), not handed to a native pan/zoom gesture. */
 .nb-scroll {
   flex: 1;
-  overflow: auto;
-  -webkit-overflow-scrolling: touch;
-  touch-action: pan-x pan-y;
-  overscroll-behavior: contain;
-  padding: 118px 0 40vh;
-  /* a persistent, theme-coloured scrollbar rather than relying on the OS's
-     auto-hide default (e.g. macOS's "only while scrolling") — Firefox via
-     scrollbar-width/color, Chromium/desktop-Safari via ::-webkit-scrollbar
-     below. iOS/iPadOS Safari has no CSS hook for this: touch scrollbars there
-     are always transient, regardless of these rules. */
-  scrollbar-width: thin;
-  scrollbar-color: var(--outline-variant) transparent;
-}
-.nb-scroll::-webkit-scrollbar {
-  width: 10px;
-}
-.nb-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-.nb-scroll::-webkit-scrollbar-thumb {
-  background: var(--outline-variant);
-  border-radius: var(--r-full);
-  border: 2px solid transparent;
-  background-clip: padding-box;
-}
-.nb-scroll::-webkit-scrollbar-thumb:hover {
-  background: var(--outline);
-  background-clip: padding-box;
+  overflow: hidden;
+  touch-action: none;
+  position: relative;
 }
 /* Hand tool active: a grab cursor for the mouse-drag-to-pan path (see
-   bindHandToolGestures) — touch/pen panning is native and has no cursor. */
+   bindHandToolGestures) — touch/pen panning already goes through the same
+   camera-pan gesture as any other tool, unaffected by this. */
 .nb-scroll--hand {
   cursor: grab;
 }
 .nb-scroll--hand:active {
   cursor: grabbing;
 }
-/* Custom draggable scrollbar thumb (see bindScrollbarThumb) — position:
-   fixed so it escapes .nb-scroll's own scrolling, same as every other
-   fixed-position overlay piece that must render independent of the scroller.
-   Hidden by default (and on any device with a real mouse, which can already
-   drag the native ::-webkit-scrollbar thumb above); shown only on coarse-
-   pointer/no-hover devices — i.e. touch/iPad, where a CSS-styled scrollbar
-   exists but isn't draggable at all. */
+/* Draggable scrollbar thumb (see bindScrollbarThumb) tracking camera.y — now
+   the *only* scrollbar affordance on any pointer type, since there's no more
+   native scrolling for a desktop mouse to drag a real browser scrollbar on.
+   `position: fixed` so it escapes `.nb-camera`'s own transform, same as every
+   other fixed-position overlay piece that must render independent of it. */
 .nb-scrollbar-thumb {
   display: none;
   position: fixed;
@@ -1506,10 +1475,13 @@ select {
   width: 24px;
   touch-action: none;
   z-index: 40;
-  /* positioned via transform on every scroll tick (see bindScrollbarThumb) —
-     this keeps that on the compositor thread instead of layout/paint, which
+  /* positioned via transform on every camera-y change (see bindScrollbarThumb)
+     — this keeps that on the compositor thread instead of layout/paint, which
      otherwise left ghost copies behind on iOS Safari during fast scrolling */
   will-change: transform;
+}
+.nb-scrollbar-thumb:not([hidden]) {
+  display: block;
 }
 .nb-scrollbar-thumb::after {
   content: '';
@@ -1525,40 +1497,38 @@ select {
 .nb-scrollbar-thumb:active::after {
   opacity: 0.85;
 }
-@media (hover: none) and (pointer: coarse) {
-  .nb-scrollbar-thumb:not([hidden]) {
-    display: block;
-  }
-}
 .nb-empty {
   text-align: center;
   color: var(--on-surface-variant);
   margin-top: 48px;
 }
-/* zoom: `--zoom` on the scroller scales every page with a CSS transform; the
-   frame reserves the scaled size in layout so scrolling covers the whole page */
-.nb-scroll {
-  --zoom: 1;
+/* The single camera transform: translate(x, y) then scale(zoom), applied by
+   NotebookView.applyCamera() as one inline `transform`, `transform-origin: 0
+   0` so it composes as screenX = (worldX - camera.x) * camera.zoom. Every
+   `.page-wrap` below lays out in plain, unscaled document flow inside this —
+   their combined offsetTop/offsetLeft/offsetHeight *are* the "world space"
+   the camera maps to screen, read directly off layout (transform-agnostic)
+   rather than tracked as a separate parallel data structure. */
+.nb-camera {
+  transform-origin: 0 0;
+  will-change: transform;
 }
 /* --pw/--ph: this page's own size (page units), set inline per page-wrap
    (buildPageWrap) from pageW/pageH — defaults here cover a page with no
    inline override (shouldn't happen, but keeps these rules self-contained).
    Inherited by .page-frame/.page/.page canvas below, so a landscape-imported
    PDF page (see pdf-import.ts) lays out at its own aspect ratio instead of
-   the fixed portrait box. */
+   the fixed portrait box. Unscaled now — .nb-camera's single transform scales
+   all of this at once, so a page's own CSS size is always exactly pw × ph. */
 .page-wrap {
   --pw: 820px;
   --ph: 1060px;
-  width: calc(var(--pw) * var(--zoom));
+  width: var(--pw);
   margin: 0 auto 22px;
 }
 .page-frame {
-  width: calc(var(--pw) * var(--zoom));
-  height: calc(var(--ph) * var(--zoom));
-}
-.page-frame .page {
-  transform: scale(var(--zoom));
-  transform-origin: 0 0;
+  width: var(--pw);
+  height: var(--ph);
 }
 
 .page-head {
@@ -1875,8 +1845,16 @@ select {
 }
 
 /* ---------------------------------------------------------- selection box
- * Positioned in page units (1 unit = 1 CSS px on the 820×1060 page); rotation
- * is applied about the centre so the handles follow a rotated element. */
+ * A single shared instance (SelectionOverlay, owned by NotebookView, not
+ * nested per-page any more — see its own doc comment) living directly in
+ * `.nb-scroll`, a sibling of `.nb-camera` rather than inside whichever page
+ * currently has a selection. Positioned in screen px, computed from the
+ * camera + that page's own world offset; rotation is applied about the
+ * centre so the handles follow a rotated element. Being a sibling of
+ * `.nb-camera` (not nested inside it) is what actually fixes the old bug
+ * where a selection dragged across a page boundary lost the paint-order
+ * fight against whichever page it now visually overlapped — there's only
+ * one shared stacking context here, not one per page. */
 .sel-box {
   position: absolute;
   z-index: 3;
@@ -1904,10 +1882,13 @@ select {
   box-shadow: var(--sh-1);
   touch-action: none;
 }
-/* handles and grips live inside the zoomed page: counter-scale them so they
-   stay the same size on screen (and don't swallow a thin selection's body) */
-.sel-h,
-.sel-rot,
+/* .guide__rot lives inside the (still-)camera-scaled per-page subtree
+   (Guide didn't need to move to the top-level overlay — no cross-page-drag
+   concern to escape a stacking context for), so it still needs counter-
+   scaling to stay a constant screen size regardless of zoom. .sel-h/.sel-rot
+   no longer do: they're part of the shared top-level SelectionOverlay now
+   (see its own comment above), positioned directly in screen px with no
+   ambient ancestor scale to counteract. */
 .guide__rot {
   transform: scale(calc(1 / var(--zoom, 1)));
 }
@@ -2068,8 +2049,10 @@ select {
 }
 
 /* ------------------------------------------------------- ruler / protractor
- * View-only drawing aids positioned in page units; `--guide-unrot` counter-
- * rotates the angle readout so it stays upright. */
+ * View-only drawing aids, positioned in screen px via the camera (same
+ * top-level-in-.nb-scroll treatment as .sel-box, for the same reason —
+ * see its own comment); `--guide-unrot` counter-rotates the angle readout so
+ * it stays upright. */
 .guide {
   position: absolute;
   z-index: 2;

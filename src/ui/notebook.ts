@@ -1,9 +1,10 @@
 import { AiMode } from '../ai-mode';
 import { AUTO_COLOR, resolveInkColor } from '../canvas/freehand';
-import { itemBounds, rotateAround, unionRects, type Frame } from '../canvas/geom';
+import { itemBounds, rotateAround, unionRects, worldToScreen, type Camera, type Frame } from '../canvas/geom';
 import type { GuideKind } from '../canvas/guide';
 import { PageCanvas, TAPE_MIN } from '../canvas/page-canvas';
 import type { Op } from '../canvas/page-canvas';
+import { SelectionOverlay } from '../canvas/selection';
 import { DEFAULT_PAPER, PAGE_W, pageH, pageW } from '../const';
 import { store } from '../store';
 import {
@@ -72,6 +73,10 @@ const SHAPE_OPTIONS: Record<PlacedShape, { icon: IconName; label: string }> = {
 };
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
+/** Resting clearance kept above page 1 (screen px, at the current zoom — see minCameraY) so the page never rests touching or under the floating dock. Was `.nb-scroll`'s own CSS padding-top before the camera migration; now a pan-clamp bound instead, since content no longer sits in real scrollable flow. */
+const TOP_CLEARANCE = 118;
+/** Same idea below the last page (fraction of the viewport's own height, not zoom-scaled — see maxCameraY) — was `.nb-scroll`'s CSS padding-bottom. */
+const BOTTOM_CLEARANCE_VH = 0.4;
 
 export function mountNotebook(root: HTMLElement, notebookId: string): void {
   const nb = store.notebooks.get(notebookId);
@@ -104,22 +109,46 @@ class NotebookView {
   private appBarRightGroup!: HTMLElement;
   /** The dock's own Pen button — the one tool button AI mode leaves enabled (and turns violet); set fresh by renderTools each rebuild. */
   private penToolBtn!: HTMLButtonElement;
-  /** View zoom (1 = 100%); pages are CSS-scaled, so pointer maths stays in page units. */
-  private zoom = 1;
+  /**
+   * The single camera: `x`/`y` (world-space, pre-camera-transform "page-wrap
+   * layout" units — see geom.ts's own Camera doc comment) is the point
+   * currently at the viewport's top-left, `zoom` scales distances from
+   * there. Applied to `cameraEl` as one CSS transform (applyCamera) instead
+   * of native scroll mixed with a per-page CSS scale — replaces the old
+   * `private zoom` field entirely; every former `this.zoom` read is now
+   * `this.camera.zoom`. A stable object reference, mutated in place (not
+   * reassigned) so every PageCanvas holding it always sees the current values.
+   */
+  private readonly camera: Camera = { x: 0, y: 0, zoom: 1 };
+  /** `.nb-camera`: the single element the whole camera transform is applied to — every `.page-wrap` lives inside it. */
+  private cameraEl!: HTMLElement;
   private pinch: { d0: number; z0: number; mx: number; my: number; cx: number; cy: number } | null = null;
-  /** Hand tool, mouse only — touch/pen panning is native (touch-action), see bindHandToolGestures. */
-  private handPan: { pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null = null;
-  /** Recomputes the custom scrollbar thumb's size/position (see bindScrollbarThumb); called after anything that changes scrollEl's content height without itself firing a native 'scroll' event (setZoom, syncPages). */
+  /**
+   * One-finger pan (touch or pen — mouse panning is bindHandToolGestures'
+   * own, hand-tool-only path). `vx`/`vy` (world units/ms) are a running
+   * estimate of the finger's velocity, sampled each touchmove, used to kick
+   * off momentum on lift — see startMomentum.
+   */
+  private pan: { touchId: number; lastX: number; lastY: number; lastT: number; vx: number; vy: number } | null = null;
+  /** rAF handle for the momentum/rubber-band-snap-back animation — see startMomentum/stopMomentum. */
+  private momentumRaf = 0;
+  /** Hand tool, mouse only — touch/pen panning goes through the same one-finger-pan gesture as any other tool, see bindZoomGestures. */
+  private handPan: { pointerId: number; x: number; y: number; camX: number; camY: number } | null = null;
+  /** Recomputes the custom scrollbar thumb's size/position (see bindScrollbarThumb); called after anything that changes the camera or the notebook's total content height without itself going through applyCamera (syncPages). */
   private layoutScrollbarThumb: () => void = () => {};
+  /** The cheap per-tick half of bindScrollbarThumb — just repositions the thumb via transform against already-cached size/range, called from every applyCamera(). */
+  private repositionScrollbarThumb: () => void = () => {};
+  /** The single, notebook-level selection box/handles overlay — see selection.ts's own doc comment for why there's one shared instance instead of one per page. */
+  private overlay!: SelectionOverlay;
+  /** Which page's selection the shared overlay is currently showing, if any — its onDragStart/onDrag/onDragEnd/onTap hooks route to this page's own PageCanvas. */
+  private overlayPc: PageCanvas | null = null;
 
-  private observer: IntersectionObserver;
   private readonly pcByPage = new Map<string, PageCanvas>();
   private readonly wrapById = new Map<string, HTMLElement>();
   private readonly mounted = new Set<string>();
   private sizePopover: Modal | null = null;
 
-  /** Tracks which page is most visible, for the "auto" ink swatch/dot preview. */
-  private viewObserver: IntersectionObserver;
+  /** Tracks which page is most visible, for the "auto" ink swatch/dot preview — recomputed from the camera (updateVisiblePages) instead of a native-scroll-driven IntersectionObserver, since `.nb-scroll` no longer scrolls. */
   private readonly pageVisibility = new Map<string, number>();
   private currentPageId: string | null = null;
   private colorRefreshers: Array<() => void> = [];
@@ -215,17 +244,16 @@ class NotebookView {
 
     this.buildChrome();
 
-    this.observer = new IntersectionObserver((entries) => this.onIntersect(entries), {
-      root: this.scrollEl,
-      rootMargin: '1200px 0px',
-      threshold: 0,
-    });
-    this.viewObserver = new IntersectionObserver((entries) => this.onViewIntersect(entries), {
-      root: this.scrollEl,
-      threshold: [0, 0.1, 0.25, 0.5, 0.75, 1],
-    });
     store.enforceTrailingBlank(this.nb.id);
     this.syncPages();
+    // start fitted to the width on narrow screens, 100% otherwise — fit
+    // against the first page's own width (a landscape-imported first page is
+    // wider than the default, so it needs more shrinking to fit). Has to
+    // wait until here (pages actually built into cameraEl by syncPages, not
+    // just buildChrome's own DOM scaffolding) since setZoom's own clamping
+    // needs a real content height to clamp against.
+    const first = store.pagesOf(this.nb.id)[0];
+    this.setZoom(Math.min(1, (this.scrollEl.clientWidth - 24) / (first ? pageW(first) : PAGE_W)) || 1); // applyCamera() (called from within) also runs the first updateVisiblePages()
 
     this.onKey = (e) => {
       if (!this.root.contains(this.scrollEl)) return;
@@ -267,8 +295,7 @@ class NotebookView {
       this.hideTapePopover();
       this.deactivateAll(); // commit an open text edit before the canvases go away
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
-      this.observer.disconnect();
-      this.viewObserver.disconnect();
+      this.stopMomentum();
       this.aiMode.destroyPanel();
       store.flushNow();
     };
@@ -408,18 +435,30 @@ class NotebookView {
     this.toolsOptionsEl = el('div', { class: 'nb-dock__row nb-dock__row--options' });
     this.toolsEl.append(this.toolsTopEl, this.toolsOptionsEl);
     this.scrollEl = el('div', { class: 'nb-scroll' });
+    this.cameraEl = el('div', { class: 'nb-camera' });
+    this.scrollEl.append(this.cameraEl);
+    this.overlay = new SelectionOverlay(
+      this.scrollEl,
+      {
+        onDragStart: () => this.overlayPc?.beginTransform(),
+        onDrag: (f) => this.overlayPc?.updateTransform(f),
+        onDragEnd: (f) => this.overlayPc?.endTransform(f),
+        onTap: (x, y) => this.overlayPc?.tapSelection(x, y),
+      },
+      this.camera
+    );
     blockGestures(this.scrollEl);
     this.bindZoomGestures();
     this.bindHandToolGestures();
     this.bindScrollbarThumb();
-    // scrolling/resizing changes where the selection lands on screen without
-    // changing its frame — reposition the callout (if open) to match; a fresh
-    // pageRect() picks up the new scroll/zoom, same idea as openModal's
-    // anchored popovers re-placing themselves on resize/orientationchange.
-    // A bound method (not a local closure) so onLeave can remove the same
-    // reference from `window` — otherwise every notebook visit would leak
-    // one more resize listener onto it for the life of the tab.
-    this.scrollEl.addEventListener('scroll', this.repositionCallout, { passive: true });
+    // resizing changes where the selection lands on screen without changing
+    // its frame — reposition the callout (if open) to match, same idea as
+    // openModal's anchored popovers re-placing themselves on resize/
+    // orientationchange. A bound method (not a local closure) so onLeave can
+    // remove the same reference from `window` — otherwise every notebook
+    // visit would leak one more resize listener onto it for the life of the
+    // tab. (Panning/zooming reposition it directly from applyCamera instead
+    // of a native 'scroll' event, which `.nb-scroll` no longer fires.)
     window.addEventListener('resize', this.repositionCallout);
 
     this.imageInput = el('input', {
@@ -453,153 +492,309 @@ class NotebookView {
     this.renderTools();
     this.syncHistory();
     this.refreshAiControls();
-    // start fitted to the width on narrow screens, 100% otherwise — fit
-    // against the first page's own width (a landscape-imported first page is
-    // wider than the default, so it needs more shrinking to fit)
-    const first = store.pagesOf(this.nb.id)[0];
-    this.setZoom(Math.min(1, (this.scrollEl.clientWidth - 24) / (first ? pageW(first) : PAGE_W)) || 1);
+    // the initial fit-to-width setZoom() (see the constructor, right after
+    // syncPages) has to wait until pages actually exist in `cameraEl` —
+    // setZoom's own clamping needs a real content height to clamp against,
+    // which is zero here (syncPages hasn't run yet).
   }
 
-  // ----------------------------------------------------------------- zoom
+  // ----------------------------------------------------------------- camera
+  /**
+   * Writes the camera to `.nb-camera` as one CSS transform and settles
+   * everything derived from it. `screenX = (worldX - camera.x) * camera.zoom`
+   * (see geom.ts's own Camera doc comment) means the transform composes as
+   * `scale(zoom) translate(-x, -y)` (CSS transform functions apply right to
+   * left). `--zoom` is still set as a custom property purely for
+   * `.guide__rot`'s counter-scale trick (guide.ts wasn't moved to a top-level
+   * overlay the way SelectionOverlay was — it has no cross-page-drag concern
+   * to escape a per-page stacking context for, so it's still nested per page
+   * and still relies on inheriting an ambient scale, now from `.nb-camera`
+   * instead of its own page's individual transform).
+   */
+  private applyCamera(): void {
+    const { x, y, zoom } = this.camera;
+    this.cameraEl.style.transform = `scale(${zoom}) translate(${-x}px, ${-y}px)`;
+    this.scrollEl.style.setProperty('--zoom', String(zoom));
+    this.repositionScrollbarThumb();
+    this.overlay.update();
+    this.repositionCallout();
+    this.updateVisiblePages();
+  }
+
+  /** The least `camera.y` allowed: page 1's own top can be dragged down to at most this many *world* units below the viewport top — i.e. `TOP_CLEARANCE` screen px of resting clearance under the dock, at the current zoom. */
+  private minCameraY(): number {
+    return -TOP_CLEARANCE / this.camera.zoom;
+  }
+
+  /** The greatest `camera.y` allowed: the last page's own bottom can't be dragged more than `BOTTOM_CLEARANCE_VH` of screen height above the viewport's bottom. */
+  private maxCameraY(): number {
+    const viewH = this.scrollEl.clientHeight;
+    const contentH = this.cameraEl.offsetHeight;
+    const bottomClearance = window.innerHeight * BOTTOM_CLEARANCE_VH;
+    return Math.max(this.minCameraY(), contentH - (viewH - bottomClearance) / this.camera.zoom);
+  }
+
+  /** Clamps a candidate camera position to the valid pan range — the hard bound a rubber-banded drag/momentum eases toward, not a per-tick position itself. */
+  /** The world-space horizontal extent of all page content (leftmost/rightmost page edge) — `.nb-camera` itself always reports offsetWidth equal to the viewport (a plain block fills its container regardless of its children's actual width; unlike offsetHeight, width isn't content-driven), so it can't be used directly to find how much horizontal content there actually is. */
+  private contentWorldXBounds(): { left: number; right: number } {
+    let left = Infinity;
+    let right = -Infinity;
+    for (const wrap of this.wrapById.values()) {
+      const pageEl = wrap.querySelector<HTMLElement>('.page');
+      if (!pageEl) continue;
+      left = Math.min(left, pageEl.offsetLeft);
+      right = Math.max(right, pageEl.offsetLeft + pageEl.offsetWidth);
+    }
+    return left === Infinity ? { left: 0, right: 0 } : { left, right };
+  }
+
+  /** Clamps horizontally against the page content's own world-space bounds (not a fixed 0, which only happens to be correct at 100% zoom) — once zoomed in far enough that a page renders wider than the viewport, panning across it needs a real, positive-or-negative range either side of 0. Narrower than the viewport (the common case): centres it exactly instead of leaving any slack to pan into. */
+  private clampCamera(x: number, y: number): { x: number; y: number } {
+    const viewW = this.scrollEl.clientWidth;
+    const z = this.camera.zoom;
+    const { left, right } = this.contentWorldXBounds();
+    const viewWorldW = viewW / z;
+    const clampedX =
+      right - left <= viewWorldW ? left - (viewWorldW - (right - left)) / 2 : clamp(x, left, right - viewWorldW);
+    return { x: clampedX, y: clamp(y, this.minCameraY(), this.maxCameraY()) };
+  }
+
   /**
    * Keeps whatever's under `anchor` (viewport/client coordinates; defaults to
-   * the scroller's own centre) fixed on screen across the zoom change.
-   * `.nb-scroll`'s scrollTop/scrollLeft aren't purely zoom × content-position
-   * — fixed, unzoomed offsets are baked into the layout too (the 118px top
-   * padding, each page-wrap's 22px bottom margin) — so treating the whole
-   * scroll position as if it scaled with zoom drifts by however many such
-   * offsets sit above the anchor (worse the further down the notebook you
-   * are). Sidestepped entirely by measuring the anchor against whichever
-   * *page* it's actually over, in that page's own zoom-independent units,
-   * then re-placing that same page-local point at the same screen position
-   * after the zoom change — no need to know about any of those fixed offsets.
-   * An anchor that isn't over any page (the top/bottom padding, the gap
-   * between pages) has nothing to anchor against, so the zoom just applies.
+   * the scroller's own centre) fixed on screen across the zoom change: convert
+   * the anchor to a world-space point using the *current* camera, change
+   * `camera.zoom`, then solve for the `camera.x/y` that puts that same world
+   * point back under the same screen anchor — closed-form, no DOM
+   * measurement (contrast the old per-page `elementFromPoint` +
+   * before/after `getBoundingClientRect()` approach this replaced).
    */
   private setZoom(z: number, anchor?: { x: number; y: number }): void {
     const next = clamp(Math.round(z * 100) / 100, ZOOM_MIN, ZOOM_MAX);
-    const prev = this.zoom;
-    const s = this.scrollEl;
-    const rect = s.getBoundingClientRect();
-    const ax = anchor ? anchor.x : rect.left + s.clientWidth / 2;
-    const ay = anchor ? anchor.y : rect.top + s.clientHeight / 2;
-
-    const pageEl = document.elementFromPoint(ax, ay)?.closest<HTMLElement>('.page');
-    if (pageEl) {
-      const before = pageEl.getBoundingClientRect();
-      const offX = (ax - before.left) / prev;
-      const offY = (ay - before.top) / prev;
-      this.zoom = next;
-      s.style.setProperty('--zoom', String(next));
-      const after = pageEl.getBoundingClientRect(); // forces layout at the new zoom
-      s.scrollLeft += after.left + offX * next - ax;
-      s.scrollTop += after.top + offY * next - ay;
-    } else {
-      this.zoom = next;
-      s.style.setProperty('--zoom', String(next));
-    }
+    const rect = this.scrollEl.getBoundingClientRect();
+    const sx = anchor ? anchor.x - rect.left : this.scrollEl.clientWidth / 2;
+    const sy = anchor ? anchor.y - rect.top : this.scrollEl.clientHeight / 2;
+    const wx = sx / this.camera.zoom + this.camera.x;
+    const wy = sy / this.camera.zoom + this.camera.y;
+    this.camera.zoom = next;
+    const clamped = this.clampCamera(wx - sx / next, wy - sy / next);
+    this.camera.x = clamped.x;
+    this.camera.y = clamped.y;
     this.refreshAutoColors(); // the size dot previews at the on-screen stroke width
     for (const pc of this.pcByPage.values()) pc.zoomChanged(); // a pending line's handles stay screen-sized
-    this.layoutScrollbarThumb(); // zoom changes scrollHeight without firing a native 'scroll' event on its own
+    this.layoutScrollbarThumb(); // zoom changes the thumb's size/range, not just its position
+    this.applyCamera();
+  }
+
+  /** Starts (or restarts) the momentum + rubber-band-settle animation after a pan gesture lifts with residual velocity, or lands out of bounds with none. `vx`/`vy` are world units/ms. */
+  private startMomentum(vx: number, vy: number): void {
+    this.stopMomentum();
+    const FRICTION = 0.0035; // higher = faster decay
+    const SPRING = 0.22; // how hard an out-of-bounds position eases back per frame
+    let lastT: number | null = null;
+    const step = (t: number): void => {
+      const dt = Math.min(lastT == null ? 16 : t - lastT, 48);
+      lastT = t;
+      const decay = Math.exp(-FRICTION * dt);
+      vx *= decay;
+      vy *= decay;
+      let nx = this.camera.x - vx * dt;
+      let ny = this.camera.y - vy * dt;
+      const clamped = this.clampCamera(nx, ny);
+      const overX = nx - clamped.x;
+      const overY = ny - clamped.y;
+      if (overX !== 0) {
+        nx = clamped.x + overX * (1 - SPRING);
+        vx *= 1 - SPRING;
+      }
+      if (overY !== 0) {
+        ny = clamped.y + overY * (1 - SPRING);
+        vy *= 1 - SPRING;
+      }
+      this.camera.x = nx;
+      this.camera.y = ny;
+      this.applyCamera();
+      const settled = Math.hypot(vx, vy) < 0.005 && Math.abs(overX) < 0.4 && Math.abs(overY) < 0.4;
+      if (!settled) {
+        this.momentumRaf = requestAnimationFrame(step);
+      } else {
+        this.camera.x = clamped.x;
+        this.camera.y = clamped.y;
+        this.applyCamera();
+        this.momentumRaf = 0;
+      }
+    };
+    this.momentumRaf = requestAnimationFrame(step);
+  }
+
+  private stopMomentum(): void {
+    if (this.momentumRaf) cancelAnimationFrame(this.momentumRaf);
+    this.momentumRaf = 0;
   }
 
   /**
-   * Pinch with two fingers (native one-finger scrolling is untouched) and
-   * ctrl/⌘ + wheel on desktop.
+   * One-finger pan, two-finger pinch-zoom, and ctrl/⌘ + wheel zoom, all
+   * driven entirely by our own JS now that `.nb-scroll` doesn't scroll
+   * natively (see its own CSS comment) — replaces native one-finger
+   * scrolling, which used to need no code here at all.
    *
-   * The pinch session, once started, stays owned for as long as *any* touch
-   * remains — not just while the count reads exactly 2. Real two-finger
-   * releases are rarely simultaneous (one finger lifts a beat early), and a
-   * third finger can graze the glass mid-gesture; re-deriving "are we
-   * pinching" from the instantaneous touch count on every event used to mean
-   * that single frame at the wrong count stopped preventDefault() entirely,
-   * handing the still-moving remaining touch to native pan-x pan-y —
-   * occasionally flinging a completely different page into view. Now, once
-   * `pinch` is set, touchmove keeps suppressing native scroll at any count;
-   * it only actually applies the zoom/pan math while exactly 2 touches are
-   * live, and just holds position (still swallowing the event) otherwise.
-   * The session ends only once every touch is off the glass.
+   * The pinch session, once started, stays owned for as long as *any*
+   * (non-stylus) touch remains — not just while the count reads exactly 2.
+   * Real two-finger releases are rarely simultaneous (one finger lifts a
+   * beat early), and a third finger can graze the glass mid-gesture;
+   * re-deriving "are we pinching" from the instantaneous touch count on
+   * every event used to mean that single frame at the wrong count stopped
+   * preventDefault() entirely, handing the still-moving remaining touch to
+   * native pan-x pan-y — occasionally flinging a completely different page
+   * into view. Now, once `pinch` is set, touchmove keeps suppressing native
+   * scroll at any count; it only actually applies the zoom/pan math while
+   * exactly 2 (non-stylus) touches are live, and just holds position (still
+   * swallowing the event) otherwise. A single remaining touch after a pinch
+   * ends is picked back up as a one-finger pan rather than dropped.
    *
    * A stylus contact (WebKit tags a `Touch` with `touchType: 'stylus'`) is
-   * never eligible as one of the two pinch touches, at start or mid-gesture —
-   * a finger scrolling when the Apple Pencil comes down is two touches by
-   * count alone, but treating that as a pinch corrupted the scroll and raced
+   * never eligible as a pan or pinch touch, at start or mid-gesture — a
+   * finger panning when the Apple Pencil comes down is two touches by count
+   * alone, but treating that as a pinch corrupted the pan and raced
    * page-canvas.ts's own stylus-promotion path (startPress/capture) for the
    * same contact, aborting the pencil's stroke. If a stylus joins (or was
-   * already present) once a pinch is already active, the session ends
-   * outright rather than just skipping the zoom/pan math for that tick, so a
-   * still-down finger falls back to plain native scrolling and the pencil's
-   * own contact is left uncontested.
+   * already present) once a pan/pinch is already active, the session ends
+   * outright rather than just skipping that tick's math, leaving the
+   * pencil's own contact uncontested.
    */
   private bindZoomGestures(): void {
     const s = this.scrollEl;
     const dist = (t: TouchList): number => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
     const hasStylus = (t: TouchList): boolean =>
       Array.from(t).some((touch) => (touch as WebKitTouch).touchType === 'stylus');
+    const beginPan = (t: Touch): void => {
+      this.pan = { touchId: t.identifier, lastX: t.clientX, lastY: t.clientY, lastT: performance.now(), vx: 0, vy: 0 };
+    };
     s.addEventListener(
       'touchstart',
       (e) => {
-        if (e.touches.length !== 2 || hasStylus(e.touches)) return;
-        const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-        const my = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-        this.pinch = { d0: dist(e.touches), z0: this.zoom, mx, my, cx: mx, cy: my };
+        this.stopMomentum();
+        if (hasStylus(e.touches)) {
+          this.pan = null;
+          this.pinch = null;
+          return;
+        }
+        if (e.touches.length >= 2) {
+          this.pan = null;
+          const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+          const my = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+          this.pinch = { d0: dist(e.touches), z0: this.camera.zoom, mx, my, cx: mx, cy: my };
+        } else if (e.touches.length === 1 && !this.pinch) {
+          beginPan(e.touches[0]);
+        }
       },
       { passive: true }
     );
     s.addEventListener(
       'touchmove',
       (e) => {
-        if (!this.pinch) return;
         if (hasStylus(e.touches)) {
-          // the pencil joined (or was already down) mid-gesture: bail out
-          // entirely rather than just skipping this tick's zoom/pan math —
-          // see doc comment above.
+          // the pencil joined (or was already down) mid-gesture: bail out of
+          // both pan and pinch entirely — see doc comment above.
+          this.pan = null;
           this.pinch = null;
           return;
         }
-        e.preventDefault(); // own the whole gesture until every touch lifts — see doc comment above
-        if (e.touches.length !== 2) return; // no 2-finger baseline right now: hold position, keep suppressing native scroll
-        const p = this.pinch;
-        const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-        const my = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-        this.setZoom((p.z0 * dist(e.touches)) / p.d0, { x: mx, y: my });
-        s.scrollLeft -= mx - p.cx; // pan with the midpoint
-        s.scrollTop -= my - p.cy;
-        p.cx = mx;
-        p.cy = my;
+        if (this.pinch) {
+          e.preventDefault(); // own the whole gesture until every touch lifts — see doc comment above
+          if (e.touches.length < 2) return; // no 2-touch baseline right now: hold position, keep suppressing native scroll
+          const p = this.pinch;
+          const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+          const my = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+          this.setZoom((p.z0 * dist(e.touches)) / p.d0, { x: mx, y: my });
+          this.camera.x -= (mx - p.cx) / this.camera.zoom; // pan with the midpoint
+          this.camera.y -= (my - p.cy) / this.camera.zoom;
+          this.applyCamera();
+          p.cx = mx;
+          p.cy = my;
+          return;
+        }
+        const p = this.pan;
+        if (!p || e.touches.length !== 1 || e.touches[0].identifier !== p.touchId) return;
+        e.preventDefault();
+        const t = e.touches[0];
+        const now = performance.now();
+        const dt = Math.max(1, now - p.lastT);
+        const dx = (t.clientX - p.lastX) / this.camera.zoom;
+        const dy = (t.clientY - p.lastY) / this.camera.zoom;
+        const raw = { x: this.camera.x - dx, y: this.camera.y - dy };
+        const clamped = this.clampCamera(raw.x, raw.y);
+        // rubber-band: resist past the content bounds rather than hard-stopping
+        this.camera.x = clamped.x + (raw.x - clamped.x) * 0.35;
+        this.camera.y = clamped.y + (raw.y - clamped.y) * 0.35;
+        this.applyCamera();
+        p.vx = p.vx * 0.8 + (dx / dt) * 0.2; // smoothed velocity estimate, for momentum on lift
+        p.vy = p.vy * 0.8 + (dy / dt) * 0.2;
+        p.lastX = t.clientX;
+        p.lastY = t.clientY;
+        p.lastT = now;
       },
       { passive: false }
     );
-    const end = (e: TouchEvent): void => {
-      if (e.touches.length === 0) this.pinch = null;
+    const endTouch = (e: TouchEvent): void => {
+      if (e.touches.length >= 2) return; // still pinching (or a 3rd finger grazed) — see the pinch-session doc comment above
+      if (e.touches.length === 1 && !hasStylus(e.touches)) {
+        // one finger remains after a pinch (or an extra graze) ends — pick it
+        // back up as a pan instead of dropping input until the next touchstart
+        this.pinch = null;
+        beginPan(e.touches[0]);
+        return;
+      }
+      if (e.touches.length > 0) return; // the one remaining touch is a stylus — leave it alone entirely
+      const p = this.pan;
+      this.pinch = null;
+      this.pan = null;
+      if (!p) return;
+      const speed = Math.hypot(p.vx, p.vy);
+      if (speed > 0.02) this.startMomentum(p.vx, p.vy);
+      else {
+        const clamped = this.clampCamera(this.camera.x, this.camera.y);
+        if (clamped.x !== this.camera.x || clamped.y !== this.camera.y) this.startMomentum(0, 0); // settle leftover rubber-band overshoot even with no coasting velocity
+      }
     };
-    s.addEventListener('touchend', end);
-    s.addEventListener('touchcancel', end);
+    s.addEventListener('touchend', endTouch);
+    s.addEventListener('touchcancel', endTouch);
     s.addEventListener(
       'wheel',
       (e) => {
-        if (!(e.ctrlKey || e.metaKey)) return;
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          this.setZoom(this.camera.zoom * Math.exp(-e.deltaY * 0.002), { x: e.clientX, y: e.clientY });
+          return;
+        }
+        // plain wheel now has to pan the camera itself — .nb-scroll no longer
+        // scrolls natively at all (see its own CSS comment)
         e.preventDefault();
-        this.setZoom(this.zoom * Math.exp(-e.deltaY * 0.002), { x: e.clientX, y: e.clientY });
+        this.stopMomentum();
+        const clamped = this.clampCamera(this.camera.x + e.deltaX / this.camera.zoom, this.camera.y + e.deltaY / this.camera.zoom);
+        this.camera.x = clamped.x;
+        this.camera.y = clamped.y;
+        this.applyCamera();
       },
       { passive: false }
     );
   }
 
   /**
-   * Hand tool: drag anywhere to pan. Touch and pen already pan for free —
-   * `touch-action: pan-x pan-y` on .nb-scroll covers both (PageCanvas's own
-   * onDown steps aside entirely for this tool, see its own comment there,
-   * and lets the event bubble here rather than consuming it). Mice have no
-   * such native gesture, so this handles that one case manually — scoped to
-   * `pointerType === 'mouse'` specifically, so it never double-pans a touch
-   * or pen drag that the browser is already panning on its own.
+   * Hand tool: drag anywhere to pan. Touch and pen already pan via the same
+   * one-finger gesture bindZoomGestures recognizes for any tool (PageCanvas's
+   * own onDown steps aside entirely for this tool, see its own comment
+   * there, letting the touch reach here instead of being claimed for
+   * drawing). Mice have no such gesture of their own, so this handles that
+   * one case manually — scoped to `pointerType === 'mouse'` specifically, so
+   * it never double-pans a touch or pen drag bindZoomGestures is already
+   * panning.
    */
   private bindHandToolGestures(): void {
     const s = this.scrollEl;
     s.addEventListener('pointerdown', (e) => {
       if (toolState.kind !== 'hand' || e.pointerType !== 'mouse') return;
-      this.handPan = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, scrollLeft: s.scrollLeft, scrollTop: s.scrollTop };
+      this.stopMomentum();
+      this.handPan = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, camX: this.camera.x, camY: this.camera.y };
       try {
         s.setPointerCapture(e.pointerId);
       } catch {
@@ -609,8 +804,9 @@ class NotebookView {
     s.addEventListener('pointermove', (e) => {
       const p = this.handPan;
       if (!p || e.pointerId !== p.pointerId) return;
-      s.scrollLeft = p.scrollLeft - (e.clientX - p.x);
-      s.scrollTop = p.scrollTop - (e.clientY - p.y);
+      this.camera.x = p.camX - (e.clientX - p.x) / this.camera.zoom;
+      this.camera.y = p.camY - (e.clientY - p.y) / this.camera.zoom;
+      this.applyCamera();
     });
     const end = (e: PointerEvent): void => {
       if (this.handPan?.pointerId === e.pointerId) this.handPan = null;
@@ -620,14 +816,14 @@ class NotebookView {
   }
 
   /**
-   * A custom draggable scrollbar thumb over `.nb-scroll`, shown only on
-   * coarse-pointer/no-hover devices (see the `.nb-scrollbar-thumb` CSS) —
-   * i.e. touch/iPad, where the browser's own (`::-webkit-scrollbar`-styled)
-   * scrollbar exists but can't be grabbed and dragged the way a desktop
-   * mouse can drag it natively. Positioned as `position: fixed` against
-   * `scrollEl`'s own live rect (so it tracks the dock/app-bar chrome around
-   * it without hardcoding their heights), the same escape-the-zoomed-subtree
-   * pattern selection.ts and the page manager's own drag use.
+   * A custom draggable scrollbar thumb over `.nb-scroll`, tracking
+   * `camera.y` — the only scrollbar affordance on any pointer type now (see
+   * the CSS comment on `.nb-scrollbar-thumb`), since there's no more native
+   * scrolling for a desktop mouse to drag a real browser scrollbar on.
+   * Positioned as `position: fixed` against `scrollEl`'s own live rect (so
+   * it tracks the dock/app-bar chrome around it without hardcoding their
+   * heights), the same escape-the-camera-transform pattern the page manager's
+   * own drag uses.
    */
   private bindScrollbarThumb(): void {
     const s = this.scrollEl;
@@ -637,56 +833,61 @@ class NotebookView {
     const MIN_THUMB = 32;
     const INSET = 6;
 
-    // trackH/thumbH/maxScroll only change with the scroller's own geometry
-    // (resize, zoom, page add/remove) — layout() recomputes them and the
-    // thumb's base `top`. Scrolling itself never touches any of that, so the
-    // 'scroll' listener only calls reposition(), which reads these cached
-    // values and moves the thumb purely via `transform`, keeping every
-    // scroll-tick update on the compositor thread instead of triggering
-    // layout/paint (the cause of the iOS ghosting this replaced).
+    // trackH/thumbH/panRange only change with the scroller's own geometry or
+    // the camera's zoom (resize, zoom, page add/remove) — layout()
+    // recomputes them and the thumb's base `top`. A plain pan never touches
+    // any of that, so applyCamera's per-tick path only calls reposition(),
+    // which reads these cached values and moves the thumb purely via
+    // `transform`, keeping every pan-tick update on the compositor thread
+    // instead of triggering layout/paint (the cause of the iOS ghosting a
+    // fixed-vs-transform split fixed here previously).
     let trackH = 0;
     let thumbH = 0;
-    let maxScroll = 0;
+    let panRange = 0;
 
     const reposition = (): void => {
       if (thumb.hidden) return;
-      const progress = clamp(s.scrollTop / maxScroll, 0, 1);
+      const progress = panRange > 0 ? clamp((this.camera.y - this.minCameraY()) / panRange, 0, 1) : 0;
       thumb.style.transform = `translate3d(0, ${progress * (trackH - thumbH)}px, 0)`;
     };
+    this.repositionScrollbarThumb = reposition;
 
     const layout = (): void => {
       const track = s.getBoundingClientRect();
       trackH = track.height - INSET * 2;
-      maxScroll = s.scrollHeight - s.clientHeight;
-      if (maxScroll <= 1) {
+      const minY = this.minCameraY();
+      const maxY = this.maxCameraY();
+      panRange = Math.max(0, maxY - minY);
+      if (panRange <= 1) {
         thumb.hidden = true;
         return;
       }
       thumb.hidden = false;
-      thumbH = Math.min(trackH, Math.max(MIN_THUMB, (s.clientHeight / s.scrollHeight) * trackH));
+      const viewWorldH = s.clientHeight / this.camera.zoom;
+      const shownFraction = clamp(viewWorldH / (panRange + viewWorldH), 0.02, 1);
+      thumbH = Math.min(trackH, Math.max(MIN_THUMB, shownFraction * trackH));
       thumb.style.top = `${track.top + INSET}px`;
       thumb.style.height = `${thumbH}px`;
       thumb.style.right = `${window.innerWidth - track.right + 3}px`;
       reposition();
     };
     this.layoutScrollbarThumb = layout;
-    s.addEventListener('scroll', reposition, { passive: true });
     window.addEventListener('resize', layout);
     layout();
 
-    let drag: { pointerId: number; startY: number; startScrollTop: number; trackH: number; thumbH: number } | null = null;
+    let drag: { pointerId: number; startY: number; startCamY: number; trackH: number; thumbH: number } | null = null;
     thumb.addEventListener('pointerdown', (e) => {
-      // a pinch's second finger can land on the thumb's own hit strip (both
-      // only ever active on the same coarse-pointer/no-hover devices) —
+      // a pinch's second finger can land on the thumb's own hit strip —
       // refuse to start a competing drag of our own while bindZoomGestures
       // owns the gesture; see its own doc comment for how long that is.
       if (this.pinch) return;
       e.preventDefault();
+      this.stopMomentum();
       const track = s.getBoundingClientRect();
       drag = {
         pointerId: e.pointerId,
         startY: e.clientY,
-        startScrollTop: s.scrollTop,
+        startCamY: this.camera.y,
         trackH: track.height - INSET * 2,
         thumbH: thumb.getBoundingClientRect().height,
       };
@@ -700,16 +901,16 @@ class NotebookView {
       if (!drag || e.pointerId !== drag.pointerId) return;
       // a pinch can start after this drag already grabbed a pointer (the
       // thumb's own pointerdown races bindZoomGestures' touchstart) — bail
-      // out rather than keep fighting it over scrollTop for the rest of the
+      // out rather than keep fighting it over camera.y for the rest of the
       // gesture.
       if (this.pinch) {
         drag = null;
         return;
       }
-      const maxScroll = s.scrollHeight - s.clientHeight;
       const range = drag.trackH - drag.thumbH;
-      const scrollDelta = range > 0 ? ((e.clientY - drag.startY) / range) * maxScroll : 0;
-      s.scrollTop = clamp(drag.startScrollTop + scrollDelta, 0, maxScroll);
+      const camDelta = range > 0 ? ((e.clientY - drag.startY) / range) * panRange : 0;
+      this.camera.y = clamp(drag.startCamY + camDelta, this.minCameraY(), this.maxCameraY());
+      this.applyCamera();
     });
     const endDrag = (e: PointerEvent): void => {
       if (drag?.pointerId === e.pointerId) drag = null;
@@ -1869,9 +2070,9 @@ class NotebookView {
     return { panel, refreshTicks: () => buildSizeTicks(ticks, input, range) };
   }
 
-  /** Page-unit → CSS-px factor the mounted page canvases render at (matches `toLocal`). Just `this.zoom` — screen px per page unit is the same for every page regardless of its own size, since a page's on-screen width is always (its own width in page units) × zoom. */
+  /** Page-unit → CSS-px factor the mounted page canvases render at (matches `toLocal`). Just `this.camera.zoom` — screen px per page unit is the same for every page regardless of its own size, since a page's on-screen width is always (its own width in page units) × zoom. */
   private pageScale(): number {
-    return this.zoom;
+    return this.camera.zoom;
   }
 
   // ---------------------------------------------------------------- pages
@@ -1893,8 +2094,8 @@ class NotebookView {
     pages.forEach((page, i) => {
       const wrap = this.wrapById.get(page.id) ?? this.buildPageWrap(page);
 
-      const at = this.scrollEl.children.item(i);
-      if (at !== wrap) this.scrollEl.insertBefore(wrap, at);
+      const at = this.cameraEl.children.item(i);
+      if (at !== wrap) this.cameraEl.insertBefore(wrap, at);
 
       const label = wrap.querySelector('.page-head span');
       const text = `Page ${i + 1}`;
@@ -1902,7 +2103,8 @@ class NotebookView {
 
       this.applyPaperBg(wrap, page);
     });
-    this.layoutScrollbarThumb(); // adding/removing pages changes scrollHeight without firing a native 'scroll' event
+    this.layoutScrollbarThumb(); // adding/removing pages changes the pannable range/thumb size
+    this.updateVisiblePages(); // ...and which pages are now in view
   }
 
   private buildPageWrap(page: Page): HTMLElement {
@@ -1945,45 +2147,58 @@ class NotebookView {
     frame.append(pageEl);
     wrap.append(headEl, frame);
 
-    const pc = new PageCanvas(page, this.nb, {
-      onOp: (op) => {
-        // ink drawn while AI mode is active is ephemeral (see AiMode) — it
-        // never enters the main undo history, only AiMode's own turn-scoped
-        // stack sees it (see AiMode.handleOp). A snapped line lands as an
-        // 'add-items' op like any other insertion, so it's only excluded
-        // here when PageCanvas itself flagged it as AI ink (aiInk).
-        const isAiInk = this.aiMode.isActive() && (op.kind === 'add-stroke' || (op.kind === 'add-items' && op.aiInk));
-        if (!isAiInk) this.pushOp(op);
-        this.aiMode.handleOp(op);
+    const pc = new PageCanvas(
+      page,
+      this.nb,
+      {
+        onOp: (op) => {
+          // ink drawn while AI mode is active is ephemeral (see AiMode) — it
+          // never enters the main undo history, only AiMode's own turn-scoped
+          // stack sees it (see AiMode.handleOp). A snapped line lands as an
+          // 'add-items' op like any other insertion, so it's only excluded
+          // here when PageCanvas itself flagged it as AI ink (aiInk).
+          const isAiInk = this.aiMode.isActive() && (op.kind === 'add-stroke' || (op.kind === 'add-items' && op.aiInk));
+          if (!isAiInk) this.pushOp(op);
+          this.aiMode.handleOp(op);
+        },
+        onSelection: (p, n) => this.onSelection(p, n),
+        onSelectionFrame: (p, frame) => this.onSelectionFrame(p, frame),
+        onEmptyLassoSelection: (p, frame) => this.showEmptyLassoCallout(p, frame),
+        onTapeTap: (p, tapeId, frame) => this.showTapePopover(p, tapeId, frame),
+        isAiActive: () => this.aiMode.isActive(),
+        refreshPage: (pageId) => this.rebuildIfMounted(pageId),
+        showSelection: (p, frame, opts) => {
+          this.overlayPc = p;
+          this.overlay.show(frame, opts, { origin: { x: pageEl.offsetLeft, y: pageEl.offsetTop }, pw: pageW(p.page), ph: pageH(p.page) });
+        },
+        updateSelection: (p, frame) => {
+          if (this.overlayPc === p) this.overlay.update(frame);
+        },
+        hideSelection: (p) => {
+          if (this.overlayPc === p) {
+            this.overlay.hide();
+            this.overlayPc = null;
+          }
+        },
       },
-      onSelection: (p, n) => this.onSelection(p, n),
-      onSelectionFrame: (p, frame) => this.onSelectionFrame(p, frame),
-      onEmptyLassoSelection: (p, frame) => this.showEmptyLassoCallout(p, frame),
-      onTapeTap: (p, tapeId, frame) => this.showTapePopover(p, tapeId, frame),
-      isAiActive: () => this.aiMode.isActive(),
-      refreshPage: (pageId) => this.rebuildIfMounted(pageId),
-    });
+      this.camera
+    );
     this.pcByPage.set(page.id, pc);
     this.wrapById.set(page.id, wrap);
-    this.observer.observe(pageEl);
-    this.viewObserver.observe(pageEl);
     return wrap;
   }
 
   private disposePage(id: string): void {
     this.aiMode.forgetPage(id);
     const wrap = this.wrapById.get(id);
-    if (wrap) {
-      const pageEl = wrap.querySelector('.page');
-      if (pageEl) {
-        this.observer.unobserve(pageEl);
-        this.viewObserver.unobserve(pageEl);
-      }
-      wrap.remove();
-    }
+    if (wrap) wrap.remove();
     const pc = this.pcByPage.get(id);
     pc?.unmount();
     if (pc && this.selPc === pc) this.selPc = null;
+    if (pc && this.overlayPc === pc) {
+      this.overlay.hide();
+      this.overlayPc = null;
+    }
     if (pc && this.tapePopoverPc === pc) this.hideTapePopover();
     if (id === this.guidePageId) this.guideKind = this.guidePageId = null;
     this.pcByPage.delete(id);
@@ -2009,29 +2224,39 @@ class NotebookView {
     if (this.mounted.has(page.id)) this.pcByPage.get(page.id)?.paperChanged();
   }
 
-  private onIntersect(entries: IntersectionObserverEntry[]): void {
-    for (const e of entries) {
-      const id = (e.target as HTMLElement).dataset.pageId;
-      if (!id) continue;
+  /**
+   * Mounts/unmounts each page's PageCanvas based on whether it's within the
+   * camera's own visible range (plus a preload margin), and tracks each
+   * page's visible fraction for "current page" purposes — replaces a pair of
+   * IntersectionObserver instances that used to do both jobs for free, since
+   * those require a real scrolling `root`, which `.nb-scroll` no longer is
+   * (see its own CSS comment). Called from applyCamera (every pan/zoom
+   * change) and syncPages (page add/remove/reorder).
+   */
+  private updateVisiblePages(): void {
+    const viewH = this.scrollEl.clientHeight;
+    const margin = 1200 / this.camera.zoom; // world units — same preload buffer the old IntersectionObserver used (rootMargin '1200px 0px')
+    const loadTop = this.camera.y - margin;
+    const loadBottom = this.camera.y + viewH / this.camera.zoom + margin;
+    const viewTop = this.camera.y;
+    const viewBottom = this.camera.y + viewH / this.camera.zoom;
+    for (const [id, wrap] of this.wrapById) {
+      const pageEl = wrap.querySelector<HTMLElement>('.page');
       const pc = this.pcByPage.get(id);
-      if (!pc) continue;
-      if (e.isIntersecting) {
-        pc.mount(e.target as HTMLElement);
+      if (!pageEl || !pc) continue;
+      const pTop = pageEl.offsetTop;
+      const pBottom = pTop + pageEl.offsetHeight;
+      if (pBottom > loadTop && pTop < loadBottom) {
+        pc.mount(pageEl);
         this.mounted.add(id);
         if (this.guideKind && id === this.guidePageId) pc.showGuide(this.guideKind);
-      } else {
+      } else if (this.mounted.has(id)) {
         pc.unmount();
         if (!pc.mounted) this.mounted.delete(id);
       }
-    }
-  }
-
-  /** Tracks the page with the greatest on-screen visibility as the "current" one. */
-  private onViewIntersect(entries: IntersectionObserverEntry[]): void {
-    for (const e of entries) {
-      const id = (e.target as HTMLElement).dataset.pageId;
-      if (!id) continue;
-      if (e.intersectionRatio > 0) this.pageVisibility.set(id, e.intersectionRatio);
+      const visibleH = Math.max(0, Math.min(pBottom, viewBottom) - Math.max(pTop, viewTop));
+      const ratio = pageEl.offsetHeight > 0 ? visibleH / pageEl.offsetHeight : 0;
+      if (ratio > 0) this.pageVisibility.set(id, ratio);
       else this.pageVisibility.delete(id);
     }
     // Keep the last page when nothing is visible for a moment (e.g. mid-layout).
@@ -2209,7 +2434,14 @@ class NotebookView {
 
   /** Scrolls to a page and marks it "current" right away (rather than waiting for the scroll to settle and the view-intersection observer to catch up). */
   private goToPage(pageId: string): void {
-    this.wrapById.get(pageId)?.scrollIntoView({ block: 'start' });
+    const wrap = this.wrapById.get(pageId);
+    const pageEl = wrap?.querySelector<HTMLElement>('.page');
+    if (pageEl) {
+      this.stopMomentum();
+      const clamped = this.clampCamera(this.camera.x, pageEl.offsetTop);
+      this.camera.y = clamped.y;
+      this.applyCamera();
+    }
     this.setCurrentPage(pageId);
   }
 

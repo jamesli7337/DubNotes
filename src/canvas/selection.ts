@@ -1,6 +1,6 @@
 import { TAP_SLOP } from '../tools';
 import { icon } from '../ui/icon';
-import { rotateAround, type Frame } from './geom';
+import { rotateAround, screenToWorld, worldToScreen, type Camera, type Frame } from './geom';
 
 type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 const HANDLES: Handle[] = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
@@ -29,6 +29,13 @@ export interface OverlayHooks {
   onTap: (x: number, y: number) => void;
 }
 
+/** Which page a shown frame belongs to — its world-space origin (that page's own offsetLeft/offsetTop within `.nb-camera`) plus its own size, needed to convert the frame's page-local units to/from screen space through the shared camera. */
+export interface OverlayPage {
+  origin: { x: number; y: number };
+  pw: number;
+  ph: number;
+}
+
 /**
  * The bounding box drawn around a selection: a rotated, absolutely positioned
  * div with resize handles on its edges and a rotate grip above it. It owns
@@ -38,17 +45,25 @@ export interface OverlayHooks {
  * page canvas maps that onto the selected items. Deleting the selection is
  * the callout's job (its Delete button calls PageCanvas.deleteSelection()
  * directly) — this overlay doesn't have its own delete affordance.
+ *
+ * A single shared instance, owned by NotebookView, living in `.nb-scroll`
+ * (a sibling of `.nb-camera`) rather than nested inside whichever page
+ * currently has a selection — `show()` is told which page's selection this
+ * is (`OverlayPage`) each time, and all screen positioning goes through the
+ * shared `camera` instead of that page's own live rect. This is what fixes
+ * a selection dragged across a page boundary losing the paint-order fight
+ * against whichever page it now visually overlaps: there's only one shared
+ * stacking context here, not one per page.
  */
 export class SelectionOverlay {
-  private readonly host: HTMLElement;
+  private readonly viewportEl: HTMLElement;
   private readonly hooks: OverlayHooks;
+  private readonly camera: Camera;
   private readonly box: HTMLElement;
   private readonly handleEls = new Map<Handle, HTMLElement>();
   private readonly rotEl: HTMLElement;
-  /** the page this overlay lives on, in page units — for the screen→page coordinate conversion in toPage. */
-  private readonly pw: number;
-  private readonly ph: number;
   private frame: Frame | null = null;
+  private page: OverlayPage | null = null;
   private opts: OverlayOptions = { rotate: false, aspect: false, edges: 'all', passThrough: false };
 
   private drag: {
@@ -60,11 +75,10 @@ export class SelectionOverlay {
     startAngle: number;
   } | null = null;
 
-  constructor(host: HTMLElement, hooks: OverlayHooks, pw: number, ph: number) {
-    this.host = host;
+  constructor(viewportEl: HTMLElement, hooks: OverlayHooks, camera: Camera) {
+    this.viewportEl = viewportEl;
     this.hooks = hooks;
-    this.pw = pw;
-    this.ph = ph;
+    this.camera = camera;
 
     this.box = document.createElement('div');
     this.box.className = 'sel-box';
@@ -88,7 +102,7 @@ export class SelectionOverlay {
     this.box.addEventListener('pointermove', this.onMove);
     this.box.addEventListener('pointerup', this.onUp);
     this.box.addEventListener('pointercancel', this.onUp);
-    host.append(this.box);
+    viewportEl.append(this.box);
   }
 
   get visible(): boolean {
@@ -99,8 +113,9 @@ export class SelectionOverlay {
     return this.drag != null;
   }
 
-  show(frame: Frame, opts: OverlayOptions): void {
+  show(frame: Frame, opts: OverlayOptions, page: OverlayPage): void {
     this.frame = { ...frame };
+    this.page = page;
     this.opts = opts;
     this.box.hidden = false;
     this.box.classList.toggle('sel-box--pass', opts.passThrough);
@@ -116,13 +131,14 @@ export class SelectionOverlay {
   hide(): void {
     this.box.hidden = true;
     this.frame = null;
+    this.page = null;
     this.drag = null;
   }
 
-  /** Repositions to a new frame without changing the handle set (e.g. as text grows while typing). */
-  update(frame: Frame): void {
-    if (this.box.hidden) return;
-    this.frame = { ...frame };
+  /** Repositions to a new frame without changing the handle set (e.g. as text grows while typing), or just re-places the current frame against a fresh camera (pan/zoom changed). */
+  update(frame?: Frame): void {
+    if (this.box.hidden || !this.page) return;
+    if (frame) this.frame = { ...frame };
     this.place();
   }
 
@@ -132,26 +148,25 @@ export class SelectionOverlay {
 
   private place(): void {
     const f = this.frame;
-    if (!f) return;
+    const page = this.page;
+    if (!f || !page) return;
+    const z = this.camera.zoom;
+    const [left, top] = worldToScreen(this.camera, page.origin.x + f.x, page.origin.y + f.y);
     const s = this.box.style;
-    s.left = `${f.x}px`;
-    s.top = `${f.y}px`;
-    s.width = `${f.w}px`;
-    s.height = `${f.h}px`;
+    s.left = `${left}px`;
+    s.top = `${top}px`;
+    s.width = `${f.w * z}px`;
+    s.height = `${f.h * z}px`;
     s.transform = f.rot ? `rotate(${f.rot}rad)` : '';
   }
 
+  /** Screen (viewport, client) coordinates → this selection's page-local units. */
   private toPage(e: PointerEvent): [number, number] {
-    const r = this.host.getBoundingClientRect();
-    return [
-      (e.clientX - r.left) * (this.pw / r.width),
-      (e.clientY - r.top) * (this.ph / r.height),
-    ];
-  }
-
-  /** Screen px per page unit for the page this overlay is on — the same ratio toPage() already reverses, exposed so a screen-px tolerance (TAP_SLOP) can be converted to page units without a separate zoom parameter threaded in from outside. */
-  private zoom(): number {
-    return this.host.getBoundingClientRect().width / this.pw;
+    const page = this.page;
+    if (!page) return [0, 0];
+    const r = this.viewportEl.getBoundingClientRect();
+    const [wx, wy] = screenToWorld(this.camera, e.clientX - r.left, e.clientY - r.top);
+    return [wx - page.origin.x, wy - page.origin.y];
   }
 
   private onDown = (e: PointerEvent): void => {
@@ -219,21 +234,21 @@ export class SelectionOverlay {
       return;
     }
     // A body drag (kind 'move') that traveled less than TAP_SLOP (converted
-    // from its screen-px meaning via zoom(), like every other on-screen
-    // tolerance in this codebase — a fixed page-unit comparison would be
-    // tighter in screen terms the more zoomed out the view is) still counts
-    // as a tap, not a drag — matches every other tap-vs-drag decision in the
-    // canvas layer. Real pointer input essentially never reports pixel-exact
-    // coordinates between down and up (especially on a fast second tap);
-    // without this tolerance that residual noise read as an intentional move
-    // and got permanently committed via onDragEnd/endTransform instead of
-    // ever reaching onTap. Resize/rotate handles are unaffected — 'move' is
-    // the only kind whose x/y can differ from the press start without
-    // w/h/rot also changing.
+    // from its screen-px meaning via the camera's own zoom, like every other
+    // on-screen tolerance in this codebase — a fixed page-unit comparison
+    // would be tighter in screen terms the more zoomed out the view is) still
+    // counts as a tap, not a drag — matches every other tap-vs-drag decision
+    // in the canvas layer. Real pointer input essentially never reports
+    // pixel-exact coordinates between down and up (especially on a fast
+    // second tap); without this tolerance that residual noise read as an
+    // intentional move and got permanently committed via onDragEnd/
+    // endTransform instead of ever reaching onTap. Resize/rotate handles are
+    // unaffected — 'move' is the only kind whose x/y can differ from the
+    // press start without w/h/rot also changing.
     const tapMove =
       d.kind === 'move' &&
       this.frame &&
-      Math.hypot(this.frame.x - d.start.x, this.frame.y - d.start.y) < TAP_SLOP / this.zoom();
+      Math.hypot(this.frame.x - d.start.x, this.frame.y - d.start.y) < TAP_SLOP / this.camera.zoom;
     const moved =
       !tapMove &&
       this.frame &&
