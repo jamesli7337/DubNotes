@@ -5,7 +5,7 @@ import type { GuideKind } from '../canvas/guide';
 import { PageCanvas, TAPE_MIN } from '../canvas/page-canvas';
 import type { Op } from '../canvas/page-canvas';
 import { SelectionOverlay } from '../canvas/selection';
-import { DEFAULT_PAPER, PAGE_W, pageH, pageW } from '../const';
+import { DEFAULT_PAPER, DPR, PAGE_W, pageH, pageW } from '../const';
 import { store } from '../store';
 import {
   addCustomColor,
@@ -142,6 +142,16 @@ class NotebookView {
   private overlay!: SelectionOverlay;
   /** Which page's selection the shared overlay is currently showing, if any — its onDragStart/onDrag/onDragEnd/onTap hooks route to this page's own PageCanvas. */
   private overlayPc: PageCanvas | null = null;
+  /**
+   * A shared, viewport-sized canvas (sibling of `.nb-camera`, like the
+   * selection overlay) that a page's own live drag preview paints onto
+   * instead of that page's own bounded view canvas — see PageCanvas's
+   * showDragPreview hook doc comment for why. Sized/positioned to the
+   * viewport, not any one page, so a dragged item stays visible regardless
+   * of which page's screen area it's currently over.
+   */
+  private dragPreviewCanvas!: HTMLCanvasElement;
+  private dragPreviewCtx: CanvasRenderingContext2D | null = null;
 
   private readonly pcByPage = new Map<string, PageCanvas>();
   private readonly wrapById = new Map<string, HTMLElement>();
@@ -225,6 +235,16 @@ class NotebookView {
     }
   };
 
+  /** Sizes the shared drag-preview canvas to the current viewport — bound so the same reference can be added to and removed from `window`, same as repositionCallout. */
+  private readonly layoutDragPreviewCanvas = (): void => {
+    const w = this.scrollEl.clientWidth;
+    const h = this.scrollEl.clientHeight;
+    this.dragPreviewCanvas.width = w * DPR;
+    this.dragPreviewCanvas.height = h * DPR;
+    this.dragPreviewCanvas.style.width = `${w}px`;
+    this.dragPreviewCanvas.style.height = `${h}px`;
+  };
+
   private readonly onKey: (e: KeyboardEvent) => void;
   private readonly onLeave: () => void;
 
@@ -291,6 +311,7 @@ class NotebookView {
       window.removeEventListener('keydown', this.onKey);
       window.removeEventListener('hashchange', this.onLeave);
       window.removeEventListener('resize', this.repositionCallout);
+      window.removeEventListener('resize', this.layoutDragPreviewCanvas);
       this.hideSelectionCallout();
       this.hideTapePopover();
       this.deactivateAll(); // commit an open text edit before the canvases go away
@@ -436,7 +457,10 @@ class NotebookView {
     this.toolsEl.append(this.toolsTopEl, this.toolsOptionsEl);
     this.scrollEl = el('div', { class: 'nb-scroll' });
     this.cameraEl = el('div', { class: 'nb-camera' });
-    this.scrollEl.append(this.cameraEl);
+    this.dragPreviewCanvas = el('canvas', { class: 'nb-drag-preview' }) as HTMLCanvasElement;
+    this.dragPreviewCtx = this.dragPreviewCanvas.getContext('2d');
+    this.scrollEl.append(this.cameraEl, this.dragPreviewCanvas);
+    window.addEventListener('resize', this.layoutDragPreviewCanvas);
     this.overlay = new SelectionOverlay(
       this.scrollEl,
       {
@@ -488,6 +512,9 @@ class NotebookView {
     view.append(bar, this.toolsEl, this.scrollEl, this.imageInput, this.pdfInput);
     this.aiMode.mountPanel(view); // fixed-position, so it overlays regardless of where it sits in the DOM
     this.root.replaceChildren(view);
+    // has to wait until scrollEl is actually attached and laid out —
+    // clientWidth/Height (and so the canvas's own pixel size) read 0 before that.
+    this.layoutDragPreviewCanvas();
 
     this.renderTools();
     this.syncHistory();
@@ -519,6 +546,35 @@ class NotebookView {
     this.overlay.update();
     this.repositionCallout();
     this.updateVisiblePages();
+  }
+
+  /**
+   * Prepares the shared drag-preview canvas for `pc`'s own page-local unit
+   * coordinates: clears it, then sets a transform so drawing with `pc`'s own
+   * page-local units lands at the right screen position — the same
+   * scale-then-translate the camera applies to `.nb-camera` via CSS, just
+   * done with a canvas transform instead, and folding in `pc`'s own page
+   * origin (that page's own offsetLeft/offsetTop within `.nb-camera`, i.e.
+   * its world position) and DPR. See PageCanvas.showDragPreview's own doc
+   * comment for why this exists instead of painting on `pc`'s own canvas.
+   */
+  private showDragPreview(pc: PageCanvas): CanvasRenderingContext2D | null {
+    const ctx = this.dragPreviewCtx;
+    if (!ctx) return null;
+    const pageEl = this.wrapById.get(pc.page.id)?.querySelector<HTMLElement>('.page');
+    if (!pageEl) return null;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, this.dragPreviewCanvas.width, this.dragPreviewCanvas.height);
+    const { x, y, zoom } = this.camera;
+    const s = zoom * DPR;
+    ctx.setTransform(s, 0, 0, s, (pageEl.offsetLeft - x) * s, (pageEl.offsetTop - y) * s);
+    return ctx;
+  }
+
+  /** Clears the shared drag-preview canvas — see PageCanvas.hideDragPreview's own doc comment for when this is called. */
+  private hideDragPreview(): void {
+    this.dragPreviewCtx?.setTransform(1, 0, 0, 1, 0, 0);
+    this.dragPreviewCtx?.clearRect(0, 0, this.dragPreviewCanvas.width, this.dragPreviewCanvas.height);
   }
 
   /** The least `camera.y` allowed: page 1's own top can be dragged down to at most this many *world* units below the viewport top — i.e. `TOP_CLEARANCE` screen px of resting clearance under the dock, at the current zoom. */
@@ -703,8 +759,22 @@ class NotebookView {
           e.preventDefault(); // own the whole gesture until every touch lifts — see doc comment above
           if (e.touches.length < 2) return; // no 2-touch baseline right now: hold position, keep suppressing native scroll
           const p = this.pinch;
-          const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-          const my = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+          const rawMx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
+          const rawMy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+          // Low-pass the midpoint (exponential smoothing against p.cx/p.cy,
+          // the previous frame's already-smoothed value) before using it for
+          // either the zoom anchor or the pan delta below — real touch input
+          // never reports a perfectly stationary midpoint even for a pinch
+          // the user intends to hold centred, and that sub-pixel sensor noise
+          // was landing directly in camera.x/y every frame, unfiltered,
+          // reading as a visible side-to-side jiggle. An isolated noisy
+          // sample now only nudges the tracked midpoint a fraction of the
+          // way toward it; a real, sustained movement (many frames in the
+          // same direction) still catches up within a couple of frames —
+          // imperceptible at typical touchmove sampling rates.
+          const MIDPOINT_SMOOTHING = 0.5;
+          const mx = p.cx + (rawMx - p.cx) * MIDPOINT_SMOOTHING;
+          const my = p.cy + (rawMy - p.cy) * MIDPOINT_SMOOTHING;
           this.setZoom((p.z0 * dist(e.touches)) / p.d0, { x: mx, y: my });
           this.camera.x -= (mx - p.cx) / this.camera.zoom; // pan with the midpoint
           this.camera.y -= (my - p.cy) / this.camera.zoom;
@@ -804,8 +874,17 @@ class NotebookView {
     s.addEventListener('pointermove', (e) => {
       const p = this.handPan;
       if (!p || e.pointerId !== p.pointerId) return;
-      this.camera.x = p.camX - (e.clientX - p.x) / this.camera.zoom;
-      this.camera.y = p.camY - (e.clientY - p.y) / this.camera.zoom;
+      // Unlike touch-pan and wheel-pan, this path was landing the camera
+      // straight from the pointer delta with no clampCamera call, so a mouse
+      // drag with the hand tool could push it arbitrarily far past the
+      // content's actual bounds with no snap-back on release — leaving
+      // nothing on screen for a subsequent lasso (or anything else) to hit.
+      const clamped = this.clampCamera(
+        p.camX - (e.clientX - p.x) / this.camera.zoom,
+        p.camY - (e.clientY - p.y) / this.camera.zoom
+      );
+      this.camera.x = clamped.x;
+      this.camera.y = clamped.y;
       this.applyCamera();
     });
     const end = (e: PointerEvent): void => {
@@ -952,6 +1031,13 @@ class NotebookView {
     let autoscrollRaf = 0;
     const AUTOSCROLL_EDGE = 56;
     const AUTOSCROLL_SPEED = 12;
+    // `scroller` is either `this.scrollEl` (the main notebook view, which
+    // hasn't been a real scrolling element since the camera migration — see
+    // its own CSS comment) or the page manager's own `.pagemgr__grid` (a
+    // separate, still genuinely-scrollable surface the migration never
+    // touched). Writing scrollTop on the former is now a silent no-op, which
+    // is exactly what broke this for reordering pages in the main view.
+    const isCameraScroller = scroller === this.scrollEl;
 
     const autoscrollTick = (): void => {
       if (!dragCtx) {
@@ -960,8 +1046,16 @@ class NotebookView {
       }
       const r = scroller.getBoundingClientRect();
       const y = dragCtx.lastClientY;
-      if (y < r.top + AUTOSCROLL_EDGE) scroller.scrollTop -= AUTOSCROLL_SPEED;
-      else if (y > r.bottom - AUTOSCROLL_EDGE) scroller.scrollTop += AUTOSCROLL_SPEED;
+      const dir = y < r.top + AUTOSCROLL_EDGE ? -1 : y > r.bottom - AUTOSCROLL_EDGE ? 1 : 0;
+      if (dir !== 0) {
+        if (isCameraScroller) {
+          const next = this.clampCamera(this.camera.x, this.camera.y + (dir * AUTOSCROLL_SPEED) / this.camera.zoom);
+          this.camera.y = next.y;
+          this.applyCamera();
+        } else {
+          scroller.scrollTop += dir * AUTOSCROLL_SPEED;
+        }
+      }
       autoscrollRaf = requestAnimationFrame(autoscrollTick);
     };
 
@@ -2180,6 +2274,8 @@ class NotebookView {
             this.overlayPc = null;
           }
         },
+        showDragPreview: (p) => this.showDragPreview(p),
+        hideDragPreview: () => this.hideDragPreview(),
       },
       this.camera
     );

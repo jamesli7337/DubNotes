@@ -1513,6 +1513,19 @@ select {
   transform-origin: 0 0;
   will-change: transform;
 }
+/* Shared, viewport-sized surface a page's own live drag preview paints onto
+   instead of that page's own bounded canvas (see PageCanvas.showDragPreview's
+   own doc comment) — a sibling of .nb-camera, not a descendant, so it's never
+   clipped to any one page's own width/height. Never interactive (the drag
+   itself is still driven by .sel-box, above it); z-index keeps it above
+   every normal page (which have no z-index of their own) but below .guide
+   (2) and .sel-box (3), so handles/rulers stay grabbable over it. */
+.nb-drag-preview {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+}
 /* --pw/--ph: this page's own size (page units), set inline per page-wrap
    (buildPageWrap) from pageW/pageH — defaults here cover a page with no
    inline override (shouldn't happen, but keeps these rules self-contained).

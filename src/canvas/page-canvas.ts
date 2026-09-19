@@ -112,6 +112,21 @@ export interface PageHooks {
   updateSelection: (pc: PageCanvas, frame: Frame) => void;
   /** Hides the shared overlay — a no-op if it's currently showing a *different* page's selection (see onSelectionFrame's own doc comment for why that distinction matters). */
   hideSelection: (pc: PageCanvas) => void;
+  /**
+   * Returns a context to paint this tick's live drag preview onto, already
+   * cleared and transformed so drawing with `pc`'s own page-local unit
+   * coordinates lands at the right screen position — a shared, notebook-
+   * level canvas that isn't bounded to any one page's own width/height,
+   * unlike `pc`'s own view canvas. Without this, a dragged item's ink is
+   * silently discarded by the canvas API the moment its position moves
+   * outside the *source* page's own pixel bitmap — which happens well
+   * before the item visually reaches wherever it's being dropped, since
+   * that's a completely different page's own canvas. Returns null if the
+   * shared canvas isn't available (shouldn't normally happen).
+   */
+  showDragPreview: (pc: PageCanvas) => CanvasRenderingContext2D | null;
+  /** Clears the shared drag-preview canvas — called once a drag ends (drop, cross-page move, or cancel), so no stale frame is left sitting on top of everything. */
+  hideDragPreview: (pc: PageCanvas) => void;
 }
 
 type CoalescingEvent = PointerEvent & { getCoalescedEvents?: () => PointerEvent[] };
@@ -437,8 +452,15 @@ export class PageCanvas {
     }
     if (this.lineEdit) this.paintLineEdit(v);
     if (this.xfLive) {
+      // painted on the shared, notebook-level drag-preview canvas, not this
+      // page's own `v` — this page's own canvas is a fixed bitmap bounded to
+      // its own width/height, so a dragged item's ink would otherwise be
+      // silently clipped away the moment it crossed into a different page's
+      // screen area, well before it's actually dropped there. See
+      // showDragPreview's own doc comment.
       const editing = this.editor?.el.id;
-      for (const it of this.xfLive) if (it.id !== editing) this.paintItem(v, it); // the textarea shows that one
+      const dv = this.hooks.showDragPreview(this);
+      if (dv) for (const it of this.xfLive) if (it.id !== editing) this.paintItem(dv, it); // the textarea shows that one
     }
     if (this.mode === 'tape' && this.live.length > 1) {
       drawElement(v, this.tapeFromDrag(), this.page.paper, 0.7); // preview of the strip being laid
@@ -1848,6 +1870,7 @@ export class PageCanvas {
     const lassoOrig = this.xfLassoOrig;
     this.xfOrig = this.xfFrame = this.xfCur = this.xfLive = null;
     this.xfLassoOrig = null;
+    this.hooks.hideDragPreview(this); // whatever was drawn there for this drag no longer applies, whichever way it ended
     if (!orig || !from) return;
 
     let crossedPage = false;
