@@ -100,6 +100,15 @@ export interface PageHooks {
   /** A cross-page drag (see endTransform) just changed another page's items directly in the store — repaint that page's own PageCanvas if it's mounted (a no-op otherwise; it'll read the fresh store on its next mount). */
   refreshPage: (pageId: string) => void;
   /**
+   * A lasso selection's items just crossed onto another page (see
+   * endTransform's cross-page branch) — `ids` and `lassoPath` are already
+   * translated into the destination page's own local space. Establishes the
+   * selection there so its dashed outline (and selection box) keep tracking
+   * the moved content instead of vanishing along with the source page's own
+   * selection. Only called when the drag started as a lasso selection.
+   */
+  adoptCrossPageLasso: (pageId: string, ids: string[], lassoPath: number[][]) => void;
+  /**
    * Shows (or re-places) this page's selection in the single, notebook-level
    * SelectionOverlay — there's one shared instance, not one per page, so a
    * selection dragged across a page boundary never has to fight a per-page
@@ -522,8 +531,13 @@ export class PageCanvas {
     }
     v.lineCap = 'round';
     v.lineJoin = 'round';
-    v.setLineDash([6, 4]);
-    v.lineWidth = 1.5;
+    // dash size/spacing and line width are screen-px constants, counter-
+    // scaled for zoom like every other fixed-on-screen-size UI constant in
+    // this file (see zoom()'s own doc comment) — otherwise the dashes grow
+    // or shrink with the page instead of staying a uniform on-screen dotted line
+    const z = this.zoom();
+    v.setLineDash([6 / z, 4 / z]);
+    v.lineWidth = 1.5 / z;
     v.strokeStyle = 'rgba(37, 99, 235, 0.9)';
     v.stroke();
     v.restore();
@@ -1265,9 +1279,9 @@ export class PageCanvas {
     return da <= db ? 'a' : 'b';
   }
 
-  /** The view zoom changed: the pending line's handles are sized for the screen, so repaint them. */
+  /** The view zoom changed: the pending line's handles and the lasso outline's dashes are both sized for the screen, so repaint them. */
   zoomChanged(): void {
-    if (this.lineEdit) this.schedule();
+    if (this.lineEdit || this.lastLassoPath) this.schedule();
   }
 
   /** Adds the pending line to the page as one undo step; a no-op when there is none. */
@@ -1627,6 +1641,16 @@ export class PageCanvas {
     this.hooks.onSelection(this, this.selected.size);
   }
 
+  /** Called via the shared hooks by the source page's own endTransform when a lasso selection's items just crossed onto this page — `ids`/`lassoPath` are already in this page's own local space. */
+  adoptCrossPageLasso(ids: string[], lassoPath: number[][]): void {
+    this.setSelection(ids, lassoPath);
+    // setSelection (via showSelection) only shows the DOM selection box —
+    // painting the canvas-drawn dashed outline itself needs its own
+    // scheduled frame, same as a fresh lasso selection does (see the
+    // pointerup lasso branch's own comment on this)
+    this.schedule();
+  }
+
   clearSelection(): void {
     this.commitEdit();
     if (!this.selected.size) {
@@ -1892,6 +1916,16 @@ export class PageCanvas {
         store.addItems(moved);
         this.hooks.onOp({ kind: 'move-page', fromPageId: this.page.id, toPageId: dest.id, before: orig, after: moved });
         this.hooks.refreshPage(dest.id);
+        if (lassoOrig) {
+          // same remap the non-crossed branch below would do (frozen pre-drag
+          // snapshot → this drag's final frame, still in source-page-local
+          // units), then the same dest.dx/dest.dy translation just applied to
+          // `moved` above, to land in the destination page's own local space
+          const movedLasso = lassoOrig
+            .map((p) => mapPoint(p[0], p[1], from, frame))
+            .map((p) => [p[0] + dest.dx, p[1] + dest.dy]);
+          this.hooks.adoptCrossPageLasso(dest.id, moved.map((it) => it.id), movedLasso);
+        }
         // the dragged items are no longer this page's — drop the selection
         // (and any lasso outline) instead of resurrecting it below
         this.setSelection([]);

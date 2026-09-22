@@ -121,7 +121,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
   const apiKey = process.env.GEMINI_API_KEY;
   if (!apiKey) {
-    res.status(500).json({ error: 'Server misconfigured: GEMINI_API_KEY is not set.' });
+    res.status(500).json({ error: 'Server misconfigured: the AI API key is not set.' });
     return;
   }
 
@@ -189,14 +189,17 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       body: JSON.stringify(geminiBody),
     });
   } catch {
-    res.status(502).json({ error: 'Could not reach Gemini.' });
+    res.status(502).json({ error: 'Could not reach the AI service.' });
     return;
   }
 
   if (!upstream.ok) {
+    // Passed through as this response's own status (rather than a flat 502)
+    // so the client can tell a 503 (temporary overload — see gemini-client.ts's
+    // retry) apart from anything else without parsing the message text.
     // Gemini's own error body may include request details worth not echoing
     // back verbatim to an untrusted caller; a short status-coded message is enough.
-    res.status(502).json({ error: `Gemini request failed (${upstream.status}).` });
+    res.status(upstream.status).json({ error: `Request failed (${upstream.status}).` });
     return;
   }
 
@@ -204,13 +207,13 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   try {
     data = await upstream.json();
   } catch {
-    res.status(502).json({ error: 'Gemini returned an unreadable response.' });
+    res.status(502).json({ error: 'Received an unreadable response.' });
     return;
   }
 
   const text = extractText(data);
   if (text == null) {
-    res.status(502).json({ error: 'Gemini returned no text.' });
+    res.status(502).json({ error: 'Received no response text.' });
     return;
   }
 

@@ -615,6 +615,12 @@ class NotebookView {
     return { x: clampedX, y: clamp(y, this.minCameraY(), this.maxCameraY()) };
   }
 
+  /** Whether the horizontal axis has any real pan range at all — false in the common case (page narrower than the viewport), where clampCamera above collapses left/right to one fixed point rather than a genuine [min, max]. The soft-clamp paths (one-finger rubber-band, pinch pan, momentum) use this to skip their elastic drag-then-spring-back treatment entirely on that axis: with no range, there's no edge to overscroll, so it should just stay put instead of drifting and snapping back. */
+  private hasHorizontalRange(): boolean {
+    const { left, right } = this.contentWorldXBounds();
+    return right - left > this.scrollEl.clientWidth / this.camera.zoom;
+  }
+
   /**
    * Keeps whatever's under `anchor` (viewport/client coordinates; defaults to
    * the scroller's own centre) fixed on screen across the zoom change: convert
@@ -776,7 +782,12 @@ class NotebookView {
           const mx = p.cx + (rawMx - p.cx) * MIDPOINT_SMOOTHING;
           const my = p.cy + (rawMy - p.cy) * MIDPOINT_SMOOTHING;
           this.setZoom((p.z0 * dist(e.touches)) / p.d0, { x: mx, y: my });
-          this.camera.x -= (mx - p.cx) / this.camera.zoom; // pan with the midpoint
+          // setZoom's own clamp above already hard-writes camera.x to the
+          // single fixed point every frame when there's no horizontal range
+          // (the common narrower-than-viewport case) — applying the
+          // midpoint's x delta on top of that would just reintroduce a
+          // small drift each frame instead of leaving it locked.
+          if (this.hasHorizontalRange()) this.camera.x -= (mx - p.cx) / this.camera.zoom; // pan with the midpoint
           this.camera.y -= (my - p.cy) / this.camera.zoom;
           this.applyCamera();
           p.cx = mx;
@@ -794,7 +805,11 @@ class NotebookView {
         const raw = { x: this.camera.x - dx, y: this.camera.y - dy };
         const clamped = this.clampCamera(raw.x, raw.y);
         // rubber-band: resist past the content bounds rather than hard-stopping
-        this.camera.x = clamped.x + (raw.x - clamped.x) * 0.35;
+        // — but only where there's a real edge to resist past; with no
+        // horizontal range at all, clamped.x is a single fixed point with
+        // nothing on either side, so it stays locked there instead of
+        // drifting under the drag and springing back on release.
+        this.camera.x = this.hasHorizontalRange() ? clamped.x + (raw.x - clamped.x) * 0.35 : clamped.x;
         this.camera.y = clamped.y + (raw.y - clamped.y) * 0.35;
         this.applyCamera();
         p.vx = p.vx * 0.8 + (dx / dt) * 0.2; // smoothed velocity estimate, for momentum on lift
@@ -819,8 +834,14 @@ class NotebookView {
       this.pinch = null;
       this.pan = null;
       if (!p) return;
-      const speed = Math.hypot(p.vx, p.vy);
-      if (speed > 0.02) this.startMomentum(p.vx, p.vy);
+      // p.vx tracks the finger's raw horizontal speed regardless of whether
+      // the drag above actually moved camera.x (it's locked when there's no
+      // horizontal range) — feeding it to momentum unfiltered would still
+      // coast the locked axis away from its fixed point and spring it back,
+      // the same symptom one frame later.
+      const vx = this.hasHorizontalRange() ? p.vx : 0;
+      const speed = Math.hypot(vx, p.vy);
+      if (speed > 0.02) this.startMomentum(vx, p.vy);
       else {
         const clamped = this.clampCamera(this.camera.x, this.camera.y);
         if (clamped.x !== this.camera.x || clamped.y !== this.camera.y) this.startMomentum(0, 0); // settle leftover rubber-band overshoot even with no coasting velocity
@@ -947,11 +968,33 @@ class NotebookView {
       thumbH = Math.min(trackH, Math.max(MIN_THUMB, shownFraction * trackH));
       thumb.style.top = `${track.top + INSET}px`;
       thumb.style.height = `${thumbH}px`;
-      thumb.style.right = `${window.innerWidth - track.right + 3}px`;
+      // `left`, computed from track.right alone, rather than a `right` built
+      // from `window.innerWidth - track.right` — that mixed two separate
+      // measurements that can briefly disagree during iOS's app-switcher
+      // transition (the window is reported at its real size while
+      // `.nb-scroll` itself is transiently rendered narrower, or vice
+      // versa), which is what put the thumb at screen centre after
+      // backgrounding: `right` baked in whichever mismatch was live the
+      // instant this ran, and nothing recomputed it once the mismatch
+      // cleared. `left` needs no second measurement to disagree with.
+      thumb.style.left = `${track.right - thumb.offsetWidth - INSET / 2}px`;
       reposition();
     };
     this.layoutScrollbarThumb = layout;
     window.addEventListener('resize', layout);
+    // Backstops for the same class of bug: `.nb-scroll`'s own box can change
+    // shape (briefly, or for real) without a matching `window.resize` ever
+    // firing — iOS doesn't reliably dispatch one when returning from the
+    // app switcher. The ResizeObserver catches any actual change to the
+    // track's rendered box (including the transient narrowing during
+    // backgrounding and the restore afterward); visibilitychange/pageshow
+    // are the direct backstop for iOS specifically not firing resize on
+    // return to foreground.
+    new ResizeObserver(() => layout()).observe(s);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) layout();
+    });
+    window.addEventListener('pageshow', () => layout());
     layout();
 
     let drag: { pointerId: number; startY: number; startCamY: number; trackH: number; thumbH: number } | null = null;
@@ -2261,6 +2304,9 @@ class NotebookView {
         onTapeTap: (p, tapeId, frame) => this.showTapePopover(p, tapeId, frame),
         isAiActive: () => this.aiMode.isActive(),
         refreshPage: (pageId) => this.rebuildIfMounted(pageId),
+        adoptCrossPageLasso: (pageId, ids, lassoPath) => {
+          if (this.mounted.has(pageId)) this.pcByPage.get(pageId)?.adoptCrossPageLasso(ids, lassoPath);
+        },
         showSelection: (p, frame, opts) => {
           this.overlayPc = p;
           this.overlay.show(frame, opts, { origin: { x: pageEl.offsetLeft, y: pageEl.offsetTop }, pw: pageW(p.page), ph: pageH(p.page) });
