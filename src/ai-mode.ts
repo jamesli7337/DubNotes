@@ -19,17 +19,6 @@
  * renders in a single slide-out chat panel (`mountPanel`/`renderConversation`)
  * rather than as page content, so the conversation reads the same regardless
  * of which page you're looking at or scroll to.
- *
- * Holding on a reply in that panel branches a separate, full-screen thread
- * scoped to it (`ai-thread.ts`) — typed or handwritten (transcribed to text
- * first) follow-ups, one level deep, stored as ordinary `aiConversations`
- * rows tagged with `branchedFromEntryId` rather than a whole parallel data
- * structure. See `bindHold`/`openThreadFor`/`threadRoots` below. This module
- * imports `openAiThread` from `ai-thread.ts`, so nothing shared between the
- * two (`callGemini`, `AI_COLOR`) is *also* imported the other way — both
- * live in their own dependency-free modules (`gemini-client.ts`, `const.ts`)
- * instead, the same "injected/relocated rather than imported" avoidance
- * `AiModeHost` already uses for its own would-be cycle with notebook.ts.
  */
 import { el } from './ui/dom';
 import { icon } from './ui/icon';
@@ -38,23 +27,14 @@ import { renderItemsImage, renderPageRegionImage } from './export/raster';
 import { store } from './store';
 import { clearAiEntries, getAiEntries, putAiEntry } from './db';
 import { renderAiReply } from './ai-render';
-import { openAiThread } from './ai-thread';
 import { callGemini } from './gemini-client';
-import { AI_COLOR } from './const';
 import type { Op } from './canvas/page-canvas';
 import type { AiConversationEntry, Page } from './types';
 import { uid } from './util';
 
-// re-exported so page-canvas.ts's existing `import { AI_COLOR } from '../ai-mode'`
-// keeps working — the value itself now lives in const.ts (a dependency-free
-// module) so ai-thread.ts can use it without importing this file at all; see
-// this module's own doc comment on avoiding a cycle with ai-thread.ts.
-export { AI_COLOR };
-
-/** How long a still press on a reply takes to open a branched thread from it — long enough that a scroll/swipe (which moves) never fires it, short enough to feel deliberate rather than sluggish. */
-const THREAD_HOLD_MS = 550;
-/** Pointer movement past this (px) while holding cancels it — the same "was this actually a hold, or a drag that started here" check as the canvas's own TAP_SLOP-style gestures, just local to the panel since nothing else here needs it. */
-const HOLD_SLOP = 10;
+/** The one AI accent colour — the page border and in-progress ink both use
+ * exactly this, so "AI mode" reads as one consistent identity. */
+export const AI_COLOR = '#6d28d9';
 
 /** One turn's worth of conversation, shown in the panel. The persisted shape
  * (`AiConversationEntry`) plus a transient in-memory-only flag — an entry is
@@ -101,8 +81,6 @@ export class AiMode {
   private sendingPageId: string | null = null;
   private readonly pages = new Map<string, AiPageState>();
   private conversation: ConversationEntry[] = [];
-  /** ids of main-conversation entries that already have a branched thread — drives the "reopen thread" badge in renderConversation (see AiConversationEntry.branchedFromEntryId). */
-  private threadRoots = new Set<string>();
   private panelEl: HTMLElement | null = null;
   private panelBody: HTMLElement | null = null;
   private panelOpen = false;
@@ -115,11 +93,10 @@ export class AiMode {
     private readonly host: AiModeHost
   ) {}
 
-  /** Loads this notebook's persisted chat history, then repaints the panel if it's already mounted. `getAiEntries` returns main-conversation and thread entries mixed (they share the same notebookId index) — split here on `branchedFromEntryId` rather than adding a second db query. */
+  /** Loads this notebook's persisted chat history, then repaints the panel if it's already mounted. */
   async loadConversation(): Promise<void> {
     const rows = await getAiEntries(this.notebookId);
-    this.conversation = rows.filter((r) => !r.branchedFromEntryId).map((r) => ({ ...r, pending: false }));
-    this.threadRoots = new Set(rows.filter((r) => r.branchedFromEntryId).map((r) => r.branchedFromEntryId!));
+    this.conversation = rows.map((r) => ({ ...r, pending: false }));
     this.renderConversation();
   }
 
@@ -498,7 +475,6 @@ export class AiMode {
       }
 
       ({ text, isError } = await callGemini({
-        kind: 'ask',
         question: { image: question.base64, mimeType: question.mimeType },
         context: { image: context.base64, mimeType: context.mimeType },
       }));
@@ -542,76 +518,8 @@ export class AiMode {
       else if (entry.isError) replyEl.textContent = entry.text; // an app-generated message, not Gemini markdown/LaTeX
       else renderAiReply(replyEl, entry.text);
       row.append(replyEl);
-      // A pending entry has no persisted reply yet to branch from — hold/reopen
-      // only ever apply once it's resolved (below), same as everywhere else
-      // that treats a pending entry as "not really here yet".
-      if (!entry.pending) {
-        this.bindHold(replyEl, () => this.openThreadFor(entry));
-        if (this.threadRoots.has(entry.id)) {
-          const badge = el('button', { class: 'ai-panel__thread-badge', type: 'button', title: 'Open thread' });
-          badge.textContent = 'Thread ›';
-          badge.addEventListener('click', () => this.openThreadFor(entry));
-          row.append(badge);
-        }
-      }
       body.append(row);
     }
     body.scrollTop = body.scrollHeight;
-  }
-
-  /**
-   * Opens the full-screen thread branched from `entry` (creating it, if this
-   * is the first hold on it — see ai-thread.ts's own doc comment for why
-   * that's just "open the panel with zero entries yet", not a separate
-   * step). `onChanged` fires once the thread gains its first entry, so the
-   * "Thread ›" badge appears without waiting for the next full reload.
-   */
-  private openThreadFor(entry: ConversationEntry): void {
-    openAiThread({
-      notebookId: this.notebookId,
-      rootEntry: entry,
-      onChanged: () => {
-        this.threadRoots.add(entry.id);
-        this.renderConversation();
-      },
-    });
-  }
-
-  /**
-   * A still `pointerdown` on `el` for THREAD_HOLD_MS runs `onHold` — used to
-   * turn "hold on a reply" into "branch a thread from it" without touching
-   * anything on `.page canvas` at all (this only ever binds to
-   * `.ai-panel__reply` elements inside the DOM chat panel, a completely
-   * separate surface from PageCanvas's own pointer state machine). Cancelled
-   * by any movement past HOLD_SLOP (a scroll/swipe starting here, or the
-   * panel's own bindSwipeThrough drag) or by lifting/leaving early — so a
-   * plain tap keeps doing nothing, exactly as before this existed.
-   */
-  private bindHold(el: HTMLElement, onHold: () => void): void {
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let startX = 0;
-    let startY = 0;
-    const cancel = (): void => {
-      if (timer != null) clearTimeout(timer);
-      timer = null;
-      el.classList.remove('ai-panel__reply--holding');
-    };
-    el.addEventListener('pointerdown', (e) => {
-      cancel();
-      startX = e.clientX;
-      startY = e.clientY;
-      el.classList.add('ai-panel__reply--holding');
-      timer = setTimeout(() => {
-        timer = null;
-        el.classList.remove('ai-panel__reply--holding');
-        onHold();
-      }, THREAD_HOLD_MS);
-    });
-    el.addEventListener('pointermove', (e) => {
-      if (timer != null && Math.hypot(e.clientX - startX, e.clientY - startY) > HOLD_SLOP) cancel();
-    });
-    el.addEventListener('pointerup', cancel);
-    el.addEventListener('pointerleave', cancel);
-    el.addEventListener('pointercancel', cancel);
   }
 }

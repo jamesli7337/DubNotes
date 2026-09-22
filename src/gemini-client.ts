@@ -1,10 +1,4 @@
-/**
- * The one client-side entry point to api/gemini.ts — used by both the main
- * AI-mode flow (ai-mode.ts) and a branched thread's own turns (ai-thread.ts).
- * Kept as its own tiny module, rather than living on either of those two,
- * so neither has to import the other just to reach this — see ai-mode.ts's
- * module doc comment on avoiding that cycle.
- */
+/** The one client-side entry point to api/gemini.ts, used by ai-mode.ts. */
 
 /** Where the built-in Gemini endpoint lives. Same-origin `/api/gemini` by
  * default (set if the static site itself is ever served from the Vercel
@@ -49,9 +43,8 @@ async function callGeminiOnce(body: object): Promise<Attempt> {
 
 /**
  * POSTs one request to the Gemini proxy and normalizes the result to either
- * the reply text or an app-facing error string. `body` is whatever shape
- * api/gemini.ts's `kind` discriminator expects for that request
- * (`{kind:'ask',...}`, `{kind:'transcribe',...}`, `{kind:'thread',...}`).
+ * the reply text or an app-facing error string. `body` is `{question, context}`
+ * — see api/gemini.ts.
  *
  * A 503 (the model temporarily overloaded) is retried automatically, with an
  * increasing delay between attempts, entirely behind this promise — nothing

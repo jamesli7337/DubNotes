@@ -1,9 +1,8 @@
 import { drawBackground, drawElement, loadImage } from '../canvas/elements';
-import type { Drawable } from '../canvas/freehand';
 import { drawStroke } from '../canvas/freehand';
-import { aabb, itemBounds, unionRects } from '../canvas/geom';
+import { itemBounds, unionRects } from '../canvas/geom';
 import { drawTemplate } from '../canvas/templates';
-import { DEFAULT_PAPER, pageH, pageW } from '../const';
+import { pageH, pageW } from '../const';
 import { ensurePdfPage } from '../pdf-render';
 import { store } from '../store';
 import type { Notebook, Page } from '../types';
@@ -118,34 +117,6 @@ export async function renderItemsImage(
     if (isStroke(it)) drawStroke(ctx, it, page.paper);
     else drawElement(ctx, it, page.paper);
   }
-  const dataUrl = c.toDataURL('image/png');
-  return { base64: dataUrl.slice(dataUrl.indexOf(',') + 1), mimeType: 'image/png' };
-}
-
-/**
- * Rasterizes raw in-memory strokes that were never added to `store` — a
- * blank white canvas cropped tightly to their own combined bounds, same
- * approach as `renderItemsImage` but for strokes that don't (and won't)
- * belong to any page: the branched-thread handwriting pad (see
- * ai-thread.ts) draws scratch ink purely for one transcription, then
- * discards it, so there's no `pageId`/`store` to read from. `strokes` must
- * be non-empty. Paper is fixed to `DEFAULT_PAPER` (white) purely to resolve
- * `AUTO_COLOR` if a stroke ever used it — the pad always inks a literal
- * colour, never "auto", so this never actually matters in practice.
- */
-export async function renderStrokesImage(strokes: Drawable[], scale = 1.5): Promise<{ base64: string; mimeType: string }> {
-  const pad = 24;
-  const bounds = unionRects(strokes.map((s) => aabb(s.points, s.size / 2)))!;
-  const c = document.createElement('canvas');
-  c.width = Math.round((bounds.w + pad * 2) * scale);
-  c.height = Math.round((bounds.h + pad * 2) * scale);
-  const ctx = c.getContext('2d');
-  if (!ctx) throw new Error('Could not create a canvas.');
-  ctx.fillStyle = '#ffffff';
-  ctx.fillRect(0, 0, c.width, c.height);
-  ctx.scale(scale, scale);
-  ctx.translate(pad - bounds.x, pad - bounds.y);
-  for (const s of strokes) drawStroke(ctx, s, DEFAULT_PAPER);
   const dataUrl = c.toDataURL('image/png');
   return { base64: dataUrl.slice(dataUrl.indexOf(',') + 1), mimeType: 'image/png' };
 }

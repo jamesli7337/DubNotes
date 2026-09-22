@@ -122,24 +122,11 @@ export interface AiConversationEntry {
   notebookId: string;
   /** the page the turn was captured from — only used to label the entry; the page itself is untouched */
   pageId: string;
-  /** data: URL of the captured region, reused as-is from what was sent to Gemini — '' for a thread entry (no image is captured or kept for those, only text) */
+  /** data: URL of the captured region, reused as-is from what was sent to Gemini */
   thumbnail: string;
   text: string;
   isError: boolean;
   createdAt: number;
-  /** Set only on an entry that belongs to a branched thread: the id of the
-   * main-conversation entry it branched from. Every entry in the same thread
-   * shares this value — it doubles as the thread's own id, since a
-   * main-conversation entry can have at most one branched thread (threads
-   * are one level deep; you can't branch again from inside one). Absent on
-   * a main-conversation entry. (v9) */
-  branchedFromEntryId?: string;
-  /** The turn's question as text. Always set on a thread entry — typed
-   * directly, or transcribed from handwriting (see api/gemini.ts's
-   * 'transcribe' kind) so what was actually asked is visible and
-   * reviewable before it's sent. Always absent on a main-conversation
-   * entry, whose question is implicit in `thumbnail`. (v9) */
-  questionText?: string;
 }
 
 export interface Page {

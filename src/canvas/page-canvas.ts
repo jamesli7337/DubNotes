@@ -469,7 +469,16 @@ export class PageCanvas {
       // showDragPreview's own doc comment.
       const editing = this.editor?.el.id;
       const dv = this.hooks.showDragPreview(this);
-      if (dv) for (const it of this.xfLive) if (it.id !== editing) this.paintItem(dv, it); // the textarea shows that one
+      if (dv) {
+        for (const it of this.xfLive) if (it.id !== editing) this.paintItem(dv, it); // the textarea shows that one
+        // the live-remapped lasso outline (updateTransform keeps
+        // lastLassoPath current every tick) needs the exact same treatment
+        // as the dragged items just above, for the exact same reason: this
+        // page's own `v` is a fixed bitmap bounded to its own width/height,
+        // so the outline would otherwise vanish the moment it crossed into
+        // the gray gap or another page's screen area, well before the drop.
+        if (this.lastLassoPath && this.lastLassoPath.length > 1) this.strokeLassoPath(dv, this.lastLassoPath, true);
+      }
     }
     if (this.mode === 'tape' && this.live.length > 1) {
       drawElement(v, this.tapeFromDrag(), this.page.paper, 0.7); // preview of the strip being laid
@@ -494,12 +503,14 @@ export class PageCanvas {
       // dashed line along the path actually drawn, with no straight segment
       // connecting end to start. A box / circle is a closed figure, so it is.
       this.strokeLassoPath(v, this.lasso, toolState.lassoShape !== 'free');
-    } else if (this.lastLassoPath && this.lastLassoPath.length > 1) {
+    } else if (!this.xfLive && this.lastLassoPath && this.lastLassoPath.length > 1) {
       // decorative echo of the finalized selection's lasso shape (page-space
       // points, so pan/zoom are already handled the same way as the live
       // path above — both are drawn through this same zoom-transformed
       // canvas). Static: it does not track the selection box being dragged
-      // or resized afterwards, and goes stale once that happens.
+      // or resized afterwards, and goes stale once that happens. Only while
+      // not mid-drag — the xfLive block above already painted it on the
+      // shared drag-preview canvas instead for that case (see its comment).
       this.strokeLassoPath(v, this.lastLassoPath, true);
     }
   };

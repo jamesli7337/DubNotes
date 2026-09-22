@@ -3,12 +3,13 @@
 All data lives on-device in IndexedDB database **`noteapp`**, currently at
 **schema version `6`**: object stores `notebooks`, `pages`, `strokes`,
 `elements`, `folders`, `dividers`, `assets`, `aiConversations`, `meta` (schema
-`4` added `assets`; `5` added `aiConversations`; `6` added a
-`branchedFromEntryId` index on `aiConversations`, for branched AI-mode
-threads). The logical **format version** is tracked separately as
-`FORMAT_VERSION` in [`src/db.ts`](src/db.ts) and is currently **`8`** — see
-"AI conversation" below for why `aiConversations` (schema changes included)
-doesn't bump it.
+`4` added `assets`; `5` added `aiConversations`; `6` was a since-removed
+branched-AI-thread feature's index on `aiConversations` — kept at 6 rather
+than reverted, since downgrading a version number a browser may have already
+upgraded past would break it from opening at all). The logical **format
+version** is tracked separately as `FORMAT_VERSION` in
+[`src/db.ts`](src/db.ts) and is currently **`8`** — see "AI conversation"
+below for why `aiConversations` doesn't bump it.
 
 ## Entities
 
@@ -105,42 +106,28 @@ Stored in the `assets` object store, keyed by `id`, with an index on
 when a page needs rendering. Backups carry each asset once, base64-encoded, so
 a 100-page PDF costs its own file size rather than one image per page.
 
-### AI conversation (schema v5; `branchedFromEntryId`/`questionText` schema v6)
+### AI conversation (schema v5)
 
-| field                 | type     | notes                                                |
-| --------------------- | -------- | ----------------------------------------------------- |
-| `id`                  | string   | uuid                                                  |
-| `notebookId`          | string   | owning notebook; deleted with it                      |
-| `pageId`              | string   | the page the turn was captured from — label only, the page's own content is untouched. On a thread entry (see below), copied from the root entry it branched from — still label-only, unused for anything else |
-| `thumbnail`           | string   | `data:` URL of the captured region, reused from what was sent to Gemini. `''` on a thread entry — no image is captured or kept for those, only text |
-| `text`                | string   | Gemini's reply, cleaned of Markdown (or an error message) |
-| `isError`             | boolean  | true if `text` is an error, not a real reply          |
-| `createdAt`           | number   | epoch ms; also the panel's/thread's display order     |
-| `branchedFromEntryId` | string?  | (v6) set only on a thread entry: the id of the main-conversation entry it branched from. Every entry in the same thread shares this value — it doubles as the thread's own id, since one main entry has at most one thread. Absent on a main-conversation entry |
-| `questionText`        | string?  | (v6) the turn's question as text — typed directly, or transcribed from handwriting (see `api/gemini.ts`'s `'transcribe'` request kind), always shown before it's sent. Always set on a thread entry; always absent on a main-conversation entry, whose question is implicit in `thumbnail` |
+| field        | type    | notes                                                |
+| ------------ | ------- | ----------------------------------------------------- |
+| `id`         | string  | uuid                                                  |
+| `notebookId` | string  | owning notebook; deleted with it                      |
+| `pageId`     | string  | the page the turn was captured from — label only, the page's own content is untouched |
+| `thumbnail`  | string  | `data:` URL of the captured region, reused from what was sent to Gemini |
+| `text`       | string  | Gemini's reply, cleaned of Markdown (or an error message) |
+| `isError`    | boolean | true if `text` is an error, not a real reply          |
+| `createdAt`  | number  | epoch ms; also the panel's display order              |
 
-Stored in the `aiConversations` object store, keyed by `id`, with indexes on
-`notebookId` and (v6) `branchedFromEntryId`; read/written directly by
-`src/ai-mode.ts` / `src/ai-thread.ts` (`putAiEntry` / `getAiEntries` /
-`getThreadEntries` / `clearAiEntries` in `src/db.ts`), not through the
-`Store` class other data goes through. **Deliberately excluded from
-`ALL_STORES`**, so it is untouched by backup export/import (`Backup` has no
+Stored in the `aiConversations` object store, keyed by `id`, with an index on
+`notebookId`; read/written directly by `src/ai-mode.ts` (`putAiEntry` /
+`getAiEntries` / `clearAiEntries` in `src/db.ts`), not through the `Store`
+class other data goes through. **Deliberately excluded from `ALL_STORES`**,
+so it is untouched by backup export/import (`Backup` has no
 `aiConversations` field) — it's chat history, not notebook content, and
 importing a backup should not silently wipe every notebook's AI
-conversations (this is also why none of its own field changes bump
-`FORMAT_VERSION`). It's still deleted along with its notebook
+conversations. It's still deleted along with its notebook
 (`deleteNotebookCascade`), and clearable per notebook from the AI panel
-("Clear conversation") — both already notebook-scoped, so thread entries are
-swept along with their notebook's main entries with no extra logic.
-
-**Threads are one level deep.** Holding on a main-conversation reply in the
-AI panel opens a full-screen thread scoped to it (`src/ai-thread.ts`); you
-can type or handwrite (transcribed to text first, then reviewable/editable —
-see `api/gemini.ts`'s `'transcribe'` kind) a follow-up there, but you can't
-branch again from inside an already-open thread. A thread's own Gemini calls
-(`'thread'` request kind) are plain multi-turn text — no images — seeded
-with the root entry's reply as the first turn, so the model has that
-context without re-sending the original page.
+("Clear conversation").
 
 **Trailing-blank invariant:** every notebook always ends with exactly one blank
 page (a page with no strokes). The app appends or removes trailing blank pages to
