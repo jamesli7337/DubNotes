@@ -43,21 +43,30 @@ function chordDeviation(pts: number[][]): number {
 const MIN_TOTAL_LEN = 30;
 /** Minimum chord length (screen px, counter-scaled for zoom) for a shaft to count as a straight candidate. */
 const MIN_CHORD = 20;
-/** Deviation floor (screen px, counter-scaled for zoom) under the 5%-of-chord tolerance, for short lines. */
+/** Deviation floor (screen px, counter-scaled for zoom) under the bow tolerance, for short lines. */
 const MIN_DEVIATION_FLOOR = 5;
+/**
+ * How far a stroke may bow off its own chord and still count as straight, as a
+ * fraction of that chord. Read as an arc: a circular arc's sagitta/chord ratio
+ * is ~0.05 at 23° of sweep, ~0.09 at 41°, 0.21 at a quarter circle and 0.5 at a
+ * semicircle — so this admits a distinctly hand-drawn, slightly bowed line while
+ * staying far below anything a user would read as a curve. Turn it down if arcs
+ * start snapping, up if deliberate lines keep failing to.
+ */
+const MAX_BOW = 0.09;
 
 /**
  * `zoom` converts the screen-px constants above into the page-space units
  * `pts` are measured in, so the same *visually* straight/long line snaps the
  * same way regardless of what zoom level it was drawn at — a short-looking
  * line drawn while zoomed in shouldn't be held to the same page-unit chord
- * length as one drawn zoomed out. The 5%/8% ratios elsewhere are already
+ * length as one drawn zoomed out. MAX_BOW and the 8% tail ratio are already
  * scale-invariant and don't need this.
  */
 function isStraight(pts: number[][], zoom: number): boolean {
   if (pts.length < 2) return false;
   const chord = dist(pts[0], pts[pts.length - 1]);
-  return chord >= MIN_CHORD / zoom && chordDeviation(pts) <= Math.max(0.05 * chord, MIN_DEVIATION_FLOOR / zoom);
+  return chord >= MIN_CHORD / zoom && chordDeviation(pts) <= Math.max(MAX_BOW * chord, MIN_DEVIATION_FLOOR / zoom);
 }
 
 /** The line (or arrow) element box between two endpoints, `nib` being the stroke width. */

@@ -97,6 +97,8 @@ export interface PageHooks {
   onTapeTap: (pc: PageCanvas, tapeId: string, frame: Frame) => void;
   /** true while AI mode is on for this page — a fresh pen/highlighter stroke inks in AI_COLOR instead of the tool's own colour. */
   isAiActive: () => boolean;
+  /** A line entered or left its adjustable phase. Undo can drop such a line even with nothing on the history stack, so the button's enabled state has to track this as well as the stack. */
+  onPendingLine: () => void;
   /** A cross-page drag (see endTransform) just changed another page's items directly in the store — repaint that page's own PageCanvas if it's mounted (a no-op otherwise; it'll read the fresh store on its next mount). */
   refreshPage: (pageId: string) => void;
   /**
@@ -272,6 +274,8 @@ export class PageCanvas {
   private lineEdit: LineEdit | null = null;
   /** which endpoint the current press is dragging: 'b' for the pen that just snapped, else the handle grabbed */
   private adjustEnd: 'a' | 'b' | null = null;
+  /** this press is the one that committed a pending line by landing away from its handles — if it never travels, it was a dismissing tap and leaves no dot behind */
+  private pressDismissedLine = false;
   /** ruler / protractor on this page, and the edge the current stroke is snapped to */
   private guide: Guide | null = null;
   private snapEdge: EdgeLine | null = null;
@@ -699,6 +703,7 @@ export class PageCanvas {
 
     // a snapped line waiting to be adjusted: a press on one of its endpoint
     // handles drags that end; a press anywhere else commits it and carries on
+    this.pressDismissedLine = false;
     if (this.lineEdit) {
       const end = this.lineEndAt(pt);
       if (end) {
@@ -709,6 +714,7 @@ export class PageCanvas {
         return;
       }
       this.commitLine();
+      this.pressDismissedLine = true;
     }
 
     // a press on a tape strip is a peel / cover tap unless it turns into a drag
@@ -984,7 +990,16 @@ export class PageCanvas {
           this.schedule();
           return;
         }
-        this.lineEdit = null; // the pointer was lost mid-snap — keep the ink it started as
+        this.dropLineEdit(); // the pointer was lost mid-snap — keep the ink it started as
+      }
+      // the press that dismissed a pending line and then never went anywhere
+      // was a tap to end the adjustable phase, not a dot the user wanted
+      const from = this.live[0];
+      const slop = TAP_SLOP / this.zoom();
+      if (this.pressDismissedLine && !this.live.some((p) => Math.hypot(p[0] - from[0], p[1] - from[1]) > slop)) {
+        this.reset();
+        this.blit();
+        return;
       }
       this.commitDrawStroke();
       return;
@@ -1211,6 +1226,7 @@ export class PageCanvas {
         this.lineEdit = { a, b, color: this.liveTool.color, size: this.liveTool.size };
         this.adjustEnd = 'b';
         this.pendingFit = null;
+        this.hooks.onPendingLine();
         this.schedule();
       }
     }, SHAPE_HOLD_MS);
@@ -1295,12 +1311,36 @@ export class PageCanvas {
     if (this.lineEdit || this.lastLassoPath) this.schedule();
   }
 
+  /** Whether a line is in its adjustable phase here — see the onPendingLine hook. */
+  get hasPendingLine(): boolean {
+    return this.lineEdit !== null;
+  }
+
+  /** The single way out of the adjustable phase, so the notebook hears about every one of them. */
+  private dropLineEdit(): void {
+    this.lineEdit = null;
+    this.adjustEnd = null;
+    this.hooks.onPendingLine();
+  }
+
+  /**
+   * Throws the pending line away instead of committing it — commitLine's
+   * counterpart, for Undo. The line was never added to the store and never
+   * pushed an op, so undoing it is purely dropping it here; returns whether
+   * there was one to drop.
+   */
+  cancelLine(): boolean {
+    if (!this.lineEdit) return false;
+    this.dropLineEdit();
+    this.schedule();
+    return true;
+  }
+
   /** Adds the pending line to the page as one undo step; a no-op when there is none. */
   commitLine(): void {
     const le = this.lineEdit;
     if (!le) return;
-    this.lineEdit = null;
-    this.adjustEnd = null;
+    this.dropLineEdit();
     const shape = this.lineElement(le);
     store.addItems([shape]);
     this.rebuild();

@@ -1185,10 +1185,26 @@ select {
   border-style: solid;
   border-color: var(--surface-c-lowest);
 }
-/* custom-colour swatches + the add button; the colour picker popover */
-.swatch--custom {
-  border-radius: 6px; /* square-ish: reads as "yours", not a preset */
+/* the swatch being held during a long-press-to-reorder drag (see buildSwatches
+   in notebook.ts) — dimmed in place while a floating .swatch-ghost tracks the
+   pointer, since .nb-dock__row's own overflow-x:auto also clips overflow-y
+   (see its doc comment), so the swatch itself can't just float past its row. */
+.swatch--lifted {
+  opacity: 0.35;
+  touch-action: none;
 }
+.swatch-ghost {
+  position: fixed;
+  width: 22px;
+  height: 22px;
+  margin: -11px 0 0 -11px;
+  border-radius: var(--r-full);
+  border: 1.5px solid var(--surface-c-lowest);
+  box-shadow: var(--sh-2), 0 0 0 1px var(--outline-variant);
+  pointer-events: none;
+  z-index: 60;
+}
+/* the add button; the colour picker popover */
 .swatch--add {
   background: var(--surface-c);
   color: var(--on-surface-variant);
@@ -1278,6 +1294,11 @@ select {
 .cpick__add {
   width: 100%;
   justify-content: center;
+}
+.cpick__restore {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 /* eraser mode dropdown: trigger pill in the dock + option list in a popover */

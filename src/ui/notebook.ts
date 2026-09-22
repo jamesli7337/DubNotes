@@ -9,12 +9,13 @@ import { DEFAULT_PAPER, DPR, PAGE_W, pageH, pageW } from '../const';
 import { store } from '../store';
 import {
   addCustomColor,
-  HI_COLORS,
   LASSO_SHAPES,
-  PEN_COLORS,
   PLACED_SHAPES,
-  removeCustomColor,
+  removeSwatch,
+  resetActiveColorsToPrimary,
+  restorePreset,
   saveToolState,
+  setSwatchOrder,
   sizeRange,
   toolState,
   type EraserMode,
@@ -319,6 +320,7 @@ class NotebookView {
       this.stopMomentum();
       this.aiMode.destroyPanel();
       store.flushNow();
+      resetActiveColorsToPrimary();
     };
     window.addEventListener('keydown', this.onKey);
     window.addEventListener('hashchange', this.onLeave);
@@ -399,19 +401,12 @@ class NotebookView {
       this.aiMode.sendNow(this.currentPageId);
     });
 
-    // formerly a dock button ("insert actions" in the tools row); moved here
-    // so it's reachable regardless of the active tool. Same file input/handler
-    // as before, just relocated — functionality unchanged.
-    const imgBtn = el('button', { class: 'iconbtn', title: 'Insert image', 'aria-label': 'Insert image' });
-    imgBtn.append(icon('image'));
-    imgBtn.addEventListener('click', () => this.imageInput.click());
-
-    // appends a PDF's pages after the page in view, vs. the library's own
-    // "Import file" which creates a whole new notebook from a PDF — same
-    // underlying pdf-import.ts parsing, different insertion point.
-    const pdfBtn = el('button', { class: 'iconbtn', title: 'Import PDF pages', 'aria-label': 'Import PDF pages' });
-    pdfBtn.append(icon('import'));
-    pdfBtn.addEventListener('click', () => this.pdfInput.click());
+    // combined "Insert image" and "Import PDF pages" into one Import button
+    // (same underlying inputs/handlers) — picking one opens the anchored menu
+    // below instead of each having its own app-bar icon.
+    const importBtn = el('button', { class: 'iconbtn', title: 'Import', 'aria-label': 'Import' });
+    importBtn.append(icon('import'));
+    importBtn.addEventListener('click', () => this.openInsertMenu(importBtn));
 
     const exportBtn = el('button', { class: 'iconbtn', title: 'Export', 'aria-label': 'Export' });
     exportBtn.append(icon('export'));
@@ -444,7 +439,7 @@ class NotebookView {
     // — undo/redo used to live in the right zone; now that they're in the
     // dock's top row instead, this keeps the bar from reading lopsided.
     const rightGroup = el('div', { class: 'nb-appbar__right' });
-    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, imgBtn, pdfBtn, exportBtn, pagesBtn, paperBtn);
+    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, importBtn, exportBtn, pagesBtn, paperBtn);
     bar.append(back, this.titleEl, rightGroup);
     this.appBarRightGroup = rightGroup;
 
@@ -1206,6 +1201,24 @@ class NotebookView {
     trigger.addEventListener('pointercancel', finish);
   }
 
+  // --------------------------------------------------------------- insert
+  private openInsertMenu(anchor: HTMLElement): void {
+    const menu = el('div', { class: 'menu', role: 'menu' });
+    let modal: Modal | null = null;
+    const item = (label: string, name: IconName, run: () => void): void => {
+      const b = el('button', { class: 'menu__item menu__item--icon', role: 'menuitem' });
+      b.append(icon(name, 'sm'), el('span', { text: label }));
+      b.addEventListener('click', () => {
+        modal?.close();
+        run();
+      });
+      menu.append(b);
+    };
+    item('Import PDF pages', 'import', () => this.pdfInput.click());
+    item('Insert image', 'image', () => this.imageInput.click());
+    modal = openAnchoredModal(anchor, menu);
+  }
+
   // --------------------------------------------------------------- export
   private openExportMenu(anchor: HTMLElement): void {
     const current = this.currentPageId ? store.pages.get(this.currentPageId) : undefined;
@@ -1381,7 +1394,7 @@ class NotebookView {
       case 'text':
         opts.append(
           this.buildSwatches(
-            PEN_COLORS,
+            toolState.penSwatches,
             toolState.textColor,
             (c) => {
               toolState.textColor = c;
@@ -1419,7 +1432,7 @@ class NotebookView {
           picker,
           el('span', { class: 'divider' }),
           this.buildSwatches(
-            PEN_COLORS,
+            toolState.penSwatches,
             toolState.penColor,
             (c) => {
               toolState.penColor = c;
@@ -1446,7 +1459,7 @@ class NotebookView {
       default: {
         const isPen = toolState.kind === 'pen';
         const swatches = this.buildSwatches(
-          isPen ? PEN_COLORS : HI_COLORS,
+          isPen ? toolState.penSwatches : toolState.hiSwatches,
           isPen ? toolState.penColor : toolState.hiColor,
           (c) => {
             if (isPen) toolState.penColor = c;
@@ -1630,20 +1643,28 @@ class NotebookView {
     const hasHi = strokes.some((s) => s.tool === 'highlighter');
     if (hasPen || hasHi) t.append(el('span', { class: 'divider' }));
     if (hasPen) {
-      t.append(this.buildSwatches(PEN_COLORS, null, (c) => this.selPc?.recolorSelection('pen', c), 'pen'));
+      t.append(this.buildSwatches(toolState.penSwatches, null, (c) => this.selPc?.recolorSelection('pen', c), 'pen'));
     }
     if (hasHi) {
       t.append(
-        this.buildSwatches(HI_COLORS, null, (c) => this.selPc?.recolorSelection('highlighter', c), 'highlighter')
+        this.buildSwatches(toolState.hiSwatches, null, (c) => this.selPc?.recolorSelection('highlighter', c), 'highlighter')
       );
     }
   }
 
   /**
-   * A row of colour swatches: the presets, then the tool's custom colours, then
-   * an "add colour" button that opens the picker. The "auto" swatch paints
-   * itself from the page in view. Long-press / right-click a custom swatch to
-   * remove it.
+   * A row of colour swatches (presets and user-added colours interleaved),
+   * then an "add colour" button that opens the picker. The "auto" swatch
+   * paints itself from the page in view.
+   *
+   * With `tool` set, swatches are draggable: long-press arms a drag (a
+   * `.swatch-ghost` tracks the pointer — the row itself clips overflow, see
+   * `.nb-dock__row`'s doc comment, so the real swatch can't float past it),
+   * moving it within the row reorders on drop, dropping outside `.nb-dock`
+   * deletes it — except the swatch in position 0 (the primary/default
+   * colour), which can be reordered but never dropped-to-delete. A deleted
+   * preset goes to that tool's "deleted presets" list, offered back from the
+   * "+" picker; a deleted custom colour is just gone.
    */
   private buildSwatches(
     colors: string[],
@@ -1652,15 +1673,18 @@ class NotebookView {
     tool?: 'pen' | 'highlighter'
   ): HTMLElement {
     const swatches = el('div', { class: 'dock-group' });
-    const custom = tool ? (tool === 'pen' ? toolState.customPen : toolState.customHi) : [];
-    const add = (c: string, isCustom: boolean): void => {
+    const HOLD_MS = 350;
+    const SLOP = 6;
+
+    const add = (c: string): void => {
       const isAuto = c === AUTO_COLOR;
       const s = el('button', {
-        class: 'swatch' + (isAuto ? ' swatch--auto' : '') + (isCustom ? ' swatch--custom' : '') + (c === current ? ' active' : ''),
+        class: 'swatch' + (isAuto ? ' swatch--auto' : '') + (c === current ? ' active' : ''),
         style: isAuto ? '' : `background:${c}`,
-        title: isAuto ? 'Auto — adapts to paper' : isCustom ? `${c} (custom — hold to remove)` : c,
+        title: isAuto ? 'Auto — adapts to paper' : c,
         'aria-label': isAuto ? 'Ink auto — adapts to paper' : `Ink ${c}`,
       });
+      s.dataset.color = c;
       if (isAuto) {
         const paint = (): void => {
           s.style.background = resolveInkColor(AUTO_COLOR, this.currentPaper());
@@ -1668,37 +1692,128 @@ class NotebookView {
         paint();
         this.colorRefreshers.push(paint);
       }
-      s.addEventListener('click', () => onPick(c));
-      if (isCustom && tool) {
-        const remove = (e: Event): void => {
-          e.preventDefault();
-          removeCustomColor(tool, c);
+      let suppressClick = false;
+      s.addEventListener('click', () => {
+        if (suppressClick) {
+          suppressClick = false;
+          return;
+        }
+        onPick(c);
+      });
+
+      if (tool) {
+        let holdTimer: ReturnType<typeof setTimeout> | null = null;
+        let downX = 0;
+        let downY = 0;
+        let pointerId: number | null = null;
+        let ghost: HTMLElement | null = null;
+
+        const clearHold = (): void => {
+          if (holdTimer != null) clearTimeout(holdTimer);
+          holdTimer = null;
+        };
+        const positionGhost = (x: number, y: number): void => {
+          if (ghost) {
+            ghost.style.left = `${x}px`;
+            ghost.style.top = `${y}px`;
+          }
+        };
+        const startDrag = (): void => {
+          holdTimer = null; // the timer that called this has already fired — clearHold's clearTimeout would be a harmless no-op, but leaving the id set would make pointermove's "still waiting to arm" check below misfire
+          suppressClick = true;
+          s.classList.add('swatch--lifted');
+          ghost = el('div', { class: 'swatch-ghost' + (isAuto ? ' swatch--auto' : '') });
+          ghost.style.background = isAuto ? s.style.background : c;
+          document.body.append(ghost);
+          positionGhost(downX, downY);
+        };
+        const endDrag = (x: number, y: number): void => {
+          s.classList.remove('swatch--lifted');
+          ghost?.remove();
+          ghost = null;
+          const rect = this.toolsEl.getBoundingClientRect();
+          const inside = x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+          const isPrimary = colors[0] === c;
+          if (!inside) {
+            if (!isPrimary) {
+              removeSwatch(tool, c);
+              saveToolState();
+            }
+            this.renderTools(); // deleted, or the primary snapping back in place
+            return;
+          }
+          const siblings = Array.from(swatches.querySelectorAll<HTMLElement>('.swatch[data-color]')).filter((el) => el !== s);
+          let target = siblings.length;
+          for (let i = 0; i < siblings.length; i++) {
+            const r = siblings[i].getBoundingClientRect();
+            if (x < r.left + r.width / 2) {
+              target = i;
+              break;
+            }
+          }
+          const order = colors.filter((cc) => cc !== c);
+          order.splice(target, 0, c);
+          setSwatchOrder(tool, order);
           saveToolState();
           this.renderTools();
         };
-        s.addEventListener('contextmenu', remove);
-        let hold: ReturnType<typeof setTimeout> | null = null;
-        s.addEventListener('pointerdown', () => {
-          hold = setTimeout(() => remove(new Event('hold')), 600);
+
+        s.addEventListener('pointerdown', (e) => {
+          if (e.button !== 0) return;
+          downX = e.clientX;
+          downY = e.clientY;
+          pointerId = e.pointerId;
+          s.setPointerCapture(pointerId);
+          clearHold();
+          holdTimer = setTimeout(startDrag, HOLD_MS);
         });
-        for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) {
-          s.addEventListener(ev, () => {
-            if (hold != null) clearTimeout(hold);
-            hold = null;
-          });
-        }
+        s.addEventListener('pointermove', (e) => {
+          if (holdTimer != null) {
+            if (Math.abs(e.clientX - downX) > SLOP || Math.abs(e.clientY - downY) > SLOP) clearHold();
+            return;
+          }
+          if (ghost) {
+            e.preventDefault();
+            positionGhost(e.clientX, e.clientY);
+          }
+        });
+        const finish = (e: PointerEvent): void => {
+          clearHold();
+          if (pointerId != null) {
+            try {
+              s.releasePointerCapture(pointerId);
+            } catch {
+              /* already released */
+            }
+          }
+          pointerId = null;
+          if (ghost) endDrag(e.clientX, e.clientY);
+        };
+        s.addEventListener('pointerup', finish);
+        s.addEventListener('pointercancel', finish);
       }
       swatches.append(s);
     };
-    for (const c of colors) add(c, false);
-    for (const c of custom) add(c, true);
+    for (const c of colors) add(c);
     if (tool) {
       const plus = el('button', { class: 'swatch swatch--add', title: 'Add colour', 'aria-label': 'Add colour' });
       plus.append(icon('plus', 'sm'));
       plus.addEventListener('click', async () => {
         const seed = tool === 'pen' ? toolState.penColor : toolState.hiColor;
-        const hex = await pickColor(plus, seed === AUTO_COLOR ? '#2563eb' : seed);
-        if (!hex) return;
+        const deleted = tool === 'pen' ? toolState.penDeletedPresets : toolState.hiDeletedPresets;
+        let restored = false;
+        const hex = await pickColor(plus, seed === AUTO_COLOR ? '#2563eb' : seed, {
+          colors: deleted,
+          onRestore: (c) => {
+            restorePreset(tool, c);
+            saveToolState();
+            restored = true;
+          },
+        });
+        if (!hex) {
+          if (restored) this.renderTools();
+          return;
+        }
         addCustomColor(tool, hex);
         saveToolState();
         onPick(hex.toLowerCase()); // the new colour becomes the current one
@@ -2303,6 +2418,7 @@ class NotebookView {
         onEmptyLassoSelection: (p, frame) => this.showEmptyLassoCallout(p, frame),
         onTapeTap: (p, tapeId, frame) => this.showTapePopover(p, tapeId, frame),
         isAiActive: () => this.aiMode.isActive(),
+        onPendingLine: () => this.syncHistory(),
         refreshPage: (pageId) => this.rebuildIfMounted(pageId),
         adoptCrossPageLasso: (pageId, ids, lassoPath) => {
           if (this.mounted.has(pageId)) this.pcByPage.get(pageId)?.adoptCrossPageLasso(ids, lassoPath);
@@ -2738,6 +2854,11 @@ class NotebookView {
    * to trigger the usual outside-tap dismiss, so it's closed unconditionally
    * here rather than risk it going stale. */
   private undo(): void {
+    // A line still in its adjustable phase is the newest thing the user did,
+    // but it isn't in the store or on either stack yet — popping the stack
+    // here would undo the element *before* it while rebuildIfMounted's
+    // refresh() quietly committed the line on the way past. Drop it instead.
+    if (this.cancelPendingLine()) return;
     if (this.currentPageId && this.aiMode.isActive()) {
       if (this.aiMode.canUndo(this.currentPageId)) this.hideTapePopover();
       this.aiMode.undo(this.currentPageId);
@@ -2750,6 +2871,17 @@ class NotebookView {
     this.redoStack.push(op);
     this.syncHistory();
     this.enforceAndMaybeRerender();
+  }
+
+  /** Discards an adjustable line on whichever page still holds one; true if there was one. */
+  private cancelPendingLine(): boolean {
+    for (const pc of this.pcByPage.values()) if (pc.cancelLine()) return true;
+    return false;
+  }
+
+  private hasPendingLine(): boolean {
+    for (const pc of this.pcByPage.values()) if (pc.hasPendingLine) return true;
+    return false;
   }
 
   private redo(): void {
@@ -2856,12 +2988,15 @@ class NotebookView {
 
   /** Undo/redo button enabled state — reflects AiMode's turn-scoped stack while it's active on the current page (Undo/Redo are exceptions to the toolbar lockdown, see applyAiToolbarLockdown), the main stacks otherwise. */
   private syncHistory(): void {
+    // Undo drops an adjustable line before it consults either stack, so it has
+    // something to do even on a page where nothing has been committed yet.
+    const pending = this.hasPendingLine();
     if (this.currentPageId && this.aiMode.isActive()) {
-      this.undoBtn.disabled = !this.aiMode.canUndo(this.currentPageId);
+      this.undoBtn.disabled = !pending && !this.aiMode.canUndo(this.currentPageId);
       this.redoBtn.disabled = !this.aiMode.canRedo(this.currentPageId);
       return;
     }
-    this.undoBtn.disabled = this.undoStack.length === 0;
+    this.undoBtn.disabled = !pending && this.undoStack.length === 0;
     this.redoBtn.disabled = this.redoStack.length === 0;
   }
 }
