@@ -1655,16 +1655,18 @@ class NotebookView {
   /**
    * A row of colour swatches (presets and user-added colours interleaved),
    * then an "add colour" button that opens the picker. The "auto" swatch
-   * paints itself from the page in view.
+   * paints itself from the page in view. Position 0 is the tool's primary
+   * colour — marked with a dotted ring, and the one a note opens on.
    *
    * With `tool` set, swatches are draggable: long-press arms a drag (a
    * `.swatch-ghost` tracks the pointer — the row itself clips overflow, see
-   * `.nb-dock__row`'s doc comment, so the real swatch can't float past it),
-   * moving it within the row reorders on drop, dropping outside `.nb-dock`
-   * deletes it — except the swatch in position 0 (the primary/default
-   * colour), which can be reordered but never dropped-to-delete. A deleted
-   * preset goes to that tool's "deleted presets" list, offered back from the
-   * "+" picker; a deleted custom colour is just gone.
+   * `.nb-dock__row`'s doc comment, so the real swatch can't float past it)
+   * and a trash button appears at the end of the row, just before "+".
+   * Dropping on that trash removes the colour; dropping anywhere else in the
+   * dock reorders; dropping outside the dock snaps back. The primary can be
+   * reordered but not removed. A removed preset goes to that tool's "deleted
+   * presets" list, offered back from the "+" picker; a removed custom colour
+   * is just gone.
    */
   private buildSwatches(
     colors: string[],
@@ -1675,11 +1677,19 @@ class NotebookView {
     const swatches = el('div', { class: 'dock-group' });
     const HOLD_MS = 350;
     const SLOP = 6;
+    // both built below when `tool` is set; the trash is only in the DOM while a
+    // swatch is actually being dragged, and sits immediately before the "+"
+    let trash: HTMLElement | null = null;
+    let plus: HTMLElement | null = null;
 
-    const add = (c: string): void => {
+    const add = (c: string, index: number): void => {
       const isAuto = c === AUTO_COLOR;
       const s = el('button', {
-        class: 'swatch' + (isAuto ? ' swatch--auto' : '') + (c === current ? ' active' : ''),
+        class:
+          'swatch' +
+          (isAuto ? ' swatch--auto' : '') +
+          (tool && index === 0 ? ' swatch--primary' : '') +
+          (c === current ? ' active' : ''),
         style: isAuto ? '' : `background:${c}`,
         title: isAuto ? 'Auto — adapts to paper' : c,
         'aria-label': isAuto ? 'Ink auto — adapts to paper' : `Ink ${c}`,
@@ -1718,30 +1728,48 @@ class NotebookView {
             ghost.style.top = `${y}px`;
           }
         };
+        const overTrash = (x: number, y: number): boolean => {
+          if (!trash?.isConnected) return false;
+          const r = trash.getBoundingClientRect();
+          return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+        };
         const startDrag = (): void => {
           holdTimer = null; // the timer that called this has already fired — clearHold's clearTimeout would be a harmless no-op, but leaving the id set would make pointermove's "still waiting to arm" check below misfire
           suppressClick = true;
           s.classList.add('swatch--lifted');
+          if (trash && plus) swatches.insertBefore(trash, plus); // only the "+" shifts over; the swatches keep their positions, so the drop-index maths below stays valid
           ghost = el('div', { class: 'swatch-ghost' + (isAuto ? ' swatch--auto' : '') });
           ghost.style.background = isAuto ? s.style.background : c;
           document.body.append(ghost);
           positionGhost(downX, downY);
         };
-        const endDrag = (x: number, y: number): void => {
+        /** Tears the drag down visually, leaving the order untouched. */
+        const abortDrag = (): void => {
           s.classList.remove('swatch--lifted');
           ghost?.remove();
           ghost = null;
-          const rect = this.toolsEl.getBoundingClientRect();
-          const inside = x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
-          const isPrimary = colors[0] === c;
-          if (!inside) {
-            if (!isPrimary) {
-              removeSwatch(tool, c);
-              saveToolState();
-            }
-            this.renderTools(); // deleted, or the primary snapping back in place
+          trash?.classList.remove('is-over');
+          trash?.remove();
+          // a trailing `click` (if the browser sends one) still has to be
+          // swallowed, but the flag can't stay set — a snap-back doesn't
+          // rebuild the row, so a sticky flag would eat the next real tap
+          setTimeout(() => {
+            suppressClick = false;
+          }, 0);
+        };
+        const endDrag = (x: number, y: number): void => {
+          const droppedOnTrash = overTrash(x, y);
+          const dock = this.toolsEl.getBoundingClientRect();
+          const insideDock = x >= dock.left && x <= dock.right && y >= dock.top && y <= dock.bottom;
+          abortDrag(); // the measurements above are taken first — this removes the trash
+          if (droppedOnTrash) {
+            if (colors[0] === c) return; // the primary colour is never removed
+            removeSwatch(tool, c);
+            saveToolState();
+            this.renderTools();
             return;
           }
+          if (!insideDock) return; // dropped off the toolbar: snap back, change nothing
           const siblings = Array.from(swatches.querySelectorAll<HTMLElement>('.swatch[data-color]')).filter((el) => el !== s);
           let target = siblings.length;
           for (let i = 0; i < siblings.length; i++) {
@@ -1775,9 +1803,10 @@ class NotebookView {
           if (ghost) {
             e.preventDefault();
             positionGhost(e.clientX, e.clientY);
+            trash?.classList.toggle('is-over', overTrash(e.clientX, e.clientY));
           }
         });
-        const finish = (e: PointerEvent): void => {
+        const releaseCapture = (): void => {
           clearHold();
           if (pointerId != null) {
             try {
@@ -1787,22 +1816,38 @@ class NotebookView {
             }
           }
           pointerId = null;
-          if (ghost) endDrag(e.clientX, e.clientY);
         };
-        s.addEventListener('pointerup', finish);
-        s.addEventListener('pointercancel', finish);
+        s.addEventListener('pointerup', (e) => {
+          releaseCapture();
+          if (ghost) endDrag(e.clientX, e.clientY);
+        });
+        // the browser took the gesture over (a scroll/zoom pan, a system
+        // gesture): its coordinates are zeroed, so it can never be read as a
+        // drop — abort and leave the row exactly as it was
+        s.addEventListener('pointercancel', () => {
+          releaseCapture();
+          if (ghost) abortDrag();
+        });
       }
       swatches.append(s);
     };
-    for (const c of colors) add(c);
+    colors.forEach(add);
     if (tool) {
-      const plus = el('button', { class: 'swatch swatch--add', title: 'Add colour', 'aria-label': 'Add colour' });
-      plus.append(icon('plus', 'sm'));
-      plus.addEventListener('click', async () => {
+      trash = el('button', {
+        class: 'swatch swatch--trash',
+        title: 'Drop a colour here to remove it',
+        'aria-label': 'Drop a colour here to remove it',
+        tabindex: '-1',
+      });
+      trash.append(icon('delete', 'sm'));
+      const addBtn = el('button', { class: 'swatch swatch--add', title: 'Add colour', 'aria-label': 'Add colour' });
+      plus = addBtn;
+      addBtn.append(icon('plus', 'sm'));
+      addBtn.addEventListener('click', async () => {
         const seed = tool === 'pen' ? toolState.penColor : toolState.hiColor;
         const deleted = tool === 'pen' ? toolState.penDeletedPresets : toolState.hiDeletedPresets;
         let restored = false;
-        const hex = await pickColor(plus, seed === AUTO_COLOR ? '#2563eb' : seed, {
+        const hex = await pickColor(addBtn, seed === AUTO_COLOR ? '#2563eb' : seed, {
           colors: deleted,
           onRestore: (c) => {
             restorePreset(tool, c);
@@ -1818,7 +1863,7 @@ class NotebookView {
         saveToolState();
         onPick(hex.toLowerCase()); // the new colour becomes the current one
       });
-      swatches.append(plus);
+      swatches.append(addBtn);
     }
     return swatches;
   }

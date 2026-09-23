@@ -274,8 +274,6 @@ export class PageCanvas {
   private lineEdit: LineEdit | null = null;
   /** which endpoint the current press is dragging: 'b' for the pen that just snapped, else the handle grabbed */
   private adjustEnd: 'a' | 'b' | null = null;
-  /** this press is the one that committed a pending line by landing away from its handles — if it never travels, it was a dismissing tap and leaves no dot behind */
-  private pressDismissedLine = false;
   /** ruler / protractor on this page, and the edge the current stroke is snapped to */
   private guide: Guide | null = null;
   private snapEdge: EdgeLine | null = null;
@@ -702,8 +700,11 @@ export class PageCanvas {
     const kind = toolState.kind;
 
     // a snapped line waiting to be adjusted: a press on one of its endpoint
-    // handles drags that end; a press anywhere else commits it and carries on
-    this.pressDismissedLine = false;
+    // handles drags that end; a press anywhere else commits it and is then
+    // spent. It deliberately doesn't fall through into the tool below — the
+    // adjustable phase is modal, and the press that leaves it must not also
+    // ink. A travel threshold can't tell that press apart from a deliberate
+    // dot (they're the same gesture), so the whole press is consumed instead.
     if (this.lineEdit) {
       const end = this.lineEndAt(pt);
       if (end) {
@@ -714,7 +715,7 @@ export class PageCanvas {
         return;
       }
       this.commitLine();
-      this.pressDismissedLine = true;
+      return;
     }
 
     // a press on a tape strip is a peel / cover tap unless it turns into a drag
@@ -991,15 +992,6 @@ export class PageCanvas {
           return;
         }
         this.dropLineEdit(); // the pointer was lost mid-snap — keep the ink it started as
-      }
-      // the press that dismissed a pending line and then never went anywhere
-      // was a tap to end the adjustable phase, not a dot the user wanted
-      const from = this.live[0];
-      const slop = TAP_SLOP / this.zoom();
-      if (this.pressDismissedLine && !this.live.some((p) => Math.hypot(p[0] - from[0], p[1] - from[1]) > slop)) {
-        this.reset();
-        this.blit();
-        return;
       }
       this.commitDrawStroke();
       return;

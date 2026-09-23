@@ -1185,13 +1185,52 @@ select {
   border-style: solid;
   border-color: var(--surface-c-lowest);
 }
-/* the swatch being held during a long-press-to-reorder drag (see buildSwatches
-   in notebook.ts) — dimmed in place while a floating .swatch-ghost tracks the
-   pointer, since .nb-dock__row's own overflow-x:auto also clips overflow-y
-   (see its doc comment), so the swatch itself can't just float past its row. */
+/* dock swatches are long-press drag handles (see buildSwatches in
+   notebook.ts), and their row is a horizontal scroll container. The base
+   `button` rule's `touch-action: manipulation` lets that scroller claim a
+   sideways finger/pen drag as a pan — which fires `pointercancel` mid-drag and
+   kills the reorder. `touch-action` is read at pointer-down, so it has to be
+   `none` from the start; setting it once the drag arms (350ms in) is far too
+   late. The cost is that a finger starting on a swatch no longer pans the row
+   — the gaps, size control and hint text still do. */
+.nb-dock .swatch {
+  touch-action: none;
+}
+/* position 0: the tool's primary colour — the one a note opens on (see
+   resetActiveColorsToPrimary). An `outline` rather than a border so it costs
+   no layout; the offset is kept tight because .nb-dock__row clips to its own
+   box and the padding there is only 5px of bleed slack (see its comment). */
+.swatch--primary {
+  outline: 2px dotted var(--outline);
+  outline-offset: 1px;
+}
+/* the swatch being held during a long-press-to-reorder drag — dimmed in place
+   while a floating .swatch-ghost tracks the pointer, since .nb-dock__row's own
+   overflow-x:auto also clips overflow-y (see its doc comment), so the swatch
+   itself can't just float past its row. */
 .swatch--lifted {
   opacity: 0.35;
-  touch-action: none;
+}
+/* the drop-to-remove target: only in the row while a swatch is being dragged */
+.swatch--trash {
+  background: var(--surface-c);
+  color: var(--on-surface-variant);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.swatch--trash .icon {
+  width: 12px;
+  height: 12px;
+}
+/* the ghost tracking the pointer is 22px and centred on it, so it sits right
+   on top of this button at the moment of the drop — the armed state has to
+   grow past the ghost (18px × 1.5 = 27px) to stay readable underneath it */
+.swatch--trash.is-over {
+  background: var(--error-container);
+  color: var(--on-error-container);
+  border-color: var(--error);
+  transform: scale(1.5);
 }
 .swatch-ghost {
   position: fixed;
