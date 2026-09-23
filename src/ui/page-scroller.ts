@@ -56,6 +56,9 @@ const SETTLE_MS = 180;
  * gaining resolution; the alternative is tiling, which this doesn't do.
  */
 const MAX_PAGE_PIXELS = 4.2e6;
+/** Scrollbar thumb: inset from the stage's edges, and its smallest height. */
+const THUMB_INSET = 6;
+const THUMB_MIN = 32;
 /** Momentum: per-frame velocity decay, and the speed below which it stops. */
 const FRICTION = 0.94;
 const MIN_SPEED = 0.015;
@@ -162,6 +165,12 @@ export class PageScroller {
 
   private resizeObserver: ResizeObserver | null = null;
 
+  /** The pane's own scrollbar thumb — a child of the stage, never `document.body`, so it dies with the scroller. */
+  private thumbEl: HTMLElement | null = null;
+  private thumbTrackH = 0;
+  private thumbH = 0;
+  private thumbRange = 0;
+
   constructor(source: PageSource, hooks: ScrollerHooks) {
     this.source = source;
     this.hooks = hooks;
@@ -199,9 +208,11 @@ export class PageScroller {
     this.camera.y = clamp(this.camera.y, this.minY(), this.maxY());
 
     this.bindGestures(host);
+    this.buildThumb(host);
     this.resizeObserver = new ResizeObserver(() => this.onResize());
     this.resizeObserver.observe(host);
 
+    this.layoutThumb();
     this.applyCamera();
     this.applyQuality(); // first render at the starting zoom, all at once (nothing is mounted yet)
   }
@@ -219,6 +230,8 @@ export class PageScroller {
     this.slots = [];
     this.cameraEl?.remove();
     this.cameraEl = null;
+    this.thumbEl?.remove();
+    this.thumbEl = null;
     this.host = null;
   }
 
@@ -302,6 +315,7 @@ export class PageScroller {
     this.camera.y = clamp(this.camera.y, this.minY(), this.maxY());
 
     this.currentIndex = -1; // the total changed, so make updateMounted re-report the label
+    this.layoutThumb();
     this.applyCamera();
     // the anchor moved without a gesture, so nothing else would persist it
     this.hooks.onAnchorChanged();
@@ -394,6 +408,7 @@ export class PageScroller {
     if (!cam) return;
     const { x, y, zoom } = this.camera;
     cam.style.transform = `scale(${zoom}) translate(${-x}px, ${-y}px)`;
+    this.repositionThumb();
     this.updateMounted();
   }
 
@@ -410,6 +425,7 @@ export class PageScroller {
     this.camera.y = wy - ay / next;
     this.camera.x = this.clampX(this.camera.x);
     this.camera.y = clamp(this.camera.y, this.minY(), this.maxY());
+    this.layoutThumb();
     this.applyCamera();
     this.settle();
   }
@@ -556,8 +572,85 @@ export class PageScroller {
     }
     this.camera.x = this.clampX(this.camera.x);
     this.camera.y = clamp(this.camera.y, this.minY(), this.maxY());
+    this.layoutThumb();
     this.applyCamera();
     this.settle();
+  }
+
+  // ------------------------------------------------------------- scrollbar
+
+  /**
+   * The pane's own scrollbar, matching the notebook's: a wide invisible hit
+   * area with a narrow visible bar inside it, sized to how much of the column
+   * is on screen and draggable to scroll.
+   *
+   * Unlike the notebook's, which is `position: fixed` on `document.body` and
+   * outlives its view, this is an ordinary absolutely-positioned child of the
+   * stage. It is clipped by the stage, moves with a floating pane for free,
+   * and is removed by `unmount()` along with everything else — no global
+   * listeners, nothing left behind.
+   */
+  private buildThumb(host: HTMLElement): void {
+    const thumb = el('div', { class: 'pscroll-thumb' });
+    thumb.hidden = true;
+    host.appendChild(thumb);
+    this.thumbEl = thumb;
+
+    let drag: { id: number; startY: number; startCamY: number } | null = null;
+    thumb.addEventListener('pointerdown', (e) => {
+      if (this.thumbRange <= 0) return;
+      this.stopMomentum();
+      drag = { id: e.pointerId, startY: e.clientY, startCamY: this.camera.y };
+      try {
+        thumb.setPointerCapture(e.pointerId);
+      } catch {
+        /* ignore */
+      }
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    thumb.addEventListener('pointermove', (e) => {
+      if (!drag || e.pointerId !== drag.id) return;
+      const travel = Math.max(1, this.thumbTrackH - this.thumbH);
+      const dy = e.clientY - drag.startY;
+      this.camera.y = clamp(drag.startCamY + (dy / travel) * this.thumbRange, this.minY(), this.maxY());
+      this.applyCamera();
+      e.stopPropagation();
+    });
+    const end = (e: PointerEvent): void => {
+      if (!drag || e.pointerId !== drag.id) return;
+      drag = null;
+      this.settle();
+    };
+    thumb.addEventListener('pointerup', end);
+    thumb.addEventListener('pointercancel', end);
+  }
+
+  /** Re-derives the thumb's track, size and visibility. Cheap, but not per-frame — only when the range can have changed. */
+  private layoutThumb(): void {
+    const thumb = this.thumbEl;
+    if (!thumb) return;
+    this.thumbTrackH = Math.max(0, this.viewH - THUMB_INSET * 2);
+    this.thumbRange = Math.max(0, this.maxY() - this.minY());
+    if (this.thumbRange <= 1 || this.thumbTrackH <= 0) {
+      thumb.hidden = true;
+      return;
+    }
+    thumb.hidden = false;
+    const viewWorldH = this.viewH / this.camera.zoom;
+    const shown = clamp(viewWorldH / (this.thumbRange + viewWorldH), 0.02, 1);
+    this.thumbH = Math.min(this.thumbTrackH, Math.max(THUMB_MIN, shown * this.thumbTrackH));
+    thumb.style.top = `${THUMB_INSET}px`;
+    thumb.style.height = `${this.thumbH}px`;
+    this.repositionThumb();
+  }
+
+  /** The per-frame half: one `transform` write against already-cached numbers, so it stays on the compositor. */
+  private repositionThumb(): void {
+    const thumb = this.thumbEl;
+    if (!thumb || thumb.hidden) return;
+    const progress = this.thumbRange > 0 ? clamp((this.camera.y - this.minY()) / this.thumbRange, 0, 1) : 0;
+    thumb.style.transform = `translate3d(0, ${progress * (this.thumbTrackH - this.thumbH)}px, 0)`;
   }
 
   // --------------------------------------------------------------- gestures

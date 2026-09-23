@@ -1162,11 +1162,24 @@ class NotebookView {
 
     const layout = (): void => {
       const track = s.getBoundingClientRect();
-      trackH = track.height - INSET * 2;
+      // The dock floats *over* the top of `.nb-scroll` (it's `position: fixed`,
+      // which is why the camera keeps TOP_CLEARANCE below it), so a track
+      // measured from the scroller's own box alone always begins behind it —
+      // by 52px with the dock collapsed and over 100px with a tool's options
+      // row open. Start it below whatever the dock currently occupies instead,
+      // so the whole track is in the part of the notebook you can actually
+      // see. Paired with the thumb's z-index now sitting under both the dock
+      // and the app bar (see `.nb-scrollbar-thumb` in styles.css), which is
+      // what stops it painting over them when the two do overlap — a narrow
+      // window, or any width once a docked split narrows `.nb-scroll` while
+      // the dock stays centred on the whole viewport.
+      const trackTop = Math.max(track.top, this.toolsEl.getBoundingClientRect().bottom) + INSET;
+      const trackBottom = track.bottom - INSET;
+      trackH = Math.max(0, trackBottom - trackTop);
       const minY = this.minCameraY();
       const maxY = this.maxCameraY();
       panRange = Math.max(0, maxY - minY);
-      if (panRange <= 1) {
+      if (panRange <= 1 || trackH <= 0) {
         thumb.hidden = true;
         return;
       }
@@ -1174,7 +1187,7 @@ class NotebookView {
       const viewWorldH = s.clientHeight / this.camera.zoom;
       const shownFraction = clamp(viewWorldH / (panRange + viewWorldH), 0.02, 1);
       thumbH = Math.min(trackH, Math.max(MIN_THUMB, shownFraction * trackH));
-      thumb.style.top = `${track.top + INSET}px`;
+      thumb.style.top = `${trackTop}px`;
       thumb.style.height = `${thumbH}px`;
       // `left`, computed from track.right alone, rather than a `right` built
       // from `window.innerWidth - track.right` — that mixed two separate

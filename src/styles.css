@@ -1560,7 +1560,13 @@ select {
      it extends inward from the scroller's edge, not off-screen */
   width: 24px;
   touch-action: none;
-  z-index: 40;
+  /* Under the app bar (30) and the dock (40), above the pages (max 3) and the
+     floating image overlay (20). It used to sit at 40 — level with the dock —
+     and, being appended to `document.body` (so later in DOM order than
+     `#app`), it won that tie and painted over the dock wherever the two met:
+     any narrow window, and any width at all once a docked split narrows
+     `.nb-scroll` while the dock stays centred on the whole viewport. */
+  z-index: 25;
   /* positioned via transform on every camera-y change (see bindScrollbarThumb)
      — this keeps that on the compositor thread instead of layout/paint, which
      otherwise left ghost copies behind on iOS Safari during fast scrolling */
@@ -2743,6 +2749,15 @@ select {
   user-select: none;
   overflow: hidden;
 }
+/* The picture's own layer: zoomed and panned inside the frame by
+   `applyImgView`, while the frame's box stays exactly where `applyOverlayRect`
+   put it. `transform-origin: 0 0` so the offset is plain frame pixels. */
+.img-overlay__inner {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+  will-change: transform;
+}
 .img-overlay__img {
   display: block;
   width: 100%;
@@ -2750,7 +2765,7 @@ select {
   /* the box is always kept on-aspect (see clampOverlay), so `fill` is exact
      and avoids the letterbox bars `contain` would add mid-resize */
   object-fit: fill;
-  pointer-events: none; /* the overlay itself owns the drag */
+  pointer-events: none; /* the overlay itself owns every gesture */
   -webkit-user-drag: none;
 }
 /* inset into the corner rather than hanging off it, so the overlay's hit area
@@ -2785,95 +2800,34 @@ select {
   border-bottom-right-radius: 6px;
 }
 
-/* ----------------------------------------------- floating PDF overlay */
-/* Shares `.img-overlay`'s positioning (fixed, z-index 20, sized to itself) so
-   it follows the viewport rather than a page and only its own box takes
-   touches — see that rule's comment. What it adds is a header and a
-   PageScroller body, so it needs a column layout rather than a bare image. */
-.pdf-overlay {
-  display: flex;
-  flex-direction: column;
-  background: var(--surface-c-lowest);
-  cursor: default; /* only the header drags, unlike the image */
-}
-.pdf-overlay__head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex: none;
-  padding: 4px 4px 4px 10px;
-  border-bottom: 1px solid var(--outline-variant);
-  cursor: move;
-  touch-action: none;
-}
-.pdf-overlay__title {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--on-surface-variant);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.pdf-overlay__actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-}
-.pdf-overlay__min,
-.pdf-overlay__close {
-  width: 28px;
-  height: 28px;
-  min-height: 0;
-  padding: 0;
-}
-.pdf-overlay__close:hover:not(:disabled) {
-  background: rgba(220, 38, 38, 0.1);
-  color: #dc2626;
-}
-/* the scroller's viewport; it runs its own pinch/pan, same as the page pane */
-.pdf-overlay__stage {
-  flex: 1;
-  position: relative;
-  overflow: hidden;
-  min-height: 0;
-  touch-action: none;
-  background: var(--lib-bg, #f3f5f9);
-}
-/* minimised: the window itself is hidden, and `.pdf-tab` stands in for it.
-   Hidden rather than torn down, so restoring keeps its scroll and zoom. */
-.pdf-overlay--min {
+/* The split pane's own scrollbar — same shape as the notebook's
+   `.nb-scrollbar-thumb` (a wide invisible hit area with a narrow bar inside),
+   but an ordinary absolutely-positioned child of the stage rather than a
+   fixed element on `document.body`, so it is clipped by the pane, rides along
+   with a floating one, and is removed with the scroller. */
+.pscroll-thumb {
   display: none;
-}
-
-/* the collapsed tab, stuck to whichever edge the window was nearest */
-.pdf-tab {
-  position: fixed;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  height: 36px;
-  max-width: 190px;
-  padding: 0 12px;
-  border: 1px solid var(--outline-variant);
-  border-radius: var(--r-full);
-  background: var(--surface-c-lowest);
-  box-shadow: var(--sh-2);
-  color: var(--on-surface-variant);
-  font: inherit;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
+  position: absolute;
+  right: 0;
+  width: 24px;
   touch-action: none;
+  z-index: 2;
+  will-change: transform;
 }
-.pdf-tab__name {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+.pscroll-thumb:not([hidden]) {
+  display: block;
 }
-.pdf-tab:hover {
-  background: var(--surface-c-low, var(--surface-c-lowest));
+.pscroll-thumb::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 6px;
+  bottom: 0;
+  width: 6px;
+  border-radius: var(--r-full);
+  background: var(--outline);
+  opacity: 0.55;
+}
+.pscroll-thumb:active::after {
+  opacity: 0.85;
 }
