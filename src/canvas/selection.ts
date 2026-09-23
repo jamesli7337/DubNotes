@@ -27,6 +27,8 @@ export interface OverlayHooks {
   onDragEnd: (frame: Frame | null) => void;
   /** a press on the box body that never moved — page-space point */
   onTap: (x: number, y: number) => void;
+  /** A palm resting on (or the pencil actively drawing elsewhere while something touch-shaped grazes) the box's own hit area shouldn't move, resize, or rotate the selection — see NotebookView's own palm/pen tracking this mirrors (bindZoomGestures's doc comment) for the full reasoning. Checked first in onDown; true means the press is ignored entirely. */
+  isBlockedTouch: (e: PointerEvent) => boolean;
 }
 
 /** Which page a shown frame belongs to — its world-space origin (that page's own offsetLeft/offsetTop within `.nb-camera`) plus its own size, needed to convert the frame's page-local units to/from screen space through the shared camera. */
@@ -171,6 +173,7 @@ export class SelectionOverlay {
 
   private onDown = (e: PointerEvent): void => {
     if (this.drag || !this.frame) return;
+    if (this.hooks.isBlockedTouch(e)) return; // a palm, or pen-priority — see OverlayHooks's own doc comment
     const target = e.target as HTMLElement;
     const handleEl = target.closest<HTMLElement>('.sel-h');
     const isRot = !!target.closest('.sel-rot');

@@ -1158,6 +1158,10 @@ select {
   white-space: nowrap;
 }
 
+/* `--slide` is the FLIP offset a swatch displaced by a drag starts from before
+   it animates back to 0 (see previewDropAt in notebook.ts). It's composed here
+   rather than written as a whole inline `transform` so that a swatch carrying
+   its own transform — the active one's scale, below — keeps it while sliding. */
 .swatch {
   width: 18px;
   height: 18px;
@@ -1166,10 +1170,11 @@ select {
   border: 1.5px solid var(--surface-c-lowest);
   box-shadow: 0 0 0 1px var(--outline-variant);
   flex: none;
+  transform: translateX(var(--slide, 0px));
 }
 .swatch.active {
   box-shadow: 0 0 0 2px var(--secondary-container);
-  transform: scale(1.12);
+  transform: translateX(var(--slide, 0px)) scale(1.12);
 }
 /* auto swatch: background is set from JS (resolved per the page in view), the
    dashed ring marks it as adaptive rather than a fixed colour — but only
@@ -1207,9 +1212,21 @@ select {
 /* the swatch being held during a long-press-to-reorder drag — dimmed in place
    while a floating .swatch-ghost tracks the pointer, since .nb-dock__row's own
    overflow-x:auto also clips overflow-y (see its doc comment), so the swatch
-   itself can't just float past its row. */
-.swatch--lifted {
+   itself can't just float past its row. Dimmed it doubles as the gap: it
+   slides to whichever slot the drop would land in. */
+/* `.swatch.swatch--lifted`, not `.swatch--lifted`: this has to outweigh the
+   base `button:active` press-scale, which is more specific than `.swatch`
+   alone and would otherwise replace the slide on the one swatch that is, by
+   definition, being pressed — leaving the gap open everywhere except under
+   the swatch actually being dragged. */
+.swatch.swatch--lifted {
   opacity: 0.35;
+  transform: translateX(var(--slide, 0px));
+}
+/* only while a drag is live, so `--slide` animates the gap open/closed without
+   leaving a transition on the scale of whichever swatch is active */
+.dock-group.is-reordering .swatch {
+  transition: transform 140ms ease;
 }
 /* the drop-to-remove target: only in the row while a swatch is being dragged */
 .swatch--trash {

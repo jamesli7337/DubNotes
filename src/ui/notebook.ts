@@ -78,6 +78,10 @@ const ZOOM_MAX = 3;
 const TOP_CLEARANCE = 118;
 /** Same idea below the last page (fraction of the viewport's own height, not zoom-scaled — see maxCameraY) — was `.nb-scroll`'s CSS padding-bottom. */
 const BOTTOM_CLEARANCE_VH = 0.4;
+/** How long after the pencil lifts a freshly-landing touch is still treated as a palm resettling rather than a deliberate pan/pinch/drag — see bindZoomGestures's own doc comment. Long enough to cover a palm re-seating itself as the hand moves between strokes, short enough that a deliberate finger-tap to scroll a moment after finishing writing still works right away. */
+const PEN_COOLDOWN_MS = 400;
+/** How long after a touch-driven pan or pinch begins a stylus contact showing up still counts as "the pencil landing a beat after the palm", rather than a genuinely separate later pen stroke — within this window the drift the palm caused gets rolled back, not just stopped in place. See bindZoomGestures's own doc comment. */
+const PEN_RACE_WINDOW_MS = 250;
 
 export function mountNotebook(root: HTMLElement, notebookId: string): void {
   const nb = store.notebooks.get(notebookId);
@@ -85,6 +89,14 @@ export function mountNotebook(root: HTMLElement, notebookId: string): void {
     location.hash = '#/';
     return;
   }
+  // Every note opens on its tool's primary colour. This has to happen on the
+  // way *in*, not just on the way out (see the matching call in onLeave): a
+  // reload or app relaunch straight into a note never fires the `hashchange`
+  // onLeave listens for, and on a note-to-note jump main.ts's own `route` —
+  // registered at boot, so ahead of any view's onLeave — mounts the new view
+  // first, leaving the outgoing view's reset to land after this dock has
+  // already rendered against the stale colour.
+  resetActiveColorsToPrimary();
   new NotebookView(root, nb);
 }
 
@@ -123,16 +135,53 @@ class NotebookView {
   private readonly camera: Camera = { x: 0, y: 0, zoom: 1 };
   /** `.nb-camera`: the single element the whole camera transform is applied to — every `.page-wrap` lives inside it. */
   private cameraEl!: HTMLElement;
-  private pinch: { d0: number; z0: number; mx: number; my: number; cx: number; cy: number } | null = null;
+  private pinch: {
+    d0: number;
+    z0: number;
+    mx: number;
+    my: number;
+    cx: number;
+    cy: number;
+    /** camera position (and zoom) when this pinch began, plus when — same palm-lands-before-the-pencil race as `pan.snapX/snapY/snapT`, see bindZoomGestures's own doc comment. */
+    snapX: number;
+    snapY: number;
+    snapZoom: number;
+    snapT: number;
+  } | null = null;
   /**
    * One-finger pan (touch or pen — mouse panning is bindHandToolGestures'
    * own, hand-tool-only path). `vx`/`vy` (world units/ms) are a running
    * estimate of the finger's velocity, sampled each touchmove, used to kick
    * off momentum on lift — see startMomentum.
    */
-  private pan: { touchId: number; lastX: number; lastY: number; lastT: number; vx: number; vy: number } | null = null;
+  private pan: {
+    touchId: number;
+    lastX: number;
+    lastY: number;
+    lastT: number;
+    vx: number;
+    vy: number;
+    /** camera position when this pan began, plus when — see the palm-lands-before-the-pencil race in bindZoomGestures's own doc comment: if a stylus contact shows up within PEN_RACE_WINDOW_MS of this, the small drift a settling palm caused gets undone, not just halted. */
+    snapX: number;
+    snapY: number;
+    snapT: number;
+  } | null = null;
   /** rAF handle for the momentum/rubber-band-snap-back animation — see startMomentum/stopMomentum. */
   private momentumRaf = 0;
+  /**
+   * Palm-vs-pen tracking, shared by bindZoomGestures, bindScrollbarThumb, and
+   * SelectionOverlay (via isBlockedTouch) — see bindZoomGestures's own doc
+   * comment for the full reasoning. A palm reports as an ordinary touch, so
+   * nothing about it alone marks it as illegitimate; what does is *context*:
+   * did it co-occur with the stylus, or land right around when the stylus
+   * lifted.
+   */
+  /** Touch identifiers that were present at any point while a stylus contact was also present — palm contacts by definition. Blocked from starting or continuing a pan/pinch/box-drag/thumb-drag for as long as they stay down; removed once that same contact lifts (see endTouch and its pointerup/pointercancel-driven equivalents). */
+  private readonly palmTouchIds = new Set<number>();
+  /** Whether a stylus-tagged touch is down right now — refreshed from `e.touches` on every touchstart/touchmove/touchend, so it's always current even for callers with no TouchList of their own (the selection box, the scrollbar thumb). */
+  private stylusDown = false;
+  /** performance.now() of the stylus's most recent liftoff (0 = never lifted this session). */
+  private stylusLiftAt = 0;
   /** Hand tool, mouse only — touch/pen panning goes through the same one-finger-pan gesture as any other tool, see bindZoomGestures. */
   private handPan: { pointerId: number; x: number; y: number; camX: number; camY: number } | null = null;
   /** Recomputes the custom scrollbar thumb's size/position (see bindScrollbarThumb); called after anything that changes the camera or the notebook's total content height without itself going through applyCamera (syncPages). */
@@ -463,6 +512,7 @@ class NotebookView {
         onDrag: (f) => this.overlayPc?.updateTransform(f),
         onDragEnd: (f) => this.overlayPc?.endTransform(f),
         onTap: (x, y) => this.overlayPc?.tapSelection(x, y),
+        isBlockedTouch: (e) => this.isBlockedTouch(e),
       },
       this.camera
     );
@@ -689,24 +739,76 @@ class NotebookView {
   }
 
   /**
+   * Whether `id` (a Touch identifier, or a PointerEvent's `pointerId` for a
+   * touch-type pointer — the two number the same physical contact, an
+   * assumption blockNativeGesture in page-canvas.ts already relies on) is
+   * currently ineligible to start or continue a pan, pinch, selection-box
+   * drag, or scrollbar-thumb drag: a contact already known to have co-occurred
+   * with the stylus (`palmTouchIds`), or one that landed within
+   * PEN_COOLDOWN_MS of the stylus's last liftoff. Does *not* cover "the
+   * stylus is down right now" — callers with their own TouchList check that
+   * directly (`hasStylus`/`this.stylusDown`), since only they can see it fresh
+   * every event; this is the *identity* half of the rule.
+   */
+  private isPalmTouch(id: number): boolean {
+    if (this.palmTouchIds.has(id)) return true;
+    return performance.now() - this.stylusLiftAt < PEN_COOLDOWN_MS;
+  }
+
+  /**
+   * Whether `e` (a PointerEvent reaching the selection box or the scrollbar
+   * thumb, neither of which sees a TouchList of its own) should be treated as
+   * a palm/pen-priority contact and ignored. The pen itself is never blocked
+   * here — only `touch`-typed pointers are: while the stylus is actually
+   * down (pen priority), a contact already tagged as a palm, or one landing
+   * within the post-lift cooldown. Mirrors bindZoomGestures's own rules; see
+   * its doc comment for the full reasoning.
+   */
+  private isBlockedTouch(e: PointerEvent): boolean {
+    return e.pointerType === 'touch' && (this.stylusDown || this.isPalmTouch(e.pointerId));
+  }
+
+  /**
+   * If a touch-driven pan or pinch began within the last PEN_RACE_WINDOW_MS
+   * and the stylus has just shown up, undoes whatever drift it caused
+   * instead of merely halting it — the pencil usually lands a beat *after*
+   * the palm that's about to rest on the glass, so by the time its touch is
+   * seen, the palm may already have nudged the camera. Only one of pan/pinch
+   * is ever live at once, so checking both here is safe.
+   */
+  private restorePreStylusDrift(): void {
+    const now = performance.now();
+    if (this.pan && now - this.pan.snapT < PEN_RACE_WINDOW_MS) {
+      this.camera.x = this.pan.snapX;
+      this.camera.y = this.pan.snapY;
+      this.applyCamera();
+    } else if (this.pinch && now - this.pinch.snapT < PEN_RACE_WINDOW_MS) {
+      this.camera.x = this.pinch.snapX;
+      this.camera.y = this.pinch.snapY;
+      this.camera.zoom = this.pinch.snapZoom;
+      this.applyCamera();
+    }
+  }
+
+  /**
    * One-finger pan, two-finger pinch-zoom, and ctrl/⌘ + wheel zoom, all
    * driven entirely by our own JS now that `.nb-scroll` doesn't scroll
    * natively (see its own CSS comment) — replaces native one-finger
    * scrolling, which used to need no code here at all.
    *
    * The pinch session, once started, stays owned for as long as *any*
-   * (non-stylus) touch remains — not just while the count reads exactly 2.
-   * Real two-finger releases are rarely simultaneous (one finger lifts a
-   * beat early), and a third finger can graze the glass mid-gesture;
+   * (non-stylus, non-palm) touch remains — not just while the count reads
+   * exactly 2. Real two-finger releases are rarely simultaneous (one finger
+   * lifts a beat early), and a third finger can graze the glass mid-gesture;
    * re-deriving "are we pinching" from the instantaneous touch count on
    * every event used to mean that single frame at the wrong count stopped
    * preventDefault() entirely, handing the still-moving remaining touch to
    * native pan-x pan-y — occasionally flinging a completely different page
    * into view. Now, once `pinch` is set, touchmove keeps suppressing native
    * scroll at any count; it only actually applies the zoom/pan math while
-   * exactly 2 (non-stylus) touches are live, and just holds position (still
-   * swallowing the event) otherwise. A single remaining touch after a pinch
-   * ends is picked back up as a one-finger pan rather than dropped.
+   * exactly 2 eligible touches are live, and just holds position (still
+   * swallowing the event) otherwise. A single remaining eligible touch after
+   * a pinch ends is picked back up as a one-finger pan rather than dropped.
    *
    * A stylus contact (WebKit tags a `Touch` with `touchType: 'stylus'`) is
    * never eligible as a pan or pinch touch, at start or mid-gesture — a
@@ -717,31 +819,86 @@ class NotebookView {
    * already present) once a pan/pinch is already active, the session ends
    * outright rather than just skipping that tick's math, leaving the
    * pencil's own contact uncontested.
+   *
+   * Palms report as an ordinary touch — nothing about the contact itself
+   * marks it as illegitimate, so what does is *context*: any touch present
+   * at the same time as a stylus touch is a palm by definition, and stays
+   * ineligible for the rest of its time on the glass, even after the pencil
+   * lifts (`palmTouchIds`, checked via `isPalmTouch`/`eligible` below) — this
+   * specifically closes the hole where endTouch used to unconditionally pick
+   * a single remaining touch back up as a pan the instant the pencil lifted,
+   * which if that touch was a resting palm, restarted panning from it. A
+   * fresh contact landing shortly after the pencil lifts (PEN_COOLDOWN_MS) is
+   * treated the same way, for a palm resettling as the hand moves. And a pan
+   * or pinch that manages to start from a palm that lands *before* the
+   * pencil does gets its drift undone once the pencil shows up, not just
+   * stopped (`restorePreStylusDrift`, PEN_RACE_WINDOW_MS) — the pencil is
+   * rarely down at the exact instant the palm first touches.
    */
   private bindZoomGestures(): void {
     const s = this.scrollEl;
-    const dist = (t: TouchList): number => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+    const dist = (a: Touch, b: Touch): number => Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
     const hasStylus = (t: TouchList): boolean =>
       Array.from(t).some((touch) => (touch as WebKitTouch).touchType === 'stylus');
+    // Keeps `stylusDown` (consulted by callers with no TouchList of their
+    // own — bindScrollbarThumb, SelectionOverlay) exactly in sync with
+    // whether the pencil is touching right now, records the moment it lifts
+    // (for the cooldown), and tags every other touch currently present
+    // alongside it as a palm for the rest of its time on the glass.
+    const trackStylus = (t: TouchList): void => {
+      const stylus = hasStylus(t);
+      if (this.stylusDown && !stylus) this.stylusLiftAt = performance.now();
+      this.stylusDown = stylus;
+      if (stylus) {
+        for (const touch of Array.from(t)) {
+          if ((touch as WebKitTouch).touchType !== 'stylus') this.palmTouchIds.add(touch.identifier);
+        }
+      }
+    };
+    const eligible = (t: TouchList): Touch[] => Array.from(t).filter((touch) => !this.isPalmTouch(touch.identifier));
     const beginPan = (t: Touch): void => {
-      this.pan = { touchId: t.identifier, lastX: t.clientX, lastY: t.clientY, lastT: performance.now(), vx: 0, vy: 0 };
+      this.pan = {
+        touchId: t.identifier,
+        lastX: t.clientX,
+        lastY: t.clientY,
+        lastT: performance.now(),
+        vx: 0,
+        vy: 0,
+        snapX: this.camera.x,
+        snapY: this.camera.y,
+        snapT: performance.now(),
+      };
     };
     s.addEventListener(
       'touchstart',
       (e) => {
         this.stopMomentum();
-        if (hasStylus(e.touches)) {
+        trackStylus(e.touches);
+        if (this.stylusDown) {
+          this.restorePreStylusDrift();
           this.pan = null;
           this.pinch = null;
           return;
         }
-        if (e.touches.length >= 2) {
+        const live = eligible(e.touches);
+        if (live.length >= 2) {
           this.pan = null;
-          const mx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-          const my = (e.touches[0].clientY + e.touches[1].clientY) / 2;
-          this.pinch = { d0: dist(e.touches), z0: this.camera.zoom, mx, my, cx: mx, cy: my };
-        } else if (e.touches.length === 1 && !this.pinch) {
-          beginPan(e.touches[0]);
+          const mx = (live[0].clientX + live[1].clientX) / 2;
+          const my = (live[0].clientY + live[1].clientY) / 2;
+          this.pinch = {
+            d0: dist(live[0], live[1]),
+            z0: this.camera.zoom,
+            mx,
+            my,
+            cx: mx,
+            cy: my,
+            snapX: this.camera.x,
+            snapY: this.camera.y,
+            snapZoom: this.camera.zoom,
+            snapT: performance.now(),
+          };
+        } else if (live.length === 1 && !this.pinch) {
+          beginPan(live[0]);
         }
       },
       { passive: true }
@@ -749,19 +906,23 @@ class NotebookView {
     s.addEventListener(
       'touchmove',
       (e) => {
-        if (hasStylus(e.touches)) {
-          // the pencil joined (or was already down) mid-gesture: bail out of
+        trackStylus(e.touches);
+        if (this.stylusDown) {
+          // the pencil joined (or was already down) mid-gesture: undo
+          // whatever drift a palm caused before it landed, then bail out of
           // both pan and pinch entirely — see doc comment above.
+          this.restorePreStylusDrift();
           this.pan = null;
           this.pinch = null;
           return;
         }
         if (this.pinch) {
           e.preventDefault(); // own the whole gesture until every touch lifts — see doc comment above
-          if (e.touches.length < 2) return; // no 2-touch baseline right now: hold position, keep suppressing native scroll
+          const live = eligible(e.touches);
+          if (live.length < 2) return; // no 2-eligible-touch baseline right now: hold position, keep suppressing native scroll
           const p = this.pinch;
-          const rawMx = (e.touches[0].clientX + e.touches[1].clientX) / 2;
-          const rawMy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+          const rawMx = (live[0].clientX + live[1].clientX) / 2;
+          const rawMy = (live[0].clientY + live[1].clientY) / 2;
           // Low-pass the midpoint (exponential smoothing against p.cx/p.cy,
           // the previous frame's already-smoothed value) before using it for
           // either the zoom anchor or the pan delta below — real touch input
@@ -776,7 +937,7 @@ class NotebookView {
           const MIDPOINT_SMOOTHING = 0.5;
           const mx = p.cx + (rawMx - p.cx) * MIDPOINT_SMOOTHING;
           const my = p.cy + (rawMy - p.cy) * MIDPOINT_SMOOTHING;
-          this.setZoom((p.z0 * dist(e.touches)) / p.d0, { x: mx, y: my });
+          this.setZoom((p.z0 * dist(live[0], live[1])) / p.d0, { x: mx, y: my });
           // setZoom's own clamp above already hard-writes camera.x to the
           // single fixed point every frame when there's no horizontal range
           // (the common narrower-than-viewport case) — applying the
@@ -816,15 +977,28 @@ class NotebookView {
       { passive: false }
     );
     const endTouch = (e: TouchEvent): void => {
+      // a touch that just lifted is no longer "currently down", so it can't
+      // matter for palm-tracking any more — forget it (keeps the set from
+      // growing unboundedly, and lets a later, unrelated touch reuse the
+      // same identifier without inheriting its palm status).
+      for (const touch of Array.from(e.changedTouches)) this.palmTouchIds.delete(touch.identifier);
+      trackStylus(e.touches);
       if (e.touches.length >= 2) return; // still pinching (or a 3rd finger grazed) — see the pinch-session doc comment above
-      if (e.touches.length === 1 && !hasStylus(e.touches)) {
-        // one finger remains after a pinch (or an extra graze) ends — pick it
-        // back up as a pan instead of dropping input until the next touchstart
+      const live = eligible(e.touches);
+      if (live.length === 1 && !this.stylusDown) {
+        // one eligible touch remains after a pinch (or an extra graze) ends
+        // — pick it back up as a pan instead of dropping input until the
+        // next touchstart. If the one *raw* touch remaining is the pencil,
+        // or a palm/cooldown-blocked contact, `live` is empty here instead
+        // and this is skipped — that second case is the fix: the pencil
+        // lifting used to unconditionally re-arm a pan from whatever touch
+        // was left, which if it was a resting palm, restarted panning from
+        // it. See the class doc comment above.
         this.pinch = null;
-        beginPan(e.touches[0]);
+        beginPan(live[0]);
         return;
       }
-      if (e.touches.length > 0) return; // the one remaining touch is a stylus — leave it alone entirely
+      if (e.touches.length > 0) return; // the remaining touch is a stylus, or ineligible — leave it alone entirely
       const p = this.pan;
       this.pinch = null;
       this.pan = null;
@@ -994,6 +1168,11 @@ class NotebookView {
 
     let drag: { pointerId: number; startY: number; startCamY: number; trackH: number; thumbH: number } | null = null;
     thumb.addEventListener('pointerdown', (e) => {
+      // a palm resting on this narrow strip (or the pencil itself down
+      // elsewhere) shouldn't grab the thumb any more than it should start a
+      // pan — see bindZoomGestures's own doc comment for the palm/pen rules
+      // this mirrors.
+      if (this.isBlockedTouch(e)) return;
       // a pinch's second finger can land on the thumb's own hit strip —
       // refuse to start a competing drag of our own while bindZoomGestures
       // owns the gesture; see its own doc comment for how long that is.
@@ -1677,10 +1856,14 @@ class NotebookView {
     const swatches = el('div', { class: 'dock-group' });
     const HOLD_MS = 350;
     const SLOP = 6;
+    /** How long a displaced swatch takes to slide into its new slot. Short enough that the gap keeps up with a quick drag. */
+    const SLIDE_MS = 140;
     // both built below when `tool` is set; the trash is only in the DOM while a
     // swatch is actually being dragged, and sits immediately before the "+"
     let trash: HTMLElement | null = null;
     let plus: HTMLElement | null = null;
+    /** Shared by the whole row: holds `is-reordering` on past the end of a drag so the gap can close, and is cleared if another drag starts first. */
+    let slideTimer: ReturnType<typeof setTimeout> | null = null;
 
     const add = (c: string, index: number): void => {
       const isAuto = c === AUTO_COLOR;
@@ -1733,26 +1916,92 @@ class NotebookView {
           const r = trash.getBoundingClientRect();
           return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
         };
+        /**
+         * The row's slots, measured once when the drag arms: `center` is each
+         * swatch's layout centre (a scaled swatch — the active one — still
+         * reports its own centre, since a scale is about the origin), `pitch`
+         * the distance between neighbours.
+         *
+         * The preview below deliberately never touches the DOM. Re-inserting
+         * `s` to reorder it would implicitly release the pointer capture taken
+         * on pointerdown — the capture is dropped the moment the element
+         * leaves the document, even for the instant `insertBefore` takes — and
+         * the rest of the gesture would then be delivered to whatever happened
+         * to be under the pointer instead. So the gap is opened purely by
+         * sliding transforms, and the layout the hit test reads stays fixed
+         * for the whole drag, which also leaves it nothing to oscillate
+         * against.
+         */
+        let slots: { el: HTMLElement; center: number }[] = [];
+        let pitch = 0;
+        let fromIdx = 0;
+        let toIdx = 0;
+        const swatchEls = (): HTMLElement[] => Array.from(swatches.querySelectorAll<HTMLElement>('.swatch[data-color]'));
+        /** The swatches in the order the current preview would commit. */
+        const previewed = (): HTMLElement[] => {
+          const rest = slots.map((sl) => sl.el).filter((e) => e !== s);
+          rest.splice(toIdx, 0, s);
+          return rest;
+        };
+        /** Opens the gap at the slot the pointer is over: `s` slides to it, everything it displaces slides one slot the other way. */
+        const previewDropAt = (x: number): void => {
+          if (slots.length < 2 || !pitch) return;
+          const next = Math.max(0, Math.min(slots.length - 1, Math.round((x - slots[0].center) / pitch)));
+          if (next === toIdx) return;
+          toIdx = next;
+          slots.forEach((sl, i) => {
+            let dx = 0;
+            if (i === fromIdx) dx = slots[toIdx].center - slots[fromIdx].center;
+            else if (fromIdx < toIdx && i > fromIdx && i <= toIdx) dx = -pitch;
+            else if (toIdx < fromIdx && i >= toIdx && i < fromIdx) dx = pitch;
+            sl.el.style.setProperty('--slide', `${dx}px`);
+          });
+          // the dotted ring marks whichever colour would land first, so while a
+          // drag is previewing it belongs to the swatch heading for slot 0
+          const first = previewed()[0];
+          for (const sl of slots) sl.el.classList.toggle('swatch--primary', sl.el === first);
+        };
         const startDrag = (): void => {
           holdTimer = null; // the timer that called this has already fired — clearHold's clearTimeout would be a harmless no-op, but leaving the id set would make pointermove's "still waiting to arm" check below misfire
           suppressClick = true;
           s.classList.add('swatch--lifted');
-          if (trash && plus) swatches.insertBefore(trash, plus); // only the "+" shifts over; the swatches keep their positions, so the drop-index maths below stays valid
+          if (trash && plus) swatches.insertBefore(trash, plus); // only the "+" shifts over, so the slots measured below are unaffected
+          if (slideTimer != null) clearTimeout(slideTimer);
+          slideTimer = null;
+          swatches.classList.add('is-reordering'); // turns on the slide transition for the duration
+          const els = swatchEls();
+          slots = els.map((e) => {
+            const r = e.getBoundingClientRect();
+            return { el: e, center: r.left + r.width / 2 };
+          });
+          pitch = slots.length > 1 ? slots[1].center - slots[0].center : 0;
+          fromIdx = els.indexOf(s);
+          toIdx = fromIdx;
           ghost = el('div', { class: 'swatch-ghost' + (isAuto ? ' swatch--auto' : '') });
           ghost.style.background = isAuto ? s.style.background : c;
           document.body.append(ghost);
           positionGhost(downX, downY);
         };
-        /** Tears the drag down visually, leaving the order untouched. */
-        const abortDrag = (): void => {
+        /** Tears the drag down: the gap closes back up, and the dotted ring returns to the swatch that actually holds slot 0. */
+        const teardownDrag = (): void => {
           s.classList.remove('swatch--lifted');
           ghost?.remove();
           ghost = null;
           trash?.classList.remove('is-over');
           trash?.remove();
-          // a trailing `click` (if the browser sends one) still has to be
-          // swallowed, but the flag can't stay set — a snap-back doesn't
-          // rebuild the row, so a sticky flag would eat the next real tap
+          slots.forEach((sl, i) => {
+            sl.el.style.setProperty('--slide', '0px');
+            sl.el.classList.toggle('swatch--primary', i === 0);
+          });
+          // the transition has to outlive the reset above so the gap closes
+          // smoothly; a commit rebuilds the row before this lands, which is
+          // just as well — there's nothing left to transition by then
+          slideTimer = setTimeout(() => {
+            swatches.classList.remove('is-reordering');
+            slideTimer = null;
+          }, SLIDE_MS);
+          // swallow the trailing `click` the browser may still send for this
+          // press, then clear the flag so it can never eat a later real tap
           setTimeout(() => {
             suppressClick = false;
           }, 0);
@@ -1761,7 +2010,10 @@ class NotebookView {
           const droppedOnTrash = overTrash(x, y);
           const dock = this.toolsEl.getBoundingClientRect();
           const insideDock = x >= dock.left && x <= dock.right && y >= dock.top && y <= dock.bottom;
-          abortDrag(); // the measurements above are taken first — this removes the trash
+          // whatever the preview was showing is exactly what commits
+          const order = previewed().map((e) => e.dataset.color ?? '');
+          const reordered = toIdx !== fromIdx;
+          teardownDrag(); // the measurements above are taken first — this removes the trash
           if (droppedOnTrash) {
             if (colors[0] === c) return; // the primary colour is never removed
             removeSwatch(tool, c);
@@ -1769,18 +2021,7 @@ class NotebookView {
             this.renderTools();
             return;
           }
-          if (!insideDock) return; // dropped off the toolbar: snap back, change nothing
-          const siblings = Array.from(swatches.querySelectorAll<HTMLElement>('.swatch[data-color]')).filter((el) => el !== s);
-          let target = siblings.length;
-          for (let i = 0; i < siblings.length; i++) {
-            const r = siblings[i].getBoundingClientRect();
-            if (x < r.left + r.width / 2) {
-              target = i;
-              break;
-            }
-          }
-          const order = colors.filter((cc) => cc !== c);
-          order.splice(target, 0, c);
+          if (!insideDock || !reordered) return; // off the toolbar, or never left its slot: the gap just closes again
           setSwatchOrder(tool, order);
           saveToolState();
           this.renderTools();
@@ -1803,7 +2044,9 @@ class NotebookView {
           if (ghost) {
             e.preventDefault();
             positionGhost(e.clientX, e.clientY);
-            trash?.classList.toggle('is-over', overTrash(e.clientX, e.clientY));
+            const onTrash = overTrash(e.clientX, e.clientY);
+            trash?.classList.toggle('is-over', onTrash);
+            if (!onTrash) previewDropAt(e.clientX); // aiming at the trash isn't aiming at a slot
           }
         });
         const releaseCapture = (): void => {
@@ -1823,10 +2066,10 @@ class NotebookView {
         });
         // the browser took the gesture over (a scroll/zoom pan, a system
         // gesture): its coordinates are zeroed, so it can never be read as a
-        // drop — abort and leave the row exactly as it was
+        // drop — drop the preview and re-render the row back from state
         s.addEventListener('pointercancel', () => {
           releaseCapture();
-          if (ghost) abortDrag();
+          if (ghost) teardownDrag();
         });
       }
       swatches.append(s);
