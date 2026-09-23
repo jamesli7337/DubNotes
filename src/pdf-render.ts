@@ -62,6 +62,70 @@ function document(assetId: string): Promise<PdfDoc> {
   return p;
 }
 
+/**
+ * Registers a PDF that is *not* an entry in the app's `assets` store, so it
+ * can be rendered by the same pipeline as one that is.
+ *
+ * `document()` above can only reach a PDF that lives in the notebook database
+ * (via `getAsset`). The split pane's reference PDFs deliberately do not live
+ * there — they belong to the pane, not to any notebook, and must stay out of
+ * `exportAll`'s backup sweep — so they hand their bytes in here instead, under
+ * a key of the caller's choosing. Everything downstream (`ensurePdfPage`,
+ * `getPdfPage`, `isPdfPageFailed`, the rendered-page LRU, the blank-render
+ * backstop, the failure memo) then works on that key exactly as it does on an
+ * asset id, with no other behaviour change and nothing new for existing
+ * callers to care about.
+ *
+ * Idempotent: registering an already-known key keeps the parsed document.
+ * Pair with `releasePdfBytes` when the caller is finished with it.
+ */
+export function registerPdfBytes(key: string, data: ArrayBuffer): void {
+  if (docs.has(key)) return;
+  const p = (async () => {
+    const lib = await pdfjs();
+    return lib.getDocument({ data: new Uint8Array(data.slice(0)), wasmUrl: PDFJS_WASM_URL }).promise;
+  })();
+  docs.set(key, p);
+  p.catch(() => docs.delete(key)); // let a failed load be retried later, same as document()
+}
+
+/** True once `registerPdfBytes` has been called for `key` and not released since. */
+export function hasPdfBytes(key: string): boolean {
+  return docs.has(key);
+}
+
+/** Forgets a document registered by `registerPdfBytes`, along with its rendered pages and failure memo. */
+export function releasePdfBytes(key: string): void {
+  const doc = docs.get(key);
+  docs.delete(key);
+  // `cleanup()` frees the parsed page data; the worker-side document is
+  // collected once nothing references the proxy
+  void doc?.then((d) => d.cleanup()).catch(() => undefined);
+  for (const k of [...rendered.keys()]) if (k.startsWith(`${key}#`)) rendered.delete(k);
+  for (const k of [...failed]) if (k.startsWith(`${key}#`)) failed.delete(k);
+}
+
+/**
+ * Each page's own size in PDF points (its viewport at scale 1). The split
+ * pane lays a reference PDF out in these units directly, rather than fitting
+ * every page into the app's own page box the way an import does.
+ */
+export async function pdfPageSizes(key: string): Promise<Array<{ w: number; h: number }>> {
+  const doc = await document(key);
+  const out: Array<{ w: number; h: number }> = [];
+  for (let i = 1; i <= doc.numPages; i++) {
+    try {
+      const p = await doc.getPage(i);
+      const vp = p.getViewport({ scale: 1 });
+      out.push({ w: vp.width, h: vp.height });
+      p.cleanup();
+    } catch {
+      out.push({ w: 612, h: 792 }); // a page whose size can't be read falls back to US Letter
+    }
+  }
+  return out;
+}
+
 const rendered = new Map<string, HTMLCanvasElement>(); // insertion order = age
 const inFlight = new Map<string, Promise<HTMLCanvasElement>>();
 const key = (assetId: string, page: number): string => `${assetId}#${page}`;

@@ -42,7 +42,7 @@ import { loadImageFile } from '../media';
 import { alertDialog, confirmDialog, openAnchoredModal, openModal, textPrompt, type Modal } from './dialog';
 import { blockGestures, el } from './dom';
 import { icon, type IconName } from './icon';
-import { SecondaryPane } from './secondary-pane';
+import { IMAGE_ACCEPT, SecondaryPane } from './secondary-pane';
 
 type ViewOp = Op | { kind: 'del-page'; page: Page; strokes: Stroke[]; elements: PageElement[] };
 /** WebKit-only, non-standard: tags a Touch as a stylus contact — see bindZoomGestures and page-canvas.ts's own copy of this type. */
@@ -562,7 +562,7 @@ class NotebookView {
 
     this.imageInput = el('input', {
       type: 'file',
-      accept: 'image/*',
+      accept: IMAGE_ACCEPT,
       style: 'display:none',
       'aria-hidden': 'true',
     }) as HTMLInputElement;
@@ -1459,6 +1459,7 @@ class NotebookView {
     };
     item('Split screen page', 'book', () => this.pane.startPagePick());
     item('Split screen image', 'image', () => this.pane.startImagePick());
+    item('Split screen PDF', 'pdf', () => this.pane.startPdfPick());
     modal = openAnchoredModal(anchor, menu);
   }
 

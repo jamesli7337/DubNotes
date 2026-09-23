@@ -19,6 +19,20 @@ const MAX_SIDE = 4096;
 const MAX_AREA = 12e6;
 
 /**
+ * Backing-store pixels per laid-out CSS pixel for a `w × h` (CSS px) canvas:
+ * `DPR × quality`, reduced as far as MAX_SIDE/MAX_AREA require. Shared so
+ * every canvas the split pane allocates — notebook pages and PDF pages alike
+ * — hits the same ceiling, and so overshooting it costs sharpness rather than
+ * a canvas iOS silently hands back blank.
+ */
+export function canvasPixelFactor(w: number, h: number, quality = 1): number {
+  if (!(w > 0) || !(h > 0)) return 1;
+  const bySide = Math.min(MAX_SIDE / w, MAX_SIDE / h);
+  const byArea = Math.sqrt(MAX_AREA / (w * h));
+  return Math.max(0.5, Math.min(DPR * quality, bySide, byArea));
+}
+
+/**
  * A page rendered read-only into an arbitrary container: the paper template,
  * its background (an imported PDF page or image) and every committed item in
  * z-order, painted once into a single canvas.
@@ -40,6 +54,13 @@ export class PageView {
   private readonly ph: number;
 
   private scale = 1;
+  /**
+   * Backing-store resolution multiplier, on top of `scale` — see setQuality.
+   * Separate from `scale` because a camera-scrolled host (the split pane's
+   * scroller) lays its pages out in *world* units and lets one CSS transform
+   * do the visual scaling, so only the pixel density needs to track zoom.
+   */
+  private quality = 1;
   private host: HTMLElement | null = null;
   private canvas: HTMLCanvasElement | null = null;
   private ctx: CanvasRenderingContext2D | null = null;
@@ -95,6 +116,26 @@ export class PageView {
   }
 
   /**
+   * Re-renders the backing store at `q` × device pixels per laid-out pixel,
+   * leaving the CSS size alone. This is what a camera-scrolled host uses
+   * instead of `setScale`: its pages are laid out in world units and scaled
+   * visually by one CSS transform on the camera, so zooming must change the
+   * *resolution* the page is drawn at without changing its layout size.
+   *
+   * Costly (a full repaint at a new canvas size), so callers should apply it
+   * once a zoom gesture has settled rather than per frame. A no-op if `q`
+   * hasn't moved. MAX_SIDE/MAX_AREA still cap the result, so an extreme `q`
+   * costs sharpness rather than a failed allocation.
+   */
+  setQuality(q: number): void {
+    if (q === this.quality) return;
+    this.quality = q;
+    if (!this.canvas) return;
+    this.resize();
+    this.refresh();
+  }
+
+  /**
    * Repaints from the store. Safe to call as often as the caller likes — it's
    * the same full-page paint `PageCanvas.rebuild` does for its own cache, and
    * the pane only calls it when the page it's showing actually changed.
@@ -103,10 +144,10 @@ export class PageView {
     const ctx = this.ctx;
     const c = this.canvas;
     if (!ctx || !c) return;
-    const dpr = this.deviceScale();
+    const f = this.pixelFactor();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, c.width, c.height);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.setTransform(f, 0, 0, f, 0, 0);
     // `onReady` fires only when something wasn't decoded/rendered yet (a PDF
     // page still rasterising, an image still decoding) — once it lands, this
     // repaint picks it up and registers nothing further, so there's no loop.
@@ -123,25 +164,16 @@ export class PageView {
     }
   }
 
-  /**
-   * The device-pixel multiplier actually used for the backing store: DPR,
-   * reduced as far as MAX_SIDE/MAX_AREA require. Independent of `scale`'s own
-   * CSS layout, so overshooting the limits costs sharpness and nothing else.
-   */
-  private deviceScale(): number {
-    const w = this.pw * this.scale;
-    const h = this.ph * this.scale;
-    const bySide = Math.min(MAX_SIDE / w, MAX_SIDE / h);
-    const byArea = Math.sqrt(MAX_AREA / (w * h));
-    return Math.max(0.5, Math.min(DPR, bySide, byArea));
+  private pixelFactor(): number {
+    return canvasPixelFactor(this.pw * this.scale, this.ph * this.scale, this.quality);
   }
 
   private resize(): void {
     const c = this.canvas;
     if (!c) return;
-    const dpr = this.deviceScale();
-    c.width = Math.max(1, Math.round(this.pw * this.scale * dpr));
-    c.height = Math.max(1, Math.round(this.ph * this.scale * dpr));
+    const f = this.pixelFactor();
+    c.width = Math.max(1, Math.round(this.pw * this.scale * f));
+    c.height = Math.max(1, Math.round(this.ph * this.scale * f));
     c.style.width = `${this.pw * this.scale}px`;
     c.style.height = `${this.ph * this.scale}px`;
   }

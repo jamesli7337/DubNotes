@@ -921,6 +921,15 @@ select {
   position: sticky;
   top: 0;
   z-index: 30;
+  /* `.nb-scroll` stopped being a real scroll container in the camera
+     migration (see its own comment), so `position: sticky` here has nothing
+     left to stick against — a drag starting on the bar (background or any
+     button, touch-action is the intersection of an element and all its
+     ancestors, so this reaches them too) was falling through to the
+     document's own native scroll instead, dragging the whole bar down with
+     it and rubber-banding at the top. The header is chrome, not scrollable
+     content, so it never had any gesture of its own to claim here. */
+  touch-action: none;
   /* back | title | actions as three grid zones (rather than back + a
      flex:1 title + actions) so the title is centered on the bar's own
      midpoint, not just within whatever space happens to be left over —
@@ -2586,15 +2595,10 @@ select {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.pane__nav {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-}
-.pane__nav[hidden] {
-  display: none;
-}
+/* "3 / 12", tracking whatever the scroller has most in view. Tabular numerals
+   so it doesn't jiggle the header as the count ticks past. */
 .pane__pagelabel {
+  flex: none;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
   color: var(--on-surface-variant);
@@ -2616,25 +2620,36 @@ select {
   color: #dc2626;
 }
 
+/* The scroller's viewport (see page-scroller.ts). `touch-action: none` because
+   it runs its own one-finger pan and pinch; nothing here scrolls natively. */
 .pane__stage {
   flex: 1;
   position: relative;
   overflow: hidden;
   min-height: 0;
-  touch-action: none; /* the pane runs its own pinch/pan — see bindViewGestures */
+  touch-action: none;
   background: var(--lib-bg, #f3f5f9);
 }
-.pane__content {
+/* The single element the camera transform is written to — same
+   `scale(zoom) translate(-x, -y)` / `transform-origin: 0 0` convention the
+   notebook's own `.nb-camera` uses, so screenX = (worldX - x) * zoom. Pages
+   inside are absolutely positioned from a layout computed in JS, which is what
+   lets a pan frame avoid `offsetTop` and `getBoundingClientRect` entirely. */
+.pscroll-camera {
   position: absolute;
   top: 0;
   left: 0;
   transform-origin: 0 0;
+  will-change: transform;
 }
-.pane__canvas,
-.pane__img {
-  display: block;
+.pscroll-page {
+  position: absolute;
   border-radius: 4px;
   box-shadow: 0 1px 6px rgba(4, 21, 52, 0.18);
+  overflow: hidden;
+}
+.pane__canvas {
+  display: block;
   -webkit-user-select: none;
   user-select: none;
   pointer-events: none; /* the stage owns every gesture; nothing here is a drop/drag target */
@@ -2698,4 +2713,167 @@ select {
 .lib--picking .tree__more:disabled,
 .lib--picking .fab-dock button:disabled {
   opacity: 0.4;
+}
+
+/* ------------------------------------------------- floating image overlay */
+/* A reference image (periodic table, diagram) floating *over* the notebook
+   rather than splitting it — the notebook keeps its full width. `position:
+   fixed` is what pins it to the viewport: its containing block is the
+   viewport, so it holds its screen position for free while `.nb-camera`'s
+   transform pans and zooms the pages underneath, and `.nb-scroll`'s
+   `overflow: hidden` never clips it (that clipping only reaches descendants
+   whose containing block is inside it).
+
+   z-index 20 puts it above every page-level layer (`.nb-drag-preview` 1,
+   `.guide` 2, `.sel-box` 3 — none of which sit in a stacking context of their
+   own) and below the app bar (30), the dock (40), the scrollbar thumb (40)
+   and the AI panel (60), exactly as intended.
+
+   The box is sized to the image and nothing around it exists, so every touch
+   outside it still reaches the page canvas and draws normally. */
+.img-overlay {
+  position: fixed;
+  z-index: 20;
+  touch-action: none; /* it runs its own drag/resize; iOS must not pan instead */
+  border-radius: 6px;
+  box-shadow: 0 2px 14px rgba(4, 21, 52, 0.3);
+  background: var(--surface-c-lowest);
+  cursor: move;
+  -webkit-user-select: none;
+  user-select: none;
+  overflow: hidden;
+}
+.img-overlay__img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* the box is always kept on-aspect (see clampOverlay), so `fill` is exact
+     and avoids the letterbox bars `contain` would add mid-resize */
+  object-fit: fill;
+  pointer-events: none; /* the overlay itself owns the drag */
+  -webkit-user-drag: none;
+}
+/* inset into the corner rather than hanging off it, so the overlay's hit area
+   never reaches beyond the image the user can actually see */
+.img-overlay__close {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  width: 30px;
+  height: 30px;
+  min-height: 0;
+  padding: 0;
+  border-radius: var(--r-full);
+  background: rgba(255, 255, 255, 0.92);
+  color: var(--primary);
+  box-shadow: 0 1px 4px rgba(4, 21, 52, 0.3);
+  touch-action: none;
+}
+.img-overlay__close:hover:not(:disabled) {
+  background: #dc2626;
+  color: #fff;
+}
+.img-overlay__resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 26px;
+  height: 26px;
+  cursor: nwse-resize;
+  touch-action: none;
+  background: linear-gradient(135deg, transparent 45%, rgba(255, 255, 255, 0.9) 45%);
+  border-bottom-right-radius: 6px;
+}
+
+/* ----------------------------------------------- floating PDF overlay */
+/* Shares `.img-overlay`'s positioning (fixed, z-index 20, sized to itself) so
+   it follows the viewport rather than a page and only its own box takes
+   touches — see that rule's comment. What it adds is a header and a
+   PageScroller body, so it needs a column layout rather than a bare image. */
+.pdf-overlay {
+  display: flex;
+  flex-direction: column;
+  background: var(--surface-c-lowest);
+  cursor: default; /* only the header drags, unlike the image */
+}
+.pdf-overlay__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 4px 4px 4px 10px;
+  border-bottom: 1px solid var(--outline-variant);
+  cursor: move;
+  touch-action: none;
+}
+.pdf-overlay__title {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--on-surface-variant);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pdf-overlay__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+.pdf-overlay__min,
+.pdf-overlay__close {
+  width: 28px;
+  height: 28px;
+  min-height: 0;
+  padding: 0;
+}
+.pdf-overlay__close:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.1);
+  color: #dc2626;
+}
+/* the scroller's viewport; it runs its own pinch/pan, same as the page pane */
+.pdf-overlay__stage {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+  touch-action: none;
+  background: var(--lib-bg, #f3f5f9);
+}
+/* minimised: the window itself is hidden, and `.pdf-tab` stands in for it.
+   Hidden rather than torn down, so restoring keeps its scroll and zoom. */
+.pdf-overlay--min {
+  display: none;
+}
+
+/* the collapsed tab, stuck to whichever edge the window was nearest */
+.pdf-tab {
+  position: fixed;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  max-width: 190px;
+  padding: 0 12px;
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--r-full);
+  background: var(--surface-c-lowest);
+  box-shadow: var(--sh-2);
+  color: var(--on-surface-variant);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: none;
+}
+.pdf-tab__name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pdf-tab:hover {
+  background: var(--surface-c-low, var(--surface-c-lowest));
 }
