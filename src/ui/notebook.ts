@@ -187,6 +187,14 @@ class NotebookView {
   private handPan: { pointerId: number; x: number; y: number; camX: number; camY: number } | null = null;
   /** Recomputes the custom scrollbar thumb's size/position (see bindScrollbarThumb); called after anything that changes the camera or the notebook's total content height without itself going through applyCamera (syncPages). */
   private layoutScrollbarThumb: () => void = () => {};
+  /**
+   * Undoes everything bindScrollbarThumb put outside this view: the thumb
+   * element itself (it lives on `document.body`, so nothing else removes it)
+   * and the four global subscriptions that keep it in sync. Set there, called
+   * by onLeave — without it every notebook visit left another orphaned thumb
+   * and another live listener behind for the life of the tab.
+   */
+  private destroyScrollbarThumb: () => void = () => {};
   /** The cheap per-tick half of bindScrollbarThumb — just repositions the thumb via transform against already-cached size/range, called from every applyCamera(). */
   private repositionScrollbarThumb: () => void = () => {};
   /** The single, notebook-level selection box/handles overlay — see selection.ts's own doc comment for why there's one shared instance instead of one per page. */
@@ -375,6 +383,7 @@ class NotebookView {
       this.deactivateAll(); // commit an open text edit before the canvases go away
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
       this.stopMomentum();
+      this.destroyScrollbarThumb();
       this.pane.destroy(); // takes the pane down but keeps its saved state, so coming back here restores it
       this.aiMode.destroyPanel();
       store.flushNow();
@@ -550,6 +559,7 @@ class NotebookView {
     this.bindZoomGestures();
     this.bindHandToolGestures();
     this.bindScrollbarThumb();
+    this.bindOutsidePenPressCancelsSelection();
     // resizing changes where the selection lands on screen without changing
     // its frame — reposition the callout (if open) to match, same idea as
     // openModal's anchored popovers re-placing themselves on resize/
@@ -805,6 +815,58 @@ class NotebookView {
    */
   private isBlockedTouch(e: PointerEvent): boolean {
     return e.pointerType === 'touch' && (this.stylusDown || this.isPalmTouch(e.pointerId));
+  }
+
+  /**
+   * A pen press anywhere outside the current selection or adjustable-line
+   * state cancels it — a lasso/shape/rect selection, a selected shape, or a
+   * straightened line still in its adjustable phase — regardless of which
+   * tool is active and regardless of which page (or the gray gap between
+   * pages) the press lands on.
+   *
+   * Each PageCanvas already clears its *own* selection for some tools
+   * (lasso, an empty shapes-tap) and always settles its *own* pending line
+   * on any same-page press outside its handles — but nothing previously
+   * told a *different* page's still-selected/still-pending state to let go,
+   * so switching to an unrelated tool and drawing elsewhere, or moving to a
+   * different page entirely, left the old selection's box, handles, and
+   * decorative lasso outline sitting there indefinitely (`overlayPc`
+   * pointing at a page whose own `selected`/`lastLassoPath` nothing had ever
+   * cleared). A capture-phase listener here — running before any page's own
+   * pointerdown handling — is the one place that can see every press
+   * regardless of target, including the gray gap where no page's own
+   * listener fires at all.
+   *
+   * A press that lands inside `.sel-box` itself is left alone entirely
+   * (that element's own onDown handles it, exactly as before — revealing
+   * the callout, starting a move/resize/rotate). A press on the SAME page
+   * that currently owns a pending line is also left alone: that page's own
+   * startPress already decides correctly whether it hit one of the line's
+   * own handles (continue adjusting) or landed elsewhere (commit it) — this
+   * only has to settle any *other* page's pending line, which never gets
+   * that chance on its own.
+   *
+   * Only a pen press does this — palm and finger contacts must never clear
+   * a selection, so this reuses the exact same pen-priority/palm-contact
+   * check (isBlockedTouch, backed by palmTouchIds/stylusDown/the post-lift
+   * cooldown) as everything else in the palm-rejection work, rather than a
+   * new heuristic.
+   */
+  private bindOutsidePenPressCancelsSelection(): void {
+    this.scrollEl.addEventListener(
+      'pointerdown',
+      (e) => {
+        if (e.pointerType !== 'pen' || this.isBlockedTouch(e)) return;
+        const target = e.target as HTMLElement;
+        if (target.closest('.sel-box')) return; // inside - handled by SelectionOverlay's own onDown
+        if (this.overlayPc) this.overlayPc.clearSelection();
+        const samePageId = (target.closest('.page') as HTMLElement | null)?.dataset.pageId ?? null;
+        for (const [pageId, pc] of this.pcByPage) {
+          if (pageId !== samePageId) pc.commitLine();
+        }
+      },
+      { capture: true }
+    );
   }
 
   /**
@@ -1202,6 +1264,15 @@ class NotebookView {
       reposition();
     };
     this.layoutScrollbarThumb = layout;
+
+    // Every subscription below is held in a named binding rather than an
+    // inline closure purely so destroyScrollbarThumb can hand the exact same
+    // reference back to removeEventListener.
+    const onVisibility = (): void => {
+      if (!document.hidden) layout();
+    };
+    const onPageShow = (): void => layout();
+
     window.addEventListener('resize', layout);
     // Backstops for the same class of bug: `.nb-scroll`'s own box can change
     // shape (briefly, or for real) without a matching `window.resize` ever
@@ -1211,12 +1282,31 @@ class NotebookView {
     // backgrounding and the restore afterward); visibilitychange/pageshow
     // are the direct backstop for iOS specifically not firing resize on
     // return to foreground.
-    new ResizeObserver(() => layout()).observe(s);
-    document.addEventListener('visibilitychange', () => {
-      if (!document.hidden) layout();
-    });
-    window.addEventListener('pageshow', () => layout());
+    const trackObserver = new ResizeObserver(() => layout());
+    trackObserver.observe(s);
+    // The track now starts below the dock (see layout), so the dock changing
+    // height moves it — which happens on every tool switch, since each tool's
+    // options row is its own height and `.nb-dock--collapsed` drops it
+    // entirely. No resize or camera change accompanies that, so without this
+    // the track stayed where the previous tool left it.
+    const dockObserver = new ResizeObserver(() => layout());
+    dockObserver.observe(this.toolsEl);
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pageshow', onPageShow);
     layout();
+
+    this.destroyScrollbarThumb = () => {
+      window.removeEventListener('resize', layout);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pageshow', onPageShow);
+      trackObserver.disconnect();
+      dockObserver.disconnect();
+      thumb.remove();
+      // a stale layout()/reposition() after teardown would touch a detached
+      // node for nothing; put the no-op defaults back
+      this.layoutScrollbarThumb = () => {};
+      this.repositionScrollbarThumb = () => {};
+    };
 
     let drag: { pointerId: number; startY: number; startCamY: number; trackH: number; thumbH: number } | null = null;
     thumb.addEventListener('pointerdown', (e) => {
