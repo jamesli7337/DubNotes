@@ -42,6 +42,7 @@ import { loadImageFile } from '../media';
 import { alertDialog, confirmDialog, openAnchoredModal, openModal, textPrompt, type Modal } from './dialog';
 import { blockGestures, el } from './dom';
 import { icon, type IconName } from './icon';
+import { SecondaryPane } from './secondary-pane';
 
 type ViewOp = Op | { kind: 'del-page'; page: Page; strokes: Stroke[]; elements: PageElement[] };
 /** WebKit-only, non-standard: tags a Touch as a stylus contact — see bindZoomGestures and page-canvas.ts's own copy of this type. */
@@ -300,6 +301,13 @@ class NotebookView {
 
   private readonly aiMode: AiMode;
 
+  /** `.nb-split`: the flex row holding `.nb-scroll` and, when one is open, the read-only secondary pane. */
+  private splitEl!: HTMLElement;
+  /** The read-only split pane (see secondary-pane.ts). Owns its own state and persistence; this view only tells it when a page it's showing changed, and takes it down on the way out. */
+  private pane!: SecondaryPane;
+  /** The app bar's split-screen button — exempt from applyAiToolbarLockdown, like the AI buttons themselves. */
+  private splitBtn!: HTMLButtonElement;
+
   constructor(root: HTMLElement, nb: Notebook) {
     this.root = root;
     this.nb = nb;
@@ -367,6 +375,7 @@ class NotebookView {
       this.deactivateAll(); // commit an open text edit before the canvases go away
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
       this.stopMomentum();
+      this.pane.destroy(); // takes the pane down but keeps its saved state, so coming back here restores it
       this.aiMode.destroyPanel();
       store.flushNow();
       resetActiveColorsToPrimary();
@@ -450,6 +459,19 @@ class NotebookView {
       this.aiMode.sendNow(this.currentPageId);
     });
 
+    // Split screen: show a second, read-only page (from any notebook) or a
+    // reference image beside this one. Sits directly right of the AI button
+    // and, like it, stays enabled while AI mode is on (see
+    // applyAiToolbarLockdown) — the pane is read-only, so nothing it can do
+    // interferes with the turn AI mode is capturing.
+    this.splitBtn = el('button', {
+      class: 'iconbtn',
+      title: 'Split screen',
+      'aria-label': 'Split screen',
+    }) as HTMLButtonElement;
+    this.splitBtn.append(icon('split'));
+    this.splitBtn.addEventListener('click', () => this.openSplitMenu(this.splitBtn));
+
     // combined "Insert image" and "Import PDF pages" into one Import button
     // (same underlying inputs/handlers) — picking one opens the anchored menu
     // below instead of each having its own app-bar icon.
@@ -488,7 +510,7 @@ class NotebookView {
     // — undo/redo used to live in the right zone; now that they're in the
     // dock's top row instead, this keeps the bar from reading lopsided.
     const rightGroup = el('div', { class: 'nb-appbar__right' });
-    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, importBtn, exportBtn, pagesBtn, paperBtn);
+    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, this.splitBtn, importBtn, exportBtn, pagesBtn, paperBtn);
     bar.append(back, this.titleEl, rightGroup);
     this.appBarRightGroup = rightGroup;
 
@@ -500,6 +522,14 @@ class NotebookView {
     this.toolsOptionsEl = el('div', { class: 'nb-dock__row nb-dock__row--options' });
     this.toolsEl.append(this.toolsTopEl, this.toolsOptionsEl);
     this.scrollEl = el('div', { class: 'nb-scroll' });
+    // `.nb-split` is what now fills the space under the dock: `.nb-scroll` is
+    // its (flex: 1) first child and the read-only secondary pane, when one is
+    // open, is its second — a *sibling* of the scroller, deliberately, so the
+    // pane's own pinch/pan gestures never reach bindZoomGestures' listeners
+    // and the AI panel's `.nb.ai-panel-open .nb-scroll` margin rule keeps
+    // indenting exactly what it always did.
+    this.splitEl = el('div', { class: 'nb-split' });
+    this.splitEl.append(this.scrollEl);
     this.cameraEl = el('div', { class: 'nb-camera' });
     this.dragPreviewCanvas = el('canvas', { class: 'nb-drag-preview' }) as HTMLCanvasElement;
     this.dragPreviewCtx = this.dragPreviewCanvas.getContext('2d');
@@ -554,12 +584,21 @@ class NotebookView {
       if (file) void this.importPdfPagesHere(file);
     });
 
-    view.append(bar, this.toolsEl, this.scrollEl, this.imageInput, this.pdfInput);
+    view.append(bar, this.toolsEl, this.splitEl, this.imageInput, this.pdfInput);
     this.aiMode.mountPanel(view); // fixed-position, so it overlays regardless of where it sits in the DOM
     this.root.replaceChildren(view);
     // has to wait until scrollEl is actually attached and laid out —
     // clientWidth/Height (and so the canvas's own pixel size) read 0 before that.
     this.layoutDragPreviewCanvas();
+
+    // Opening/closing/floating the pane resizes `.nb-scroll` without a window
+    // `resize` to announce it, and the shared drag-preview canvas is sized by
+    // hand against that box (the custom scrollbar thumb re-lays-out on its
+    // own, via the ResizeObserver bindScrollbarThumb already puts on it).
+    this.pane = new SecondaryPane(this.nb.id, this.splitEl, {
+      onLayout: () => this.layoutDragPreviewCanvas(),
+    });
+    void this.pane.restore(); // async only for an image split's blob; a page split restores synchronously
 
     this.renderTools();
     this.syncHistory();
@@ -1395,6 +1434,31 @@ class NotebookView {
     };
     item('Import PDF pages', 'import', () => this.pdfInput.click());
     item('Insert image', 'image', () => this.imageInput.click());
+    modal = openAnchoredModal(anchor, menu);
+  }
+
+  // ---------------------------------------------------------- split screen
+  /**
+   * The split-screen button's own dropdown. `openAnchoredModal` gives it the
+   * light-dismiss behaviour every other anchored popover here has (an outside
+   * tap closes it, a second tap on the button toggles it) — the pane itself
+   * is *not* built on a modal, since it has to survive outside taps, route
+   * changes and everything else a modal dismisses on.
+   */
+  private openSplitMenu(anchor: HTMLElement): void {
+    const menu = el('div', { class: 'menu menu--split', role: 'menu' });
+    let modal: Modal | null = null;
+    const item = (label: string, name: IconName, run: () => void): void => {
+      const b = el('button', { class: 'menu__item menu__item--icon', role: 'menuitem' });
+      b.append(icon(name, 'sm'), el('span', { text: label }));
+      b.addEventListener('click', () => {
+        modal?.close();
+        run();
+      });
+      menu.append(b);
+    };
+    item('Split screen page', 'book', () => this.pane.startPagePick());
+    item('Split screen image', 'image', () => this.pane.startImagePick());
     modal = openAnchoredModal(anchor, menu);
   }
 
@@ -2867,7 +2931,10 @@ class NotebookView {
       (b as HTMLButtonElement).disabled = active;
     }
     for (const b of this.appBarRightGroup.querySelectorAll('button')) {
-      if (b === this.aiToggleBtn || b === this.aiSendBtn) continue;
+      // the split button is exempt alongside the AI ones: its pane is
+      // read-only, so opening or closing it can't disturb the turn AI mode is
+      // capturing — and a reference page is most useful while writing to AI.
+      if (b === this.aiToggleBtn || b === this.aiSendBtn || b === this.splitBtn) continue;
       (b as HTMLButtonElement).disabled = active;
     }
   }
@@ -3132,6 +3199,11 @@ class NotebookView {
     this.redoStack.length = 0;
     this.syncHistory();
     this.enforceAndMaybeRerender();
+    // A fresh edit repaints its own PageCanvas directly and never goes through
+    // rebuildIfMounted (only undo/redo and AiMode do), so the split pane has
+    // to be told here as well — otherwise a page shown in both places would
+    // update in the main view and sit stale in the pane until an undo.
+    for (const id of opPageIds(op)) this.pane?.refreshIfShowing(id);
   }
 
   /** While AI mode is active on the current page, Undo/Redo act on that
@@ -3272,6 +3344,9 @@ class NotebookView {
   /** After undo/redo touched a page: drop any selection there (it may reference gone items) and repaint. */
   private rebuildIfMounted(pageId: string): void {
     if (this.mounted.has(pageId)) this.pcByPage.get(pageId)?.refresh();
+    // the split pane may be showing this same page read-only — it holds its
+    // own PageView, which `pcByPage` knows nothing about
+    this.pane?.refreshIfShowing(pageId);
   }
 
   /** Undo/redo button enabled state — reflects AiMode's turn-scoped stack while it's active on the current page (Undo/Redo are exceptions to the toolbar lockdown, see applyAiToolbarLockdown), the main stacks otherwise. */
@@ -3287,6 +3362,17 @@ class NotebookView {
     this.undoBtn.disabled = !pending && this.undoStack.length === 0;
     this.redoBtn.disabled = this.redoStack.length === 0;
   }
+}
+
+/**
+ * Every page an op touched. All but two kinds carry a single `pageId`; a
+ * cross-page selection move names both ends, and a page deletion names the
+ * page itself. Only used to tell the split pane what to repaint.
+ */
+function opPageIds(op: ViewOp): string[] {
+  if (op.kind === 'move-page') return [op.fromPageId, op.toPageId];
+  if (op.kind === 'del-page') return [op.page.id];
+  return [op.pageId];
 }
 
 const ERASER_MODES: Record<EraserMode, { label: string; sub: string }> = {

@@ -9,6 +9,7 @@ import { alertDialog, confirmDialog, openAnchoredModal, openModal, textPrompt, t
 import { el } from './dom';
 import { icon, type IconName } from './icon';
 import { lazyThumb } from './thumb';
+import { cancelSplitPick, chooseSplitNotebook, pendingSplitPick } from './secondary-pane';
 
 /** Which folder rows are expanded in the tree (remembered per device). */
 const OPEN_KEY = 'noteapp.folders.open';
@@ -39,14 +40,54 @@ function saveSortKey(k: SortKey): void {
 }
 
 /**
+ * Non-null while the library is standing in as a notebook *picker* for the
+ * split-screen pane (see secondary-pane.ts): tapping a notebook chooses it
+ * and returns to the notebook the pick came from, rather than opening it.
+ *
+ * Module-scoped rather than threaded through every builder because
+ * mountLibrary builds the whole screen in one synchronous pass — it is set
+ * at the top of that pass and read during it, and never outlives it.
+ */
+let pickMode: { from: string } | null = null;
+
+/** Where tapping a notebook goes: into the pane while picking, open it otherwise. */
+function openNotebook(id: string): void {
+  if (pickMode) chooseSplitNotebook(id);
+  else location.hash = `#/nb/${id}`;
+}
+
+/**
  * The library screen for one folder (`null` = the root): a folder tree at the
  * top, then that folder's notebooks and dividers in their manual order.
  */
 export function mountLibrary(root: HTMLElement, folderId: string | null): void {
+  pickMode = pendingSplitPick();
   const folder = folderId ? store.folders.get(folderId) ?? null : null;
   const wrap = el('div', { class: 'lib' });
   wrap.append(buildHeader(folder), buildMain(root, folder), buildFab(root, folder));
+  if (pickMode) {
+    wrap.classList.add('lib--picking');
+    wrap.prepend(buildPickBanner());
+    // Everything that would change the library itself is off while picking —
+    // only navigating folders and choosing a notebook stay live. Done here, in
+    // one sweep, rather than by giving every builder its own pick-mode branch.
+    const off = wrap.querySelectorAll<HTMLButtonElement>(
+      '.app-header__actions button, .nb-card__actions button, .lib-divider button, .tree__more, .fab-dock button'
+    );
+    for (const b of off) b.disabled = true;
+    for (const sel of wrap.querySelectorAll<HTMLSelectElement>('.sort-select select')) sel.disabled = true;
+  }
   root.replaceChildren(wrap);
+}
+
+/** The "you are choosing a notebook to split screen" bar, above the whole library. */
+function buildPickBanner(): HTMLElement {
+  const banner = el('div', { class: 'pick-banner', role: 'status' });
+  banner.append(el('span', { class: 'pick-banner__text', text: 'Choose a notebook to split screen' }));
+  const cancel = el('button', { class: 'pick-banner__cancel', text: 'Cancel' });
+  cancel.addEventListener('click', () => cancelSplitPick());
+  banner.append(cancel);
+  return banner;
 }
 
 const rerender = (root: HTMLElement, folder: Folder | null): void => mountLibrary(root, folder?.id ?? null);
@@ -403,7 +444,7 @@ function buildFeatured(nb: Notebook): HTMLElement {
 
   card.append(thumb, inner);
   const open = () => {
-    location.hash = `#/nb/${nb.id}`;
+    openNotebook(nb.id);
   };
   card.addEventListener('click', open);
   card.addEventListener('keydown', (e) => {
@@ -439,7 +480,7 @@ function buildCard(nb: Notebook, root: HTMLElement, folder: Folder | null): HTML
 
   main.append(top, el('span', { class: 'nb-card__title', text: nb.name }), foot);
   main.addEventListener('click', () => {
-    location.hash = `#/nb/${nb.id}`;
+    openNotebook(nb.id);
   });
 
   const actions = el('div', { class: 'nb-card__actions' });

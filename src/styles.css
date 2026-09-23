@@ -2503,3 +2503,199 @@ select {
   color: var(--primary);
   box-shadow: var(--sh-1);
 }
+
+/* ---------------------------------------------------------- split screen */
+/* What now fills the space under the dock: `.nb-scroll` plus, when a split is
+   open and docked, the read-only pane beside it. The pane is a *sibling* of
+   the scroller, never a descendant, so its own pinch/pan gestures never reach
+   bindZoomGestures' listeners on `.nb-scroll`, and the AI panel's own
+   `.nb.ai-panel-open .nb-scroll` margin rule still indents exactly the
+   element it always did. */
+.nb-split {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  min-width: 0;
+}
+/* a flex item's default `min-width: auto` would let `.nb-scroll`'s content
+   floor its width and push the pane off-screen instead of sharing the row */
+.nb-split > .nb-scroll {
+  min-width: 0;
+  min-height: 0;
+}
+/* portrait (iPad held upright, iPhone): stack the pane under the notebook
+   rather than squeezing two narrow columns side by side */
+@media (orientation: portrait) {
+  .nb-split {
+    flex-direction: column;
+  }
+}
+
+.pane {
+  flex: 0 0 40%;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface-c-lowest);
+  border-left: 1px solid var(--outline-variant);
+}
+@media (orientation: portrait) {
+  .pane {
+    flex: 0 0 45%;
+    border-left: none;
+    border-top: 1px solid var(--outline-variant);
+  }
+}
+
+/* Floating window: fixed, so it leaves the flex row entirely and `.nb-scroll`
+   takes the full width back with no rule of its own needing to change. z-index
+   sits above the pages and the scrollbar thumb (40) but below the AI panel
+   (60), which stays the frontmost surface. Not a modal — it has to survive
+   outside taps and everything else openModal dismisses on. */
+.pane--floating {
+  position: fixed;
+  z-index: 50;
+  border: 1px solid var(--outline-variant);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-3);
+  overflow: hidden;
+}
+
+.pane__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 6px 6px 12px;
+  border-bottom: 1px solid var(--outline-variant);
+  background: var(--surface-c-lowest);
+  touch-action: none; /* the header is the floating window's drag handle */
+  -webkit-user-select: none;
+  user-select: none;
+}
+.pane--floating .pane__head {
+  cursor: move;
+}
+.pane__title {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--on-surface-variant);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pane__nav {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.pane__nav[hidden] {
+  display: none;
+}
+.pane__pagelabel {
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--on-surface-variant);
+  min-width: 46px;
+  text-align: center;
+}
+.pane__actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+/* the × ends the split for good (it's the only thing that clears the saved
+   state), so it reads as a real close button rather than another grey icon */
+.pane__close {
+  color: var(--primary);
+}
+.pane__close:hover:not(:disabled) {
+  background: rgba(220, 38, 38, 0.1);
+  color: #dc2626;
+}
+
+.pane__stage {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  min-height: 0;
+  touch-action: none; /* the pane runs its own pinch/pan — see bindViewGestures */
+  background: var(--lib-bg, #f3f5f9);
+}
+.pane__content {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
+.pane__canvas,
+.pane__img {
+  display: block;
+  border-radius: 4px;
+  box-shadow: 0 1px 6px rgba(4, 21, 52, 0.18);
+  -webkit-user-select: none;
+  user-select: none;
+  pointer-events: none; /* the stage owns every gesture; nothing here is a drop/drag target */
+}
+
+/* resize grip, floating only: a corner triangle in the bottom-right */
+.pane__resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 22px;
+  height: 22px;
+  cursor: nwse-resize;
+  touch-action: none;
+  background: linear-gradient(135deg, transparent 50%, var(--outline-variant) 50%);
+  border-bottom-right-radius: var(--r-lg);
+}
+.pane__resize[hidden] {
+  display: none;
+}
+
+/* the split button's own dropdown — same `.menu` popover as every other
+   anchored menu, just wide enough that neither label wraps */
+.menu--split {
+  min-width: 210px;
+}
+
+/* ------------------------------------------- library: pick-for-split mode */
+.pick-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  background: var(--lib-accent, #2550eb);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+}
+.pick-banner__text {
+  flex: 1;
+  min-width: 0;
+}
+.pick-banner__cancel {
+  flex: none;
+  padding: 6px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  border-radius: var(--r-full);
+  background: transparent;
+  color: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+.pick-banner__cancel:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+/* the actions that are off while picking are disabled in JS (see
+   mountLibrary); this just makes that legible rather than looking broken */
+.lib--picking .app-header__actions button:disabled,
+.lib--picking .nb-card__actions button:disabled,
+.lib--picking .lib-divider button:disabled,
+.lib--picking .tree__more:disabled,
+.lib--picking .fab-dock button:disabled {
+  opacity: 0.4;
+}
