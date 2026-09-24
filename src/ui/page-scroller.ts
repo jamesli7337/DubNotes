@@ -37,6 +37,14 @@ import { el } from './dom';
 /** Matches the main view's own zoom bounds, so the pane feels like the notebook. */
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
+/**
+ * A page can be far larger than the pane in world units — a photo is laid out
+ * at its natural pixel size, and a poster-sized PDF page at its own points —
+ * so a flat 0.5 floor would mean never being able to see one whole. When that
+ * happens the floor drops to whatever zoom contains the page, and this is the
+ * backstop so a pathological size can't zoom out to nothing.
+ */
+const ZOOM_FLOOR = 0.02;
 /** Gap between pages, in world units — the main view's `.page-wrap` margin. */
 const PAGE_GAP = 22;
 /** Padding above the first page and below the last, in world units. */
@@ -199,7 +207,7 @@ export class PageScroller {
     // a non-positive saved zoom means "no zoom was ever recorded" — the case
     // for a split saved before the pane scrolled — so fall back to the fit
     const wanted = anchor && anchor.zoom > 0 ? anchor.zoom : fit;
-    this.camera.zoom = clamp(wanted, ZOOM_MIN, ZOOM_MAX);
+    this.camera.zoom = this.clampZoom(wanted);
     this.relayout();
 
     if (anchor) this.scrollToAnchor(anchor);
@@ -384,6 +392,22 @@ export class PageScroller {
     return Math.max(this.minY(), this.contentH - this.viewH / this.camera.zoom);
   }
 
+  /**
+   * The zoom floor: normally the main view's own, but never above the zoom
+   * that fits the current page whole, so anything bigger than the pane can
+   * always be pinched out far enough to see all of it.
+   */
+  private zoomMin(): number {
+    const p = this.slots[Math.max(0, this.currentIndex)] ?? this.slots[0];
+    if (!p || !(this.viewW > 0) || !(this.viewH > 0) || !(p.w > 0) || !(p.h > 0)) return ZOOM_MIN;
+    const contain = Math.min((this.viewW - FIT_INSET) / p.w, (this.viewH - FIT_INSET) / p.h);
+    return Math.max(ZOOM_FLOOR, Math.min(ZOOM_MIN, contain));
+  }
+
+  private clampZoom(z: number): number {
+    return clamp(z, this.zoomMin(), ZOOM_MAX);
+  }
+
   /** True when the content is wider than the viewport, i.e. there is anything to pan horizontally. */
   private hasXRange(): boolean {
     return this.contentW * this.camera.zoom > this.viewW + 0.5;
@@ -413,7 +437,7 @@ export class PageScroller {
   }
 
   private setZoom(z: number, anchorX?: number, anchorY?: number): void {
-    const next = clamp(z, ZOOM_MIN, ZOOM_MAX);
+    const next = this.clampZoom(z);
     if (next === this.camera.zoom) return;
     const ax = anchorX ?? this.viewW / 2;
     const ay = anchorY ?? this.viewH / 2;
@@ -566,8 +590,8 @@ export class PageScroller {
     if (prevW > 0 && Math.abs(this.viewW - prevW) > 1) {
       const first = this.slots[0];
       if (first) {
-        const wasFit = Math.abs(this.camera.zoom - clamp(Math.min(1, (prevW - FIT_INSET) / first.w) || 1, ZOOM_MIN, ZOOM_MAX)) < 0.001;
-        if (wasFit) this.camera.zoom = clamp(Math.min(1, (this.viewW - FIT_INSET) / first.w) || 1, ZOOM_MIN, ZOOM_MAX);
+        const wasFit = Math.abs(this.camera.zoom - this.clampZoom(Math.min(1, (prevW - FIT_INSET) / first.w) || 1)) < 0.001;
+        if (wasFit) this.camera.zoom = this.clampZoom(Math.min(1, (this.viewW - FIT_INSET) / first.w) || 1);
       }
     }
     this.camera.x = this.clampX(this.camera.x);
