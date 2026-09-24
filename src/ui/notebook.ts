@@ -75,8 +75,19 @@ const SHAPE_OPTIONS: Record<PlacedShape, { icon: IconName; label: string }> = {
 };
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
-/** Resting clearance kept above page 1 (screen px, at the current zoom — see minCameraY) so the page never rests touching or under the floating dock. Was `.nb-scroll`'s own CSS padding-top before the camera migration; now a pan-clamp bound instead, since content no longer sits in real scrollable flow. */
-const TOP_CLEARANCE = 118;
+/**
+ * Screen-px gap left between the dock's bottom edge and the top of page 1 when
+ * the notebook is scrolled all the way up.
+ *
+ * This used to be a flat `TOP_CLEARANCE = 118` measured from `.nb-scroll`'s own
+ * top, which left an uneven gap because the dock's height is not fixed: with
+ * its options row collapsed the dock ended 122px down and the page began at
+ * 200px — a 78px band of grey — while with a tool's options row open the dock
+ * ended at 168px and the same 200px start left only 32px. The clearance is now
+ * derived from where the dock actually ends (see refreshTopClearance), so the
+ * gap is this value in both states.
+ */
+const TOP_GAP = 14;
 /** Same idea below the last page (fraction of the viewport's own height, not zoom-scaled — see maxCameraY) — was `.nb-scroll`'s CSS padding-bottom. */
 const BOTTOM_CLEARANCE_VH = 0.4;
 /** How long after the pencil lifts a freshly-landing touch is still treated as a palm resettling rather than a deliberate pan/pinch/drag — see bindZoomGestures's own doc comment. Long enough to cover a palm re-seating itself as the hand moves between strokes, short enough that a deliberate finger-tap to scroll a moment after finishing writing still works right away. */
@@ -134,6 +145,10 @@ class NotebookView {
    * reassigned) so every PageCanvas holding it always sees the current values.
    */
   private readonly camera: Camera = { x: 0, y: 0, zoom: 1 };
+  /** Resting clearance above page 1, in screen px — see refreshTopClearance, which keeps it in step with the dock's height. */
+  private topClearance = TOP_GAP;
+  /** Re-measures the dock once its open/close animation has finished — see dockHeightChanged. */
+  private dockSettleTimer: ReturnType<typeof setTimeout> | null = null;
   /** `.nb-camera`: the single element the whole camera transform is applied to — every `.page-wrap` lives inside it. */
   private cameraEl!: HTMLElement;
   private pinch: {
@@ -383,6 +398,8 @@ class NotebookView {
       this.deactivateAll(); // commit an open text edit before the canvases go away
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
       this.stopMomentum();
+      if (this.dockSettleTimer) clearTimeout(this.dockSettleTimer);
+      this.dockSettleTimer = null;
       this.destroyScrollbarThumb();
       this.pane.destroy(); // takes the pane down but keeps its saved state, so coming back here restores it
       this.aiMode.destroyPanel();
@@ -673,7 +690,59 @@ class NotebookView {
 
   /** The least `camera.y` allowed: page 1's own top can be dragged down to at most this many *world* units below the viewport top — i.e. `TOP_CLEARANCE` screen px of resting clearance under the dock, at the current zoom. */
   private minCameraY(): number {
-    return -TOP_CLEARANCE / this.camera.zoom;
+    return -this.topClearance / this.camera.zoom;
+  }
+
+  /**
+   * Recomputes the resting clearance above page 1 from where the dock's bottom
+   * edge currently is, so `TOP_GAP` of grey is left under it whether or not a
+   * tool's options row is open.
+   *
+   * `.page-head` (the "Page 1" label) is part of the page wrap and scales with
+   * the camera, so it is subtracted here — the gap the eye reads is the one
+   * down to the page card itself, not to the label above it.
+   *
+   * Cached rather than measured in `minCameraY`, which is on the per-frame
+   * path (the scrollbar thumb's reposition calls it every camera tick). The
+   * three things that can move the dock's bottom or the label's scaled height
+   * — a zoom, a resize/page change, and a tool switch — each call this once.
+   */
+  /**
+   * The dock's height just changed (its options row opened or closed), which
+   * moves where page 1 should rest. Re-derives the clearance and, if we're
+   * currently sitting in that top band at all, re-pins the camera to it — so
+   * opening the options row pushes the page down out from under the dock
+   * rather than letting the dock cover it.
+   */
+  private dockHeightChanged(): void {
+    this.settleTopClearance();
+    // `.nb-dock` animates its options row in and out (`transition: gap 0.16s`),
+    // so the height it reports right now is still the old one — settle again
+    // once that has finished, or the gap lands a few px short.
+    if (this.dockSettleTimer) clearTimeout(this.dockSettleTimer);
+    this.dockSettleTimer = setTimeout(() => {
+      this.dockSettleTimer = null;
+      this.settleTopClearance();
+    }, 220);
+  }
+
+  /** Re-derives the clearance and re-pins the camera if it is resting in the top band. */
+  private settleTopClearance(): void {
+    this.refreshTopClearance();
+    if (this.camera.y < 0) this.camera.y = this.minCameraY();
+    const c = this.clampCamera(this.camera.x, this.camera.y);
+    this.camera.x = c.x;
+    this.camera.y = c.y;
+    this.layoutScrollbarThumb();
+    this.applyCamera();
+  }
+
+  private refreshTopClearance(): void {
+    const scrollTop = this.scrollEl.getBoundingClientRect().top;
+    const dockBottom = this.toolsEl.getBoundingClientRect().bottom;
+    const head = this.wrapById.values().next().value?.querySelector<HTMLElement>('.page-head');
+    const headH = head ? head.offsetHeight : 0;
+    this.topClearance = Math.max(TOP_GAP, dockBottom - scrollTop + TOP_GAP - headH * this.camera.zoom);
   }
 
   /** The greatest `camera.y` allowed: the last page's own bottom can't be dragged more than `BOTTOM_CLEARANCE_VH` of screen height above the viewport's bottom. */
@@ -732,6 +801,7 @@ class NotebookView {
     const wx = sx / this.camera.zoom + this.camera.x;
     const wy = sy / this.camera.zoom + this.camera.y;
     this.camera.zoom = next;
+    this.refreshTopClearance(); // the label's scaled height, and so the clearance, moves with the zoom
     const clamped = this.clampCamera(wx - sx / next, wy - sy / next);
     this.camera.x = clamped.x;
     this.camera.y = clamped.y;
@@ -1223,21 +1293,14 @@ class NotebookView {
     this.repositionScrollbarThumb = reposition;
 
     const layout = (): void => {
+      this.refreshTopClearance(); // a resize or a page change can move the dock's bottom edge
       const track = s.getBoundingClientRect();
-      // The dock floats *over* the top of `.nb-scroll` (it's `position: fixed`,
-      // which is why the camera keeps TOP_CLEARANCE below it), so a track
-      // measured from the scroller's own box alone always begins behind it —
-      // by 52px with the dock collapsed and over 100px with a tool's options
-      // row open. Start it below whatever the dock currently occupies instead,
-      // so the whole track is in the part of the notebook you can actually
-      // see. Paired with the thumb's z-index now sitting under both the dock
-      // and the app bar (see `.nb-scrollbar-thumb` in styles.css), which is
-      // what stops it painting over them when the two do overlap — a narrow
-      // window, or any width once a docked split narrows `.nb-scroll` while
-      // the dock stays centred on the whole viewport.
-      const trackTop = Math.max(track.top, this.toolsEl.getBoundingClientRect().bottom) + INSET;
-      const trackBottom = track.bottom - INSET;
-      trackH = Math.max(0, trackBottom - trackTop);
+      // The track is the scroller's own full height, so the thumb reaches the
+      // top of the page. Where it passes behind the dock is purely a paint
+      // question, settled by the thumb's z-index sitting below the dock's —
+      // see `.nb-scrollbar-thumb` in styles.css.
+      const trackTop = track.top + INSET;
+      trackH = track.height - INSET * 2;
       const minY = this.minCameraY();
       const maxY = this.maxCameraY();
       panRange = Math.max(0, maxY - minY);
@@ -1284,13 +1347,6 @@ class NotebookView {
     // return to foreground.
     const trackObserver = new ResizeObserver(() => layout());
     trackObserver.observe(s);
-    // The track now starts below the dock (see layout), so the dock changing
-    // height moves it — which happens on every tool switch, since each tool's
-    // options row is its own height and `.nb-dock--collapsed` drops it
-    // entirely. No resize or camera change accompanies that, so without this
-    // the track stayed where the previous tool left it.
-    const dockObserver = new ResizeObserver(() => layout());
-    dockObserver.observe(this.toolsEl);
     document.addEventListener('visibilitychange', onVisibility);
     window.addEventListener('pageshow', onPageShow);
     layout();
@@ -1300,7 +1356,6 @@ class NotebookView {
       document.removeEventListener('visibilitychange', onVisibility);
       window.removeEventListener('pageshow', onPageShow);
       trackObserver.disconnect();
-      dockObserver.disconnect();
       thumb.remove();
       // a stale layout()/reposition() after teardown would touch a detached
       // node for nothing; put the no-op defaults back
@@ -1634,12 +1689,14 @@ class NotebookView {
    */
   private openDockOptions(): void {
     this.toolsEl.classList.remove('nb-dock--collapsed');
+    this.dockHeightChanged();
   }
 
   /** Hides the options row; also drops the size popover, whose anchor button lives in it. */
   private closeDockOptions(): void {
     this.sizePopover?.close();
     this.toolsEl.classList.add('nb-dock--collapsed');
+    this.dockHeightChanged();
   }
 
   /** Re-tapping the already-active tool's icon toggles the options row, the only way it closes. */
@@ -1649,6 +1706,7 @@ class NotebookView {
   }
 
   private renderTools(): void {
+
     this.sizePopover?.close(); // switching tools (or any dock rebuild) dismisses the size popover
     this.colorRefreshers = []; // old closures would target elements this rebuild is about to discard
     this.scrollEl.classList.toggle('nb-scroll--hand', toolState.kind === 'hand'); // grab cursor, mouse-drag-to-pan feedback

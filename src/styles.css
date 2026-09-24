@@ -1012,7 +1012,8 @@ select {
   position: fixed;
   left: 50%;
   transform: translateX(-50%);
-  top: calc(var(--header-h) + env(safe-area-inset-top) + 8px);
+  /* 8px before; a little more air between the app bar and the dock */
+  top: calc(var(--header-h) + env(safe-area-inset-top) + 16px);
   z-index: 40;
   display: flex;
   flex-direction: column;
@@ -2721,83 +2722,15 @@ select {
   opacity: 0.4;
 }
 
-/* ------------------------------------------------- floating image overlay */
-/* A reference image (periodic table, diagram) floating *over* the notebook
-   rather than splitting it — the notebook keeps its full width. `position:
-   fixed` is what pins it to the viewport: its containing block is the
-   viewport, so it holds its screen position for free while `.nb-camera`'s
-   transform pans and zooms the pages underneath, and `.nb-scroll`'s
-   `overflow: hidden` never clips it (that clipping only reaches descendants
-   whose containing block is inside it).
-
-   z-index 20 puts it above every page-level layer (`.nb-drag-preview` 1,
-   `.guide` 2, `.sel-box` 3 — none of which sit in a stacking context of their
-   own) and below the app bar (30), the dock (40), the scrollbar thumb (40)
-   and the AI panel (60), exactly as intended.
-
-   The box is sized to the image and nothing around it exists, so every touch
-   outside it still reaches the page canvas and draws normally. */
-.img-overlay {
-  position: fixed;
-  z-index: 20;
-  touch-action: none; /* it runs its own drag/resize; iOS must not pan instead */
-  border-radius: 6px;
-  box-shadow: 0 2px 14px rgba(4, 21, 52, 0.3);
-  background: var(--surface-c-lowest);
-  cursor: move;
+/* One page of an image split: laid out at the picture's natural size in world
+   units, with the scroller's camera doing all the scaling — no canvas, so the
+   browser resamples the decoded bitmap at whatever zoom the camera is at. */
+.pscroll-img {
+  display: block;
   -webkit-user-select: none;
   user-select: none;
-  overflow: hidden;
-}
-/* The picture's own layer: zoomed and panned inside the frame by
-   `applyImgView`, while the frame's box stays exactly where `applyOverlayRect`
-   put it. `transform-origin: 0 0` so the offset is plain frame pixels. */
-.img-overlay__inner {
-  position: absolute;
-  inset: 0;
-  transform-origin: 0 0;
-  will-change: transform;
-}
-.img-overlay__img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  /* the box is always kept on-aspect (see clampOverlay), so `fill` is exact
-     and avoids the letterbox bars `contain` would add mid-resize */
-  object-fit: fill;
-  pointer-events: none; /* the overlay itself owns every gesture */
+  pointer-events: none; /* the stage owns every gesture */
   -webkit-user-drag: none;
-}
-/* inset into the corner rather than hanging off it, so the overlay's hit area
-   never reaches beyond the image the user can actually see */
-.img-overlay__close {
-  position: absolute;
-  top: 4px;
-  right: 4px;
-  width: 30px;
-  height: 30px;
-  min-height: 0;
-  padding: 0;
-  border-radius: var(--r-full);
-  background: rgba(255, 255, 255, 0.92);
-  color: var(--primary);
-  box-shadow: 0 1px 4px rgba(4, 21, 52, 0.3);
-  touch-action: none;
-}
-.img-overlay__close:hover:not(:disabled) {
-  background: #dc2626;
-  color: #fff;
-}
-.img-overlay__resize {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 26px;
-  height: 26px;
-  cursor: nwse-resize;
-  touch-action: none;
-  background: linear-gradient(135deg, transparent 45%, rgba(255, 255, 255, 0.9) 45%);
-  border-bottom-right-radius: 6px;
 }
 
 /* The split pane's own scrollbar — same shape as the notebook's

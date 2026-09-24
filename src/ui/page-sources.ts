@@ -214,3 +214,87 @@ export class PdfPageSource implements PageSource {
     return new PdfPageHandle(this.key, n, page.w, page.h, host, quality);
   }
 }
+
+// --------------------------------------------------------------- an image
+
+/**
+ * A reference image as a single-page column, so it runs through the same
+ * `PageScroller` as a notebook's pages and a PDF's — one fit-to-width default,
+ * one set of pinch/pan gestures, one scrollbar, one pane.
+ *
+ * Unlike the other two this paints no canvas: the page is an `<img>` laid out
+ * at the picture's natural size in world units, and the scroller's camera
+ * transform does the scaling. That means `quality` has nothing to do — the
+ * browser resamples the decoded bitmap itself at whatever zoom the camera is
+ * at, which is both sharper and cheaper than re-rasterising into a canvas on
+ * every settle.
+ */
+export class ImagePageSource implements PageSource {
+  readonly key = 'image';
+  private url: string | null = null;
+  private w = 0;
+  private h = 0;
+  private rev = 0;
+
+  /** Decodes the blob and records its natural size. Resolves false if it isn't a usable image. */
+  async load(blob: Blob): Promise<boolean> {
+    this.release();
+    const url = URL.createObjectURL(blob);
+    const ok = await new Promise<boolean>((resolve) => {
+      const probe = new Image();
+      probe.onload = () => {
+        this.w = probe.naturalWidth;
+        this.h = probe.naturalHeight;
+        resolve(probe.naturalWidth > 0 && probe.naturalHeight > 0);
+      };
+      probe.onerror = () => resolve(false);
+      probe.src = url;
+    });
+    if (!ok) {
+      URL.revokeObjectURL(url);
+      return false;
+    }
+    this.url = url;
+    this.rev++;
+    return true;
+  }
+
+  /** Drops the object URL — call when the split closes for good. */
+  release(): void {
+    if (this.url) {
+      URL.revokeObjectURL(this.url);
+      this.url = null;
+    }
+    this.w = this.h = 0;
+    this.rev++;
+  }
+
+  pages(): SourcePage[] {
+    return this.url ? [{ id: this.key, w: this.w, h: this.h }] : [];
+  }
+
+  /** One page that never changes, so this only moves across load/release. */
+  revision(): number {
+    return this.rev;
+  }
+
+  background(): string {
+    return '#ffffff';
+  }
+
+  mount(page: SourcePage, host: HTMLElement, _quality: number): PageHandle {
+    void _quality; // the camera scales the <img>; there is no backing store to re-render
+    if (!this.url) return NOOP_HANDLE;
+    const img = el('img', { class: 'pscroll-img', alt: 'Reference image' }) as HTMLImageElement;
+    img.draggable = false;
+    img.style.width = `${page.w}px`;
+    img.style.height = `${page.h}px`;
+    img.src = this.url;
+    host.appendChild(img);
+    return {
+      setQuality: () => undefined,
+      refresh: () => undefined,
+      unmount: () => img.remove(),
+    };
+  }
+}

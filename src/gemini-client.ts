@@ -19,6 +19,16 @@ interface Attempt {
  * again) rather than hammering an already-overloaded endpoint. */
 const RETRY_DELAYS_MS = [1000, 3000, 8000];
 
+/** Turns a failed response's status into a plain-language message — the raw
+ * status/reason is logged to the console (see callers) for debugging, but
+ * never shown in the UI. */
+function friendlyErrorText(status: number): string {
+  if (status === 503) return 'The AI is overloaded right now, try again in a bit.';
+  if (status === 404) return "The AI service isn't set up correctly right now.";
+  if (status === 401 || status === 403) return "The AI isn't configured correctly, this needs a fix on my end, not yours.";
+  return 'Something went wrong with the AI, try again in a bit.';
+}
+
 async function callGeminiOnce(body: object): Promise<Attempt> {
   try {
     const res = await fetch(GEMINI_ENDPOINT, {
@@ -31,10 +41,12 @@ async function callGeminiOnce(body: object): Promise<Attempt> {
       return { text: data.text, isError: false, retryable: false };
     }
     const reason = typeof data?.error === 'string' ? data.error : `request failed (${res.status})`;
-    return { text: `DubNotes AI error: ${reason}`, isError: true, retryable: res.status === 503 };
+    console.error(`Gemini request failed: ${reason}`);
+    return { text: `DubNotes AI error: ${friendlyErrorText(res.status)}`, isError: true, retryable: res.status === 503 };
   } catch (err) {
+    console.error('Gemini request network error:', err);
     return {
-      text: `DubNotes AI error: could not reach the endpoint (${err instanceof Error ? err.message : 'network error'}).`,
+      text: "DubNotes AI error: Couldn't reach the AI, check your internet connection.",
       isError: true,
       retryable: false,
     };

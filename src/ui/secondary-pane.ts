@@ -3,7 +3,7 @@ import { clamp } from '../util';
 import { el } from './dom';
 import { icon } from './icon';
 import { PageScroller, type ScrollAnchor } from './page-scroller';
-import { NotebookPageSource, PdfPageSource } from './page-sources';
+import { ImagePageSource, NotebookPageSource, PdfPageSource } from './page-sources';
 
 /**
  * The read-only secondary content beside the notebook you're drawing in, in
@@ -71,14 +71,8 @@ interface SavedSplit {
    * an older split reopens on the page it was left on.
    */
   anchor?: ScrollAnchor;
-  /** PDF splits only: the file's own name, shown in the pane header. */
-  pdfName?: string;
-  /**
-   * Image overlays only: how the picture is zoomed and panned *inside* its
-   * frame. `zoom` 1 means fitted to the frame (which is always on the image's
-   * own aspect), and `x`/`y` are the content's offset in frame pixels.
-   */
-  imgView?: { zoom: number; x: number; y: number };
+  /** PDF and image splits: the file's own name, shown in the pane header. */
+  fileName?: string;
   floating: boolean;
   float: FloatRect;
 }
@@ -94,11 +88,10 @@ function loadSaved(hostId: string): SavedSplit | null {
   try {
     const raw = localStorage.getItem(LS_PREFIX + hostId);
     if (!raw) return null;
-    const v = JSON.parse(raw) as Partial<SavedSplit>;
+    const v = JSON.parse(raw) as Partial<SavedSplit> & { pdfName?: unknown };
     if (v.type !== 'page' && v.type !== 'image' && v.type !== 'pdf') return null;
     const f = v.float;
     const a = v.anchor;
-    const iv = v.imgView;
     const anchor =
       a && typeof a.pageId === 'string' && Number.isFinite(a.offset) && Number.isFinite(a.zoom)
         ? { pageId: a.pageId, offset: a.offset, zoom: a.zoom }
@@ -108,11 +101,8 @@ function loadSaved(hostId: string): SavedSplit | null {
       notebookId: typeof v.notebookId === 'string' ? v.notebookId : undefined,
       pageId: typeof v.pageId === 'string' ? v.pageId : undefined,
       anchor,
-      pdfName: typeof v.pdfName === 'string' ? v.pdfName : undefined,
-      imgView:
-        iv && Number.isFinite(iv.zoom) && Number.isFinite(iv.x) && Number.isFinite(iv.y) && iv.zoom > 0
-          ? { zoom: iv.zoom, x: iv.x, y: iv.y }
-          : undefined,
+      // `pdfName` is what PDF splits wrote before images needed a name too
+      fileName: typeof v.fileName === 'string' ? v.fileName : typeof v.pdfName === 'string' ? v.pdfName : undefined,
       floating: v.floating === true,
       float:
         f && [f.x, f.y, f.w, f.h].every((n) => typeof n === 'number' && Number.isFinite(n))
@@ -284,24 +274,6 @@ const KEEP_VISIBLE = 48;
 const FLOAT_MIN_W = 220;
 const FLOAT_MIN_H = 200;
 
-/** Smallest the image overlay may be pinched/dragged down to, on either side. */
-const OVERLAY_MIN = 80;
-/** Width a freshly picked image opens at, capped to the visible notebook area. */
-const OVERLAY_DEFAULT_W = 320;
-/** How much of the overlay must stay inside the visible notebook area. */
-const OVERLAY_KEEP = 44;
-/** Zoom bounds for the picture inside an image overlay's frame. 1 is fitted. */
-const IMG_ZOOM_MIN = 1;
-const IMG_ZOOM_MAX = 6;
-/**
- * Band around the overlay's border that always drags the window, even when
- * the picture is zoomed in and the middle is panning content instead. Gives
- * the frame a grab handle without needing a visible title bar.
- */
-const IMG_GRAB_EDGE = 26;
-/** Max gap and travel for two taps to count as a double-tap (reset to fit). */
-const DOUBLE_TAP_MS = 320;
-const DOUBLE_TAP_SLOP = 24;
 
 export interface PaneHooks {
   /**
@@ -333,26 +305,10 @@ export class SecondaryPane {
   /** debounce for persisting the scroll anchor, so a flick doesn't write on every settle */
   private anchorSaveTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** The floating image overlay (see showImageOverlay) — `position: fixed`, so it tracks the viewport, not the pages. */
-  private overlayEl: HTMLElement | null = null;
-  /** the transformed layer holding the picture inside an image overlay's frame */
-  private imgInnerEl: HTMLElement | null = null;
-  /** object URL behind the overlay image, revoked whenever the overlay is torn down */
-  private imgUrl: string | null = null;
-  /** the image's natural width / height, so every resize keeps its aspect ratio */
-  private imgAspect = 1;
-  /** re-clamps the overlay into the visible notebook area after a rotation or a viewport change — bound so the same reference comes back off `window` */
-  private readonly reclampOverlay = (): void => {
-    const s = this.state;
-    if (s?.type !== 'image' || !this.overlayEl) return;
-    s.float = this.clampOverlay(s.float);
-    this.applyOverlayRect();
-    this.applyImgView();
-    this.persist();
-  };
-  private overlayObserver: ResizeObserver | null = null;
-  /** the PDF overlay's document, when this split is a PDF */
+  /** the parsed PDF, when this split is a PDF */
   private pdfSource: PdfPageSource | null = null;
+  /** the decoded picture, when this split is an image */
+  private imageSource: ImagePageSource | null = null;
   /** the transient notice shown by `toast`, and its dismissal timer */
   private toastEl: HTMLElement | null = null;
   private toastTimer: ReturnType<typeof setTimeout> | null = null;
@@ -369,7 +325,7 @@ export class SecondaryPane {
 
   /** True while either shape is showing — the docked/floating page pane, or the image overlay. */
   get isOpen(): boolean {
-    return this.root != null || this.overlayEl != null;
+    return this.root != null;
   }
 
   // ----------------------------------------------------------- open / restore
@@ -436,12 +392,13 @@ export class SecondaryPane {
       return;
     }
 
-    // An image saved before it became an overlay carries a pane-shaped rect
-    // (and `floating`), both meaningless here — showImageOverlay re-derives
-    // the height from the image's own aspect and clamps it, so those records
-    // reopen as a sensibly-shaped overlay with no migration step.
+    // A record written while images were a frameless overlay carries
+    // `floating: true` and that overlay's own frame rect, which is exactly
+    // what a floating pane wants — so those reopen as a floating pane at the
+    // position and size they were left at, with no migration step.
     this.state = saved;
-    this.showImageOverlay(blob);
+    this.build();
+    await this.showImagePages(blob, saved.anchor ?? null);
   }
 
   /** "Split screen page": park the current notebook and send the library into pick mode. */
@@ -514,17 +471,22 @@ export class SecondaryPane {
    * takes its full width back — hence the teardownChrome + onLayout here.
    */
   private async openImage(file: File): Promise<void> {
-    const hadChrome = this.root != null;
+    const prev = this.state;
     this.teardownContent();
-    this.teardownChrome();
-    // a fresh pick always starts from a default box; the image's own aspect
-    // and the visible area settle the rest once it has decoded
-    this.state = { type: 'image', floating: true, float: { ...DEFAULT_FLOAT } };
+    this.state = {
+      type: 'image',
+      fileName: file.name.replace(/\.[^.]+$/, '') || 'Image',
+      // opens docked, same side as the other two; the header's minimise
+      // button is what turns it into a floating window
+      floating: prev?.type === 'page' ? prev.floating : false,
+      float: prev?.float ?? { ...DEFAULT_FLOAT },
+    };
+    if (!this.root) this.build();
+    else this.applyFloating();
     this.persist();
-    if (hadChrome) this.hooks.onLayout();
     await putSplitBlob(this.hostNotebookId, file);
     if (this.destroyed) return;
-    this.showImageOverlay(file, true);
+    if (!(await this.showImagePages(file, null))) this.toast("Couldn't open that image");
   }
 
   /**
@@ -538,7 +500,7 @@ export class SecondaryPane {
     this.teardownContent();
     this.state = {
       type: 'pdf',
-      pdfName: file.name.replace(/\.pdf$/i, '') || 'PDF',
+      fileName: file.name.replace(/\.pdf$/i, '') || 'PDF',
       // opens docked, on the same side as a note split; the header's
       // minimise button is what turns it into a floating window
       floating: prev?.type === 'page' ? prev.floating : false,
@@ -696,10 +658,11 @@ export class SecondaryPane {
       this.anchorSaveTimer = null;
       const s = this.state;
       const a = this.scroller?.anchor();
-      if (!s || !a || (s.type !== 'page' && s.type !== 'pdf')) return;
+      if (!s || !a) return;
       s.anchor = a;
       // a page split also keeps `pageId` in step, so the existing validity
-      // check on restore still works; a PDF's ids are just page numbers
+      // check on restore still works; a PDF's ids are page numbers and an
+      // image's is a single constant, neither of which `pageId` should shadow
       if (s.type === 'page') s.pageId = a.pageId;
       this.persist();
     }, 300);
@@ -723,448 +686,45 @@ export class SecondaryPane {
    *
    * `fresh` marks a just-picked image, whose saved box is only a placeholder.
    */
-  private showImageOverlay(blob: Blob, fresh = false): void {
+  // -------------------------------------------------------- image in the pane
+
+  /**
+   * A reference image in the same pane as the other two splits, with the same
+   * `PageScroller` inside it — a one-page column laid out at the picture's own
+   * natural size. Fit-to-width, pinch zoom, pan and the pane's scrollbar are
+   * therefore literally the same code the note and PDF splits run, which is
+   * what replaced the bespoke frameless overlay this used to be.
+   *
+   * Resolves false if the blob isn't a decodable image.
+   */
+  private async showImagePages(blob: Blob, anchor: ScrollAnchor | null): Promise<boolean> {
     const s = this.state;
-    if (!s) return;
+    if (!s) return false;
 
-    const root = el('div', { class: 'img-overlay' });
-    // The picture lives in its own transformed layer so it can be zoomed and
-    // panned *within* the frame without touching the frame's own box: the
-    // frame is positioned by `applyOverlayRect`, the content by
-    // `applyImgView`, and the two never interfere.
-    const inner = el('div', { class: 'img-overlay__inner' });
-    const img = el('img', { class: 'img-overlay__img', alt: 'Reference image' }) as HTMLImageElement;
-    img.draggable = false;
-    this.imgUrl = URL.createObjectURL(blob);
-    img.src = this.imgUrl;
-    img.addEventListener('load', () => {
-      this.imgAspect = img.naturalHeight > 0 ? img.naturalWidth / img.naturalHeight : 1;
-      const area = this.visibleArea();
-      const w = fresh ? Math.min(OVERLAY_DEFAULT_W, area.w * 0.8) : s.float.w;
-      // the height always comes from the image's own aspect, never from the
-      // saved record — that is what lets the pane-shaped box an older image
-      // split saved reopen as a correctly proportioned overlay, with no
-      // migration step of its own
-      const x = fresh ? area.x + 24 : s.float.x;
-      const y = fresh ? area.y + 24 : s.float.y;
-      s.float = this.clampOverlay({ x, y, w, h: w / this.imgAspect });
-      this.applyOverlayRect();
-      this.applyImgView();
-      this.persist();
-    });
-
-    const close = el('button', {
-      class: 'iconbtn img-overlay__close',
-      title: 'Remove this image',
-      'aria-label': 'Remove this image',
-    }) as HTMLButtonElement;
-    close.append(icon('close', 'sm'));
-    close.addEventListener('click', (e) => {
-      e.stopPropagation();
-      this.close();
-    });
-
-    const grip = el('div', { class: 'img-overlay__resize', 'aria-hidden': 'true' });
-
-    inner.append(img);
-    root.append(inner, close, grip);
-    this.container.append(root);
-    this.overlayEl = root;
-    this.imgInnerEl = inner;
-    if (fresh) s.imgView = { zoom: 1, x: 0, y: 0 };
-    this.applyOverlayRect();
-    this.applyImgView();
-
-    this.bindImageGestures(root, close, grip);
-    this.bindOverlayResize(grip);
-
-    // a rotation, the AI panel opening, or a viewport change all move the
-    // visible notebook area out from under the overlay
-    window.addEventListener('resize', this.reclampOverlay);
-    window.addEventListener('orientationchange', this.reclampOverlay);
-    const scroller = this.container.querySelector<HTMLElement>('.nb-scroll');
-    if (scroller) {
-      this.overlayObserver = new ResizeObserver(() => this.reclampOverlay());
-      this.overlayObserver.observe(scroller);
+    const source = new ImagePageSource();
+    const ok = await source.load(blob);
+    if (this.destroyed) return false;
+    if (!ok) {
+      this.clearState();
+      this.teardownChrome();
+      this.hooks.onLayout();
+      return false;
     }
-  }
+    this.imageSource = source;
+    if (!this.stage) return false;
 
-  /** The area the overlay is kept inside: `.nb-scroll`'s own rect, or the viewport before it has been laid out. */
-  private visibleArea(): { x: number; y: number; w: number; h: number } {
-    const scroller = this.container.querySelector<HTMLElement>('.nb-scroll');
-    const r = scroller?.getBoundingClientRect();
-    if (r && r.width > 0 && r.height > 0) return { x: r.left, y: r.top, w: r.width, h: r.height };
-    return { x: 0, y: 0, w: document.documentElement.clientWidth, h: document.documentElement.clientHeight };
-  }
-
-  /**
-   * Fits a candidate box to the image's aspect ratio, the minimum size and the
-   * visible notebook area — the one place all three rules meet, so a drag, a
-   * resize and a post-rotation re-clamp can never disagree about the result.
-   */
-  private clampOverlay(r: FloatRect): FloatRect {
-    const area = this.visibleArea();
-    const a = this.imgAspect > 0 ? this.imgAspect : 1;
-    // size first: on-aspect, never past the area on either axis, never under
-    // the minimum on either side
-    let w = Math.min(r.w, area.w, area.h * a);
-    if (w < OVERLAY_MIN) w = OVERLAY_MIN;
-    if (w / a < OVERLAY_MIN) w = OVERLAY_MIN * a;
-    const h = w / a;
-    // then position: OVERLAY_KEEP px of the box always stays inside the area,
-    // so a rotation can't leave it parked off-screen
-    return {
-      w,
-      h,
-      x: clamp(r.x, area.x + OVERLAY_KEEP - w, area.x + area.w - OVERLAY_KEEP),
-      y: clamp(r.y, area.y, area.y + area.h - OVERLAY_KEEP),
-    };
-  }
-
-  private applyOverlayRect(): void {
-    const s = this.state;
-    const root = this.overlayEl;
-    if (!s || !root) return;
-    root.style.left = `${s.float.x}px`;
-    root.style.top = `${s.float.y}px`;
-    root.style.width = `${s.float.w}px`;
-    root.style.height = `${s.float.h}px`;
-  }
-
-  /** The picture's current zoom/pan inside the frame, defaulted for a record that predates it. */
-  private imgView(): { zoom: number; x: number; y: number } {
-    const v = this.state?.imgView;
-    return v ? { ...v } : { zoom: 1, x: 0, y: 0 };
-  }
-
-  /**
-   * Clamps a candidate content view: zoom into range, then pan so the picture
-   * can never be dragged clear of its own frame. At zoom 1 it is exactly the
-   * frame, so the only legal offset is 0 and the picture stays put.
-   */
-  private clampImgView(v: { zoom: number; x: number; y: number }): { zoom: number; x: number; y: number } {
-    const s = this.state;
-    const zoom = clamp(v.zoom, IMG_ZOOM_MIN, IMG_ZOOM_MAX);
-    if (!s) return { zoom, x: 0, y: 0 };
-    // the frame is always on the picture's aspect, so scaled size is just frame × zoom
-    const slackX = Math.max(0, s.float.w * (zoom - 1));
-    const slackY = Math.max(0, s.float.h * (zoom - 1));
-    return { zoom, x: clamp(v.x, -slackX, 0), y: clamp(v.y, -slackY, 0) };
-  }
-
-  private applyImgView(): void {
-    const inner = this.imgInnerEl;
-    if (!inner) return;
-    const v = this.clampImgView(this.imgView());
-    if (this.state) this.state.imgView = v;
-    inner.style.transform = `translate(${v.x}px, ${v.y}px) scale(${v.zoom})`;
-  }
-
-  /** True once the picture is zoomed in far enough that a middle drag should pan it rather than move the frame. */
-  private get imgZoomed(): boolean {
-    return this.imgView().zoom > 1.01;
-  }
-
-  /**
-   * Everything the image overlay listens for.
-   *
-   * A single drag does one of two things: near the frame's border, or while
-   * the picture is fitted, it **moves the window**; in the middle while the
-   * picture is zoomed in, it **pans the picture**. That split gives the frame
-   * a reliable grab handle without a title bar eating vertical space.
-   *
-   * Two fingers always pinch-zoom the picture inside the frame — the frame's
-   * own size never changes, which is the corner grip's job. A double-tap
-   * resets to fit.
-   *
-   * Touch and mouse are handled separately (Touch Events for the former,
-   * Pointer Events filtered to `mouse` for the latter) rather than through
-   * one pointer stream, because a two-finger pinch has no sensible pointer-
-   * level representation here — the same split `PageScroller` uses.
-   */
-  private bindImageGestures(root: HTMLElement, close: HTMLElement, grip: HTMLElement): void {
-    const excluded = (t: EventTarget | null): boolean =>
-      close.contains(t as Node) || grip.contains(t as Node);
-    /** true when a press at this client point should move the frame rather than pan the picture */
-    const movesFrame = (cx: number, cy: number): boolean => {
-      if (!this.imgZoomed) return true;
-      const r = root.getBoundingClientRect();
-      return (
-        cx - r.left < IMG_GRAB_EDGE ||
-        r.right - cx < IMG_GRAB_EDGE ||
-        cy - r.top < IMG_GRAB_EDGE ||
-        r.bottom - cy < IMG_GRAB_EDGE
-      );
-    };
-    const dist = (t: TouchList): number => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
-
-    let mode: 'frame' | 'content' | null = null;
-    let last = { x: 0, y: 0 };
-    let origin = { x: 0, y: 0 };
-    let pinch: { d0: number; z0: number; vx: number; vy: number; cx: number; cy: number } | null = null;
-    let lastTap = 0;
-    let lastTapPt = { x: 0, y: 0 };
-    let travelled = 0;
-
-    const beginSingle = (cx: number, cy: number): void => {
-      const s = this.state;
-      if (!s) return;
-      mode = movesFrame(cx, cy) ? 'frame' : 'content';
-      last = { x: cx, y: cy };
-      origin = mode === 'frame' ? { x: s.float.x, y: s.float.y } : { x: this.imgView().x, y: this.imgView().y };
-      travelled = 0;
-    };
-    const moveSingle = (cx: number, cy: number): void => {
-      const s = this.state;
-      if (!mode || !s) return;
-      travelled += Math.hypot(cx - last.x, cy - last.y);
-      const dx = cx - last.x;
-      const dy = cy - last.y;
-      if (mode === 'frame') {
-        // accumulate unclamped and clamp only for display, so dragging into a
-        // bound and back out again doesn't stick at the edge
-        origin = { x: origin.x + dx, y: origin.y + dy };
-        s.float = this.clampOverlay({ ...s.float, x: origin.x, y: origin.y });
-        this.applyOverlayRect();
-      } else {
-        const v = this.imgView();
-        s.imgView = this.clampImgView({ zoom: v.zoom, x: v.x + dx, y: v.y + dy });
-        this.applyImgView();
-      }
-      last = { x: cx, y: cy };
-    };
-    const endSingle = (): void => {
-      if (!mode) return;
-      mode = null;
-      this.persist();
-    };
-
-    /** A second tap in the same spot, soon after the first, refits the picture. */
-    const tap = (cx: number, cy: number): boolean => {
-      const now = performance.now();
-      const isDouble =
-        now - lastTap < DOUBLE_TAP_MS && Math.hypot(cx - lastTapPt.x, cy - lastTapPt.y) < DOUBLE_TAP_SLOP;
-      lastTap = isDouble ? 0 : now;
-      lastTapPt = { x: cx, y: cy };
-      if (!isDouble) return false;
-      if (this.state) this.state.imgView = { zoom: 1, x: 0, y: 0 };
-      this.applyImgView();
-      this.persist();
-      return true;
-    };
-
-    // ---- touch
-    root.addEventListener(
-      'touchstart',
-      (e) => {
-        if (excluded(e.target)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        if (e.touches.length >= 2) {
-          mode = null;
-          const r = root.getBoundingClientRect();
-          const v = this.imgView();
-          pinch = {
-            d0: dist(e.touches),
-            z0: v.zoom,
-            vx: v.x,
-            vy: v.y,
-            cx: (e.touches[0].clientX + e.touches[1].clientX) / 2 - r.left,
-            cy: (e.touches[0].clientY + e.touches[1].clientY) / 2 - r.top,
-          };
-        } else if (e.touches.length === 1 && !pinch) {
-          beginSingle(e.touches[0].clientX, e.touches[0].clientY);
-        }
+    if (this.titleEl) this.titleEl.textContent = s.fileName ?? 'Image';
+    this.scroller = new PageScroller(source, {
+      onCurrentPage: () => {
+        // a single page, so the "n / N" read-out has nothing to say
+        if (this.pageLabel) this.pageLabel.textContent = '';
       },
-      { passive: false }
-    );
-    root.addEventListener(
-      'touchmove',
-      (e) => {
-        if (excluded(e.target)) return;
-        e.preventDefault();
-        e.stopPropagation();
-        if (pinch) {
-          if (e.touches.length < 2) return;
-          const p = pinch;
-          const zoom = clamp((p.z0 * dist(e.touches)) / p.d0, IMG_ZOOM_MIN, IMG_ZOOM_MAX);
-          // keep the point under the fingers fixed: contentPoint = (c - v) / z
-          const k = zoom / p.z0;
-          this.state!.imgView = this.clampImgView({
-            zoom,
-            x: p.cx - (p.cx - p.vx) * k,
-            y: p.cy - (p.cy - p.vy) * k,
-          });
-          this.applyImgView();
-          return;
-        }
-        if (e.touches.length === 1) moveSingle(e.touches[0].clientX, e.touches[0].clientY);
-      },
-      { passive: false }
-    );
-    const endTouch = (e: TouchEvent): void => {
-      if (e.touches.length >= 2) return;
-      if (e.touches.length === 1) {
-        pinch = null;
-        beginSingle(e.touches[0].clientX, e.touches[0].clientY);
-        return;
-      }
-      const wasTap = mode != null && travelled < DOUBLE_TAP_SLOP;
-      const pt = { x: last.x, y: last.y };
-      pinch = null;
-      endSingle();
-      if (wasTap) tap(pt.x, pt.y);
-      else this.persist();
-    };
-    root.addEventListener('touchend', endTouch);
-    root.addEventListener('touchcancel', endTouch);
-
-    // ---- mouse
-    root.addEventListener('pointerdown', (e) => {
-      if (e.pointerType !== 'mouse' || excluded(e.target)) return;
-      beginSingle(e.clientX, e.clientY);
-      try {
-        root.setPointerCapture(e.pointerId);
-      } catch {
-        /* ignore */
-      }
-      e.preventDefault();
-      e.stopPropagation();
+      onAnchorChanged: () => this.saveAnchorSoon(),
     });
-    root.addEventListener('pointermove', (e) => {
-      if (e.pointerType !== 'mouse') return;
-      moveSingle(e.clientX, e.clientY);
-    });
-    const endMouse = (e: PointerEvent): void => {
-      if (e.pointerType !== 'mouse') return;
-      endSingle();
-    };
-    root.addEventListener('pointerup', endMouse);
-    root.addEventListener('pointercancel', endMouse);
-    root.addEventListener('dblclick', (e) => {
-      if (excluded(e.target)) return;
-      e.preventDefault();
-      if (this.state) this.state.imgView = { zoom: 1, x: 0, y: 0 };
-      this.applyImgView();
-      this.persist();
-    });
-    root.addEventListener(
-      'wheel',
-      (e) => {
-        if (excluded(e.target)) return;
-        e.preventDefault();
-        const r = root.getBoundingClientRect();
-        const cx = e.clientX - r.left;
-        const cy = e.clientY - r.top;
-        const v = this.imgView();
-        const zoom = clamp(v.zoom * Math.exp(-e.deltaY * 0.002), IMG_ZOOM_MIN, IMG_ZOOM_MAX);
-        const k = zoom / v.zoom;
-        this.state!.imgView = this.clampImgView({ zoom, x: cx - (cx - v.x) * k, y: cy - (cy - v.y) * k });
-        this.applyImgView();
-        this.persist();
-      },
-      { passive: false }
-    );
+    this.scroller.mount(this.stage, anchor);
+    return true;
   }
 
-  /** Corner grip: resize from the top-left anchor with the aspect locked (clampOverlay re-derives the height). */
-  private bindOverlayResize(grip: HTMLElement): void {
-    let drag: { id: number; x: number; y: number; w: number } | null = null;
-    grip.addEventListener('pointerdown', (e) => {
-      const s = this.state;
-      if (!s) return;
-      drag = { id: e.pointerId, x: e.clientX, y: e.clientY, w: s.float.w };
-      try {
-        grip.setPointerCapture(e.pointerId);
-      } catch {
-        /* ignore */
-      }
-      e.preventDefault();
-      e.stopPropagation();
-    });
-    grip.addEventListener('pointermove', (e) => {
-      const s = this.state;
-      if (!drag || e.pointerId !== drag.id || !s) return;
-      // drive the width from whichever axis the finger travelled further
-      // along, so the grip tracks a diagonal drag rather than only its
-      // horizontal component
-      const dx = e.clientX - drag.x;
-      const dy = e.clientY - drag.y;
-      const delta = Math.abs(dx) >= Math.abs(dy) ? dx : dy * this.imgAspect;
-      s.float = this.clampOverlay({ ...s.float, w: drag.w + delta });
-      this.applyOverlayRect();
-      this.applyImgView(); // a smaller frame means less pan slack for the picture
-    });
-    const end = (e: PointerEvent): void => {
-      if (!drag || e.pointerId !== drag.id) return;
-      drag = null;
-      this.persist();
-    };
-    grip.addEventListener('pointerup', end);
-    grip.addEventListener('pointercancel', end);
-  }
-
-  /**
-   * A brief, non-blocking notice. Built here with inline styles rather than a
-   * shared component because the app has no toast of its own and adding one
-   * would mean a stylesheet rule; this is the only thing in the pane that
-   * needs one. Never interactive (`pointer-events: none`), so it can't eat a
-   * touch meant for the page underneath, and it sits above the dock but below
-   * the AI panel and any modal.
-   */
-  private toast(message: string): void {
-    this.toastEl?.remove();
-    if (this.toastTimer) clearTimeout(this.toastTimer);
-    const t = el('div', { class: 'split-toast', role: 'status', text: message });
-    t.style.cssText = [
-      'position:fixed',
-      'left:50%',
-      'transform:translateX(-50%)',
-      'bottom:calc(32px + env(safe-area-inset-bottom))',
-      'z-index:58',
-      'pointer-events:none',
-      'max-width:min(420px,86vw)',
-      'padding:10px 18px',
-      'border-radius:9999px',
-      'background:rgba(16,24,43,0.92)',
-      'color:#fff',
-      'font-size:14px',
-      'font-weight:600',
-      'text-align:center',
-      'box-shadow:0 6px 24px rgba(4,21,52,0.28)',
-      'opacity:0',
-      'transition:opacity 0.18s ease',
-    ].join(';');
-    this.container.append(t);
-    this.toastEl = t;
-    requestAnimationFrame(() => {
-      t.style.opacity = '1';
-    });
-    this.toastTimer = setTimeout(() => {
-      this.toastTimer = null;
-      t.style.opacity = '0';
-      setTimeout(() => {
-        if (this.toastEl === t) this.toastEl = null;
-        t.remove();
-      }, 220);
-    }, 2400);
-  }
-
-  private teardownOverlay(): void {
-    this.pdfSource?.release();
-    this.pdfSource = null;
-    window.removeEventListener('resize', this.reclampOverlay);
-    window.removeEventListener('orientationchange', this.reclampOverlay);
-    this.overlayObserver?.disconnect();
-    this.overlayObserver = null;
-    this.overlayEl?.remove();
-    this.overlayEl = null;
-    this.imgInnerEl = null;
-    if (this.imgUrl) {
-      URL.revokeObjectURL(this.imgUrl);
-      this.imgUrl = null;
-    }
-  }
 
   // ---------------------------------------------------------- PDF in the pane
 
@@ -1199,7 +759,7 @@ export class SecondaryPane {
     this.pdfSource = source;
     if (!this.stage) return false;
 
-    if (this.titleEl) this.titleEl.textContent = s.pdfName ?? 'PDF';
+    if (this.titleEl) this.titleEl.textContent = s.fileName ?? 'PDF';
     this.scroller = new PageScroller(source, {
       onCurrentPage: (index, count) => {
         if (this.pageLabel) this.pageLabel.textContent = index < 0 ? '' : `${index + 1} / ${count}`;
@@ -1327,7 +887,56 @@ export class SecondaryPane {
       clearTimeout(this.anchorSaveTimer);
       this.anchorSaveTimer = null;
     }
-    this.teardownOverlay();
+    this.pdfSource?.release();
+    this.pdfSource = null;
+    this.imageSource?.release();
+    this.imageSource = null;
+  }
+
+  /**
+   * A brief, non-blocking notice. Built here with inline styles rather than a
+   * shared component because the app has no toast of its own and adding one
+   * would mean a stylesheet rule; this is the only thing in the pane that
+   * needs one. Never interactive (`pointer-events: none`), so it can't eat a
+   * touch meant for the page underneath, and it sits above the dock but below
+   * the AI panel and any modal.
+   */
+  private toast(message: string): void {
+    this.toastEl?.remove();
+    if (this.toastTimer) clearTimeout(this.toastTimer);
+    const t = el('div', { class: 'split-toast', role: 'status', text: message });
+    t.style.cssText = [
+      'position:fixed',
+      'left:50%',
+      'transform:translateX(-50%)',
+      'bottom:calc(32px + env(safe-area-inset-bottom))',
+      'z-index:58',
+      'pointer-events:none',
+      'max-width:min(420px,86vw)',
+      'padding:10px 18px',
+      'border-radius:9999px',
+      'background:rgba(16,24,43,0.92)',
+      'color:#fff',
+      'font-size:14px',
+      'font-weight:600',
+      'text-align:center',
+      'box-shadow:0 6px 24px rgba(4,21,52,0.28)',
+      'opacity:0',
+      'transition:opacity 0.18s ease',
+    ].join(';');
+    this.container.append(t);
+    this.toastEl = t;
+    requestAnimationFrame(() => {
+      t.style.opacity = '1';
+    });
+    this.toastTimer = setTimeout(() => {
+      this.toastTimer = null;
+      t.style.opacity = '0';
+      setTimeout(() => {
+        if (this.toastEl === t) this.toastEl = null;
+        t.remove();
+      }, 220);
+    }, 2400);
   }
 
   private teardownChrome(): void {

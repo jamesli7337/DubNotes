@@ -479,7 +479,8 @@ export class AiMode {
         context: { image: context.base64, mimeType: context.mimeType },
       }));
     } catch (err) {
-      text = `DubNotes AI error: could not reach the endpoint (${err instanceof Error ? err.message : 'network error'}).`;
+      console.error('AI mode send failed:', err);
+      text = "DubNotes AI error: Couldn't reach the AI, check your internet connection.";
       isError = true;
     }
 
