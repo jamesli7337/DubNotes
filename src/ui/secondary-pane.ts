@@ -215,6 +215,24 @@ function writePending(p: PendingPick | null): void {
 }
 
 /**
+ * A pick is a single round trip within one page load — notebook → library →
+ * the same notebook — driven entirely by hash navigation, so it never
+ * legitimately outlives the document that started it. `sessionStorage`,
+ * though, does: it survives a reload and an iOS home-screen app being
+ * relaunched into its restored session. A pick abandoned that way (the app
+ * was closed while the library was waiting for a notebook to be tapped) came
+ * back as a library permanently stuck in pick mode, with Import, Export,
+ * Restore, New notebook and every card action disabled and every notebook tap
+ * bouncing into the pick's host notebook instead of opening the one tapped.
+ * Clearing it here, once, as the module initialises, ends the round trip with
+ * the load that began it. The module is imported by both the notebook and the
+ * library and initialises before either can mount, and a pick can only be
+ * written by a `SecondaryPane` this module has already created, so this can
+ * never discard a pick that is still in flight.
+ */
+writePending(null);
+
+/**
  * The library asks this on every mount: non-null means "you are in pick-for-
  * split mode". Self-heals if the notebook the pick came from has since been
  * deleted, so a stale record can't strand the library in picking mode.

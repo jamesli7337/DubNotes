@@ -1942,7 +1942,11 @@ class NotebookView {
     box.append(el('h2', { class: 'dlg__title', text: `Importing ${file.name}` }), msg);
     const progress = openModal(box, { dismissable: false });
     try {
-      const { importPdfPages } = await import('../pdf-import'); // pdf.js is loaded only when needed
+      // pdf.js is loaded only when needed. One retry: on a freshly deployed
+      // PWA the chunk request can lose a race with the service worker
+      // swapping caches, and the module load fails outright.
+      const loadImport = () => import('../pdf-import');
+      const { importPdfPages } = await loadImport().catch(() => loadImport());
       await importPdfPages(file, this.nb.id, afterIndex, (done, total) => {
         msg.textContent = `Preparing page ${done} of ${total}…`;
       });

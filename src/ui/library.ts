@@ -72,10 +72,9 @@ export function mountLibrary(root: HTMLElement, folderId: string | null): void {
     // only navigating folders and choosing a notebook stay live. Done here, in
     // one sweep, rather than by giving every builder its own pick-mode branch.
     const off = wrap.querySelectorAll<HTMLButtonElement>(
-      '.app-header__actions button, .nb-card__actions button, .lib-divider button, .tree__more, .fab-dock button'
+      '.app-header__actions button, .nb-card__actions button, .lib-divider button, .tree__more, .fab-dock button, .sort-btn'
     );
     for (const b of off) b.disabled = true;
-    for (const sel of wrap.querySelectorAll<HTMLSelectElement>('.sort-select select')) sel.disabled = true;
   }
   root.replaceChildren(wrap);
 }
@@ -218,20 +217,7 @@ function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
   );
   head.append(titleGroup);
 
-  if (notebooks.length > 1) {
-    const sort = sortKey();
-    const sortWrap = el('div', { class: 'sort-select' });
-    sortWrap.append(el('span', { class: 'sort-select__label', text: 'Sort' }));
-    const select = el('select', { 'aria-label': 'Sort notebooks' }) as HTMLSelectElement;
-    for (const [value, label] of SORT_OPTIONS) select.append(el('option', { value, text: label }));
-    select.value = sort;
-    select.addEventListener('change', () => {
-      saveSortKey(select.value as SortKey);
-      rerender(root, folder);
-    });
-    sortWrap.append(select);
-    head.append(sortWrap);
-  }
+  if (notebooks.length > 1) head.append(buildSortButton(root, folder));
   grid.append(head);
 
   if (!items.length) {
@@ -260,6 +246,41 @@ function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
   content.append(grid);
 
   return content;
+}
+
+/**
+ * The grid's sort control: a pill showing the current order, which opens a
+ * tick-marked menu of the alternatives. A button + anchored menu rather than a
+ * native `<select>` so it reads as part of the library's own chrome (and gets
+ * the same popover behaviour as every other menu on this screen).
+ */
+function buildSortButton(root: HTMLElement, folder: Folder | null): HTMLElement {
+  const active = sortKey();
+  const btn = el('button', { class: 'sort-btn', 'aria-label': 'Sort notebooks' });
+  btn.append(
+    el('span', { text: SORT_OPTIONS.find(([k]) => k === active)?.[1] ?? '' }),
+    icon('chevron-down', 'sm')
+  );
+  btn.addEventListener('click', () => {
+    const menu = el('div', { class: 'menu', role: 'menu' });
+    let modal: Modal | null = null;
+    for (const [value, label] of SORT_OPTIONS) {
+      const item = el('button', {
+        class: 'menu__item' + (value === active ? ' active' : ''),
+        role: 'menuitemradio',
+        'aria-checked': String(value === active),
+      });
+      item.append(icon('check', 'sm'), el('span', { text: label }));
+      item.addEventListener('click', () => {
+        modal?.close();
+        saveSortKey(value);
+        rerender(root, folder);
+      });
+      menu.append(item);
+    }
+    modal = openAnchoredModal(btn, menu);
+  });
+  return btn;
 }
 
 // --------------------------------------------------------------------- tree

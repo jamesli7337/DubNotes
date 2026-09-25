@@ -459,7 +459,7 @@ select {
 }
 .section-head {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   row-gap: 8px;
@@ -486,25 +486,25 @@ select {
   background: color-mix(in srgb, var(--lib-text-faint) 16%, transparent);
 }
 
-.sort-select {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-}
-.sort-select__label {
-  font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: var(--lib-text-faint);
-}
-.sort-select select {
-  font: 600 12px/1 var(--font-body);
+/* sort control — a labelled pill that opens the order menu */
+.sort-btn {
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
   padding: 7px 11px;
   border: 1px solid var(--lib-border);
-  border-radius: var(--r-full);
+  border-radius: var(--r-lg);
   background: var(--lib-card);
   color: var(--lib-text);
+  box-shadow: var(--sh-1);
+}
+.sort-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--lib-text-faint) 8%, var(--lib-card));
+}
+.sort-btn .icon {
+  width: 15px;
+  height: 15px;
+  color: var(--lib-text-faint);
 }
 
 .nb-card {
@@ -2446,10 +2446,24 @@ select {
   padding: 0;
   border-radius: var(--r-lg);
   text-align: left;
-  /* holding it arms a drag-to-reorder (see bindLongPressReorder) — without
-     this, a touch hold here is claimed by the grid's own native scrolling
-     before our long-press timer ever fires (see CLAUDE.md's touch-action note) */
-  touch-action: none;
+  /* Holding it arms a drag-to-reorder (see bindLongPressReorder). This used
+     to be touch-action: none, matching .nb-dock .swatch's own long-press
+     drag handle (see its comment) — but that swatch row's own horizontal
+     pan is JS-owned scroll-adjacent chrome, while .pagemgr__grid below is a
+     genuine native-scrolling element with no JS fallback of its own; since
+     the thumbnail covers nearly the whole card, `none` here meant almost no
+     touch starting anywhere in the grid could ever scroll it. `pan-y` is the
+     axis the grid actually needs (it never scrolls horizontally) — pinch
+     and double-tap-zoom stay off, so the reorder timer isn't racing those,
+     only a real vertical pan. touch-action is still locked in at this
+     touch's own pointerdown the same as the swatch case, so a hold that
+     isn't perfectly still can in principle still get read as the start of a
+     scroll and fire pointercancel before the long-press timer elapses
+     (already handled below: that cancels the arm cleanly, same as any other
+     early release) — accepted deliberately here so scrolling works from
+     anywhere on the grid, including thumbnails, which matters far more than
+     it did for the swatch row. */
+  touch-action: pan-y;
 }
 .pagemgr__thumb {
   display: block;

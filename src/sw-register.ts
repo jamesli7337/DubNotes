@@ -4,9 +4,15 @@
 export function registerSW(): void {
   if (import.meta.env.DEV) return;
   if (!('serviceWorker' in navigator)) return;
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {
-      /* offline support just won't be available */
+  const register = (): void => {
+    navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch((err) => {
+      // offline support just won't be available — surface why rather than swallowing it
+      console.warn('Service worker registration failed:', err);
     });
-  });
+  };
+  // main.ts calls this after `await store.init()`, by which point 'load' has
+  // usually already fired — waiting on the event unconditionally would mean
+  // never registering at all.
+  if (document.readyState === 'complete') register();
+  else window.addEventListener('load', register, { once: true });
 }
