@@ -486,6 +486,43 @@ select {
   background: color-mix(in srgb, var(--lib-text-faint) 16%, transparent);
 }
 
+.section-head__controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* layout switch — grid / list, a segmented pill beside the sort control */
+.view-seg {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: var(--r-lg);
+  background: color-mix(in srgb, var(--lib-text-faint) 22%, transparent);
+}
+.view-seg__btn {
+  width: 30px;
+  height: 27px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  border-radius: var(--r);
+  color: var(--lib-text-dim);
+}
+.view-seg__btn .icon {
+  width: 15px;
+  height: 15px;
+}
+.view-seg__btn.active {
+  background: var(--lib-card);
+  color: var(--lib-accent);
+  box-shadow: var(--sh-1);
+}
+.view-seg__btn:active {
+  transform: none;
+}
+
 /* sort control — a labelled pill that opens the order menu */
 .sort-btn {
   gap: 6px;
@@ -505,6 +542,98 @@ select {
   width: 15px;
   height: 15px;
   color: var(--lib-text-faint);
+}
+
+/* ---------------------------------------------------- notebook list / grid
+ * The cards sit in .nb-items (the toolbar above them is a sibling, so it is
+ * never a grid cell). List view is the stacked-row layout; grid view is the
+ * block layout from the reference design — same card markup either way, so
+ * every card variant below is reached through the .nb-items--grid parent
+ * rather than a second class on the card itself. */
+.nb-items {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.nb-items--grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
+  gap: 18px;
+}
+/* a divider is a label *between* groups of notebooks — it keeps its own row */
+.nb-items--grid .lib-divider {
+  grid-column: 1 / -1;
+}
+.nb-items--grid .nb-card {
+  flex-direction: column;
+  gap: 0;
+  padding: 0;
+  overflow: hidden;
+}
+.nb-items--grid .nb-card:hover {
+  box-shadow: var(--sh-2);
+}
+.nb-items--grid .nb-card__accent {
+  border-radius: 0;
+  z-index: 2;
+}
+/* the page preview becomes the tile's cover, full-bleed */
+.nb-items--grid .nb-card__thumb {
+  width: 100%;
+  height: 168px;
+  border: none;
+  border-bottom: 1px solid var(--lib-border);
+  border-radius: 0;
+}
+/* `cover` rather than the base rule's `contain`: a portrait page letterboxed
+   into this wider box leaves grey bands down both sides and reads as an empty
+   tile. Anchoring to the top shows the head of the page — where writing
+   actually starts — and crops the tail instead of distorting anything. */
+.nb-items--grid .nb-card__thumb canvas {
+  object-fit: cover;
+  object-position: top;
+}
+/* static, so the overlaid top row and the footer actions below position
+   against the card itself rather than this box */
+.nb-items--grid .nb-card__body {
+  position: static;
+  display: block;
+  padding: 11px 12px 10px;
+}
+.nb-items--grid .nb-card__main {
+  padding: 0;
+  gap: 4px;
+}
+/* template + page-count badges float over the preview, as pills so they stay
+   legible against whatever the page happens to show */
+.nb-items--grid .nb-card__toprow {
+  position: absolute;
+  top: 9px;
+  left: 11px;
+  right: 11px;
+  z-index: 2;
+  justify-content: space-between;
+}
+.nb-items--grid .nb-card__toprow .tag,
+.nb-items--grid .nb-card__pages {
+  padding: 2px 8px;
+  border-radius: var(--r);
+  border: 1px solid var(--lib-border);
+  background: color-mix(in srgb, var(--lib-card) 88%, transparent);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+/* the actions sit on their own right-aligned row under the title instead of
+   the list layout's absolute pin. The reference design reveals them on hover,
+   which would leave them unreachable on a touch screen — this is a
+   pen-and-tablet app first, so they stay visible. */
+.nb-items--grid .nb-card__body .nb-card__actions {
+  position: static;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
+.nb-items--grid .nb-card__body .nb-card__foot {
+  padding-right: 0;
 }
 
 .nb-card {

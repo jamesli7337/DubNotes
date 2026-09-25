@@ -53,6 +53,7 @@ import send from 'lucide-static/icons/send.svg?raw';
 import notepadText from 'lucide-static/icons/notepad-text.svg?raw';
 import hand from 'lucide-static/icons/hand.svg?raw';
 import layoutGrid from 'lucide-static/icons/layout-grid.svg?raw';
+import list from 'lucide-static/icons/list.svg?raw';
 import columns2 from 'lucide-static/icons/columns-2.svg?raw';
 import pictureInPicture2 from 'lucide-static/icons/picture-in-picture-2.svg?raw';
 import minimize2 from 'lucide-static/icons/minimize-2.svg?raw';
@@ -111,6 +112,10 @@ export type IconName =
   | 'paper'
   | 'hand'
   | 'pages'
+  /** the library toolbar's layout switch — 2x2 blocks (shares the 'pages' glyph) */
+  | 'view-grid'
+  /** the library toolbar's layout switch — stacked rows */
+  | 'view-list'
   /** two side-by-side panels — the app bar's split-screen button */
   | 'split'
   /** the split pane's dock/float toggle */
@@ -168,6 +173,8 @@ const ICONS: Record<IconName, string> = {
   paper: notepadText,
   hand,
   pages: layoutGrid,
+  'view-grid': layoutGrid,
+  'view-list': list,
   split: columns2,
   'split-float': pictureInPicture2,
   minimize: minimize2,

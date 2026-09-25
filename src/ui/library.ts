@@ -39,6 +39,28 @@ function saveSortKey(k: SortKey): void {
   }
 }
 
+/** Whether the notebooks are laid out as blocks or rows (remembered per device). */
+const VIEW_KEY = 'noteapp.notebooks.view';
+type ViewMode = 'grid' | 'list';
+const VIEW_OPTIONS: Array<[ViewMode, string, IconName]> = [
+  ['grid', 'Grid view', 'view-grid'],
+  ['list', 'List view', 'view-list'],
+];
+function viewMode(): ViewMode {
+  try {
+    return localStorage.getItem(VIEW_KEY) === 'list' ? 'list' : 'grid';
+  } catch {
+    return 'grid';
+  }
+}
+function saveViewMode(v: ViewMode): void {
+  try {
+    localStorage.setItem(VIEW_KEY, v);
+  } catch {
+    /* ignore */
+  }
+}
+
 /**
  * Non-null while the library is standing in as a notebook *picker* for the
  * split-screen pane (see secondary-pane.ts): tapping a notebook chooses it
@@ -72,7 +94,7 @@ export function mountLibrary(root: HTMLElement, folderId: string | null): void {
     // only navigating folders and choosing a notebook stay live. Done here, in
     // one sweep, rather than by giving every builder its own pick-mode branch.
     const off = wrap.querySelectorAll<HTMLButtonElement>(
-      '.app-header__actions button, .nb-card__actions button, .lib-divider button, .tree__more, .fab-dock button, .sort-btn'
+      '.app-header__actions button, .nb-card__actions button, .lib-divider button, .tree__more, .fab-dock button, .sort-btn, .view-seg__btn'
     );
     for (const b of off) b.disabled = true;
   }
@@ -217,7 +239,11 @@ function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
   );
   head.append(titleGroup);
 
-  if (notebooks.length > 1) head.append(buildSortButton(root, folder));
+  // Layout toggle then sort pill, right-aligned as one control group.
+  const controls = el('div', { class: 'section-head__controls' });
+  if (notebooks.length) controls.append(buildViewToggle(root, folder));
+  if (notebooks.length > 1) controls.append(buildSortButton(root, folder));
+  if (controls.children.length) head.append(controls);
   grid.append(head);
 
   if (!items.length) {
@@ -240,12 +266,41 @@ function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
           if (sort === 'created') return b.nb.createdAt - a.nb.createdAt;
           return b.nb.updatedAt - a.nb.updatedAt;
         });
+  // The cards live in their own container so the toolbar above stays a plain
+  // row while they become a CSS grid in block view.
+  const list = el('div', { class: 'nb-items' + (viewMode() === 'grid' ? ' nb-items--grid' : '') });
   for (const it of ordered) {
-    grid.append(it.kind === 'notebook' ? buildCard(it.nb, root, folder) : buildDivider(it.divider, root, folder));
+    list.append(it.kind === 'notebook' ? buildCard(it.nb, root, folder) : buildDivider(it.divider, root, folder));
   }
+  grid.append(list);
   content.append(grid);
 
   return content;
+}
+
+/**
+ * Block-vs-row layout switch: two icon buttons in a segmented pill, the active
+ * one raised. Sits immediately left of the sort control.
+ */
+function buildViewToggle(root: HTMLElement, folder: Folder | null): HTMLElement {
+  const active = viewMode();
+  const seg = el('div', { class: 'view-seg', role: 'group', 'aria-label': 'Notebook layout' });
+  for (const [mode, label, name] of VIEW_OPTIONS) {
+    const b = el('button', {
+      class: 'view-seg__btn' + (mode === active ? ' active' : ''),
+      title: label,
+      'aria-label': label,
+      'aria-pressed': String(mode === active),
+    });
+    b.append(icon(name, 'sm'));
+    b.addEventListener('click', () => {
+      if (mode === active) return;
+      saveViewMode(mode);
+      rerender(root, folder);
+    });
+    seg.append(b);
+  }
+  return seg;
 }
 
 /**
