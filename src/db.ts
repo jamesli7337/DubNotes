@@ -400,7 +400,67 @@ export async function deletePageCascade(pageId: string): Promise<void> {
   // no same-key put follows either delete; txDone awaits them
   void deleteByIndex(t.objectStore('strokes'), 'pageId', pageId);
   void deleteByIndex(t.objectStore('elements'), 'pageId', pageId);
+  // A PDF asset this page may have been the last user of is deliberately NOT
+  // collected here — undo can bring the page straight back, and its bytes
+  // with it. Orphans are swept at startup instead; see sweepOrphanedAssets.
   return txDone(t);
+}
+
+/** Every `assetId` referenced by any page, walked with a cursor so page records (a v5 `background.src` can be a large data URL) are never all resident at once. */
+function referencedAssetIds(store: IDBObjectStore): Promise<Set<string>> {
+  return new Promise((resolve, reject) => {
+    const ids = new Set<string>();
+    const cur = store.openCursor();
+    cur.onsuccess = () => {
+      const c = cur.result;
+      if (!c) {
+        resolve(ids);
+        return;
+      }
+      const assetId = (c.value as Page).background?.assetId;
+      if (assetId) ids.add(assetId);
+      c.continue();
+    };
+    cur.onerror = () => reject(cur.error);
+  });
+}
+
+/**
+ * Deletes every stored PDF asset no page references any more, and answers how
+ * many went. Imported PDFs are stored once and shared by all the pages of that
+ * import (`background: { assetId, page }`), so deleting the last such page
+ * leaves the bytes — often tens of MB — stranded for the life of the database.
+ *
+ * **Call this once, at app start, and nowhere else.** Two reasons, both about
+ * things that are only true at startup:
+ *
+ *  - Undo history lives in memory only, so nothing that has already been
+ *    undone-into-existence can still need an orphan. Collecting an asset at
+ *    page-delete time instead (which this replaced) broke undo: delete a PDF
+ *    page, wait past the ~0.7s autosave flush, undo, and the page came back
+ *    with its background gone.
+ *  - `Store` writes an imported asset immediately but its pages only on that
+ *    debounced flush, so mid-session there is a window where a perfectly live
+ *    asset has no page pointing at it yet. At startup, before the user can
+ *    reach an import, that window doesn't exist.
+ *
+ * Reads the two stores in one readonly transaction (both requests issued
+ * before any await, so it can't auto-commit underneath us), and takes only
+ * asset *keys* — `getAll` there would pull every PDF's bytes into memory.
+ */
+export async function sweepOrphanedAssets(): Promise<number> {
+  const db = await openDB();
+  const ro = db.transaction(['pages', 'assets'], 'readonly');
+  const [referenced, keys] = await Promise.all([
+    referencedAssetIds(ro.objectStore('pages')),
+    reqP(ro.objectStore('assets').getAllKeys() as IDBRequest<IDBValidKey[]>),
+  ]);
+  const orphans = keys.filter((k): k is string => typeof k === 'string' && !referenced.has(k));
+  if (!orphans.length) return 0;
+  const t = db.transaction('assets', 'readwrite');
+  for (const id of orphans) t.objectStore('assets').delete(id);
+  await txDone(t);
+  return orphans.length;
 }
 
 export async function deleteNotebookCascade(notebookId: string): Promise<void> {

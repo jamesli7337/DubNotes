@@ -1,5 +1,5 @@
 import { AI_COLOR } from '../ai-mode';
-import { DPR, pageH, pageW } from '../const';
+import { canvasPixelFactor, pageH, pageW } from '../const';
 import { store } from '../store';
 import {
   ERASER_RADIUS,
@@ -206,6 +206,29 @@ export class PageCanvas {
   private cctx: CanvasRenderingContext2D | null = null;
   /** The shared, notebook-level camera { x, y, zoom } — see geom.ts's own doc comment. A stable object reference NotebookView mutates in place; PageCanvas never writes to it, only reads. */
   private readonly camera: Camera;
+  /**
+   * Backing-store resolution multiplier, in the same units as PageView's own
+   * `quality`: device pixels per page unit is `canvasPixelFactor(pw, ph,
+   * quality)`, i.e. `DPR × quality` capped per canvas. 1 is the old fixed
+   * behaviour (a page always rasterised at DPR regardless of zoom, so ink
+   * went soft as soon as the camera zoomed past 100%). NotebookView tracks
+   * the settled zoom into this — see its pageQuality/applyQuality.
+   */
+  private quality = 1;
+  /**
+   * `quality` resolved through canvasPixelFactor and cached, since it is read
+   * on every cache/view repaint transform. Kept in step with the two canvases'
+   * actual backing-store size by resizeSurfaces (the only writer).
+   */
+  private pf = canvasPixelFactor(1, 1, 1);
+  /**
+   * A quality asked for while a gesture was in flight. Resizing a canvas
+   * clears it, so applying one mid-stroke would drop the live ink (and the
+   * cache the stroke is being composited over); setQuality refuses instead
+   * and parks the value here. NotebookView reads its `false` return and
+   * retries once things are idle.
+   */
+  private pendingQuality: number | null = null;
 
   private raf = 0;
   private mode:
@@ -335,14 +358,13 @@ export class PageCanvas {
     this.host = host;
 
     const view = document.createElement('canvas');
-    view.width = this.pw * DPR;
-    view.height = this.ph * DPR;
     const cache = document.createElement('canvas');
-    cache.width = this.pw * DPR;
-    cache.height = this.ph * DPR;
-
     this.view = view;
     this.cache = cache;
+    // sized from the quality NotebookView last handed us, so a page that
+    // mounts while already zoomed in comes in sharp rather than at DPR and
+    // then re-rendering a frame later
+    this.resizeSurfaces();
     this.vctx = view.getContext('2d');
     this.cctx = cache.getContext('2d');
     const clip = document.createElement('div');
@@ -398,6 +420,55 @@ export class PageCanvas {
     this.isMounted = false;
   }
 
+  // ------------------------------------------------------------- quality
+  /**
+   * Re-rasterises this page at `q` device pixels per page unit (relative to
+   * DPR — see the `quality` field), leaving its CSS layout size alone. The
+   * page is laid out in world units and scaled visually by the camera's one
+   * CSS transform, so tracking zoom means changing the *resolution* the page
+   * is drawn at, never its layout. Mirrors PageView.setQuality, which the
+   * split pane has always done this way; the main view used to bake DPR at
+   * mount and never revisit it, which is why ink went soft past 100%.
+   *
+   * Costly — a canvas resize plus a full repaint — so NotebookView calls it
+   * once a zoom gesture has settled, one page per frame, never per frame of
+   * the gesture itself.
+   *
+   * Returns false when it refused because a gesture is in flight: a resize
+   * clears the canvas, so applying one mid-stroke would throw away both the
+   * live ink and the cache under it. The value is remembered and the caller
+   * is expected to retry (see NotebookView.applyQuality).
+   */
+  setQuality(q: number): boolean {
+    // busy first, deliberately: an equal-value early return here would swallow
+    // the retry NotebookView is making for a quality it already recorded.
+    if (this.busy) {
+      this.pendingQuality = q;
+      return false;
+    }
+    this.pendingQuality = null;
+    if (q === this.quality) return true;
+    this.quality = q;
+    if (!this.isMounted) return true; // applied by mount()'s own resizeSurfaces
+    this.resizeSurfaces();
+    this.rebuild(this.lastDim);
+    return true;
+  }
+
+  /** Sizes both canvases' backing stores for the current quality and caches the factor the repaint transforms use. CSS size is fixed by `.page canvas` (var(--pw)/var(--ph)) and is deliberately untouched. */
+  private resizeSurfaces(): void {
+    const pf = canvasPixelFactor(this.pw, this.ph, this.quality);
+    this.pf = pf;
+    const w = Math.max(1, Math.round(this.pw * pf));
+    const h = Math.max(1, Math.round(this.ph * pf));
+    for (const c of [this.view, this.cache]) {
+      if (!c) continue;
+      // assigning width/height also clears the canvas — callers repaint after
+      if (c.width !== w) c.width = w;
+      if (c.height !== h) c.height = h;
+    }
+  }
+
   // ------------------------------------------------------------- painting
   /** Items that must not appear in the cache: those being dragged, edited or partially erased (the view paints them). */
   private hiddenIds(): Set<string> | null {
@@ -423,7 +494,7 @@ export class PageCanvas {
     const hidden = this.hiddenIds();
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.clearRect(0, 0, cache.width, cache.height);
-    c.setTransform(DPR, 0, 0, DPR, 0, 0);
+    c.setTransform(this.pf, 0, 0, this.pf, 0, 0);
     drawTemplate(c, this.page.paper, this.pw, this.ph);
     if (this.page.background) {
       drawBackground(c, this.page.background, this.pw, this.ph, () => this.rebuild(this.lastDim));
@@ -460,7 +531,7 @@ export class PageCanvas {
     this.blit();
     const v = this.vctx;
     if (!v) return;
-    v.setTransform(DPR, 0, 0, DPR, 0, 0);
+    v.setTransform(this.pf, 0, 0, this.pf, 0, 0);
 
     // the ink in flight — unless it has already snapped to a line (drawn below, in its place)
     if (this.mode === 'draw' && this.live.length && !this.lineEdit) {
@@ -1219,7 +1290,7 @@ export class PageCanvas {
     };
     store.addStroke(stroke);
     if (this.cctx) {
-      this.cctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+      this.cctx.setTransform(this.pf, 0, 0, this.pf, 0, 0);
       drawStroke(this.cctx, stroke, this.page.paper);
     }
     this.reset();

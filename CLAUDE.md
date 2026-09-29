@@ -4,73 +4,113 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-DubNotes: an installable PWA for handwritten notes (iPad + Apple Pencil, also usable with mouse). Vite + TypeScript, **no UI framework** — everything is hand-built DOM manipulation. All user data lives on-device in IndexedDB; nothing is synced except the optional per-page AI mode, which sends a rasterized image of what's written to a Gemini proxy.
+DubNotes: an installable PWA for handwritten notes (iPad + Apple Pencil, also usable with mouse). Vite + TypeScript, **no UI framework** — everything is hand-built DOM manipulation. All user data lives on-device in IndexedDB; nothing is synced except AI mode, which sends rasterized images of what's written to a Gemini proxy.
 
 ## Commands
 
 ```bash
 npm install          # first time only
-npm run dev           # dev server at http://localhost:5173 (also runs predev: icon gen + pdf.js wasm copy)
-npm run build          # tsc typecheck (no emit) + vite build -> dist/
-npm run preview        # serve the built dist/ bundle
-npm run icons          # regenerate public/icons/ PNGs from scratch
+npm run dev          # dev server at http://localhost:5173/DubNotes/ (predev: icon gen + pdf.js wasm copy)
+npm run build        # tsc typecheck (no emit) + vite build -> dist/
+npm run preview      # serve the built dist/ bundle (http://localhost:4173/DubNotes/)
+npm run icons        # regenerate public/icons/ PNGs from scratch
 ```
 
-There is no test suite and no lint script configured. `npm run build` (which runs `tsc` with `noEmit`) is the correctness gate — always run it after changes and treat type errors as build failures. Because there's no automated test runner, real verification means actually launching the app and driving it (see "Verifying behavior" below).
+There is no test suite and no lint script. `npm run build` (which runs `tsc --noEmit`) is the correctness gate — always run it after changes and treat type errors as build failures. Real verification means launching the app and driving it (see "Verifying behavior").
 
 ## Architecture
 
 ### No framework, direct DOM
 
-There's no React/Vue/etc. Screens are mounted by calling a `mount*` function with a container element (`mountLibrary(app, folderId)`, `mountNotebook(app, notebookId)` in `src/ui/`). These build DOM nodes directly (helpers in `src/ui/dom.ts`), wire event listeners, and re-render by mutating/rebuilding subtrees on state change — there is no virtual DOM or reactive binding layer.
+Screens are mounted by calling a `mount*` function with a container element (`mountLibrary(app, folderId)`, `mountNotebook(app, notebookId)` in `src/ui/`). These build DOM nodes directly (helpers in `src/ui/dom.ts`), wire event listeners, and re-render by mutating/rebuilding subtrees — no virtual DOM, no reactive binding.
 
 ### Routing
 
-`src/main.ts` is the entire router: a hash-based switch in `route()` matching `#/nb/<id>` (notebook), `#/f/<id>` (folder), or else the library root. `hashchange` re-runs `route()`. `base: '/DubNotes/'` in `vite.config.ts` is baked in for GitHub Pages' sub-path hosting — change it (or back to `'./'`) if deploying elsewhere; see the README's Deploy section.
+`src/main.ts` is the entire router: a hash switch in `route()` matching `#/nb/<id>` (notebook), `#/f/<id>` (folder), else the library root. `hashchange` re-runs `route()`. It also carries `#board-spike` — a **throwaway** infinite-canvas spike (`src/ui/board-spike.ts`, dynamically imported, nothing in the UI links to it); delete that branch and the file together when it's served its purpose. `base: '/DubNotes/'` in `vite.config.ts` is baked in for GitHub Pages' sub-path hosting.
 
 ### State: one in-memory Store, debounced IndexedDB flush
 
-`src/store.ts` exports a singleton `Store` holding every notebook/page/folder/divider/stroke/element in `Map`s — this is the single in-memory source of truth the whole UI reads from directly. Every mutation updates the maps synchronously (so UI reads are always instantly consistent) and marks touched records dirty; a debounced (~0.7s) flush in `src/db.ts` writes only the dirty records to IndexedDB. `flushNow()` forces an immediate write and is called on `visibilitychange`/`pagehide` so nothing is lost on backgrounding. `src/db.ts` also owns the IndexedDB schema/version and the migration chain that upgrades older records on load — see `DATA_FORMAT.md` for the full entity shapes, schema/format version history, and migration notes before changing any stored shape.
+`src/store.ts` exports a singleton `Store` holding every notebook/page/folder/divider/stroke/element in `Map`s — the single in-memory source of truth the whole UI reads directly. Every mutation updates the maps synchronously (so UI reads are always consistent) and marks records dirty; a debounced (~0.7s) flush writes only dirty records via `src/db.ts`. `flushNow()` forces an immediate write on `visibilitychange`/`pagehide`. `src/db.ts` owns the IndexedDB schema/version and the migration chain — read `DATA_FORMAT.md` before changing any stored shape.
+
+Note `store.pagesOf()` scans every page in the app, and page insert/delete renumbers all siblings; both are hot paths worth respecting.
+
+### Camera model (notebook view)
+
+`.nb-scroll` is **not** a scrolling element. Pan/zoom is one explicit camera `{ x, y, zoom }` (see `canvas/geom.ts`) applied as a single CSS transform to `.nb-camera` (`applyCamera`). "World space" is each `.page`'s own `offsetLeft/offsetTop` inside `.nb-camera`, read straight off layout. Consequences:
+- Gestures are all hand-rolled in `notebook.ts` (`bindZoomGestures`): one-finger pan, pinch, ctrl+wheel zoom, momentum + rubber-band clamping, and a palm-vs-Pencil rejection scheme (`palmTouchIds`, `stylusDown`, post-lift cooldown). Touch a gesture path only with a very good reason.
+- The scrollbar is a custom thumb on `document.body` (`bindScrollbarThumb`), not a native one.
+- Anything that must paint above the app-bar/dock — the lasso callout, the tape popover, the scrollbar thumb, drag ghosts — is appended to `document.body` with `position: fixed` and manually placed via the camera. Follow that pattern for any new overlay.
 
 ### Canvas layer (`src/canvas/`)
 
-Each page is its own `<canvas>` managed by `page-canvas.ts`, which owns Pointer Events handling for every tool (draw, erase, lasso/tap select, drag transforms, in-place text editing), a cache canvas for committed strokes (so a live stroke redraw only repaints that one stroke, not the whole page), and per-page clipping. Supporting modules:
-- `selection.ts` — the selection overlay: move/resize/rotate/delete handles for the active selection. Note: the on-canvas handles live inside the page's zoom-transformed subtree and position in page-local units for free via that CSS transform, **except** the delete button and the lasso callout, which are deliberately detached to `document.body` with `position: fixed` and manually computed screen coordinates — anything inside `.page-frame`'s `transform: scale(...)` is trapped in a nested stacking context and can never out-rank the fixed app-bar/dock regardless of its own z-index. Follow this same escape pattern for any other overlay element that must render above the dock.
-- `elements.ts` — text/image/shape rendering and text wrapping.
-- `geom.ts` — point-in-polygon, bounds, frame/rotation transforms (`rotateAround` etc.), shared by selection and guide math.
-- `recognize.ts` — stroke → straight-line fitting for pen line-snap; line/arrow box geometry.
+`page-canvas.ts` owns Pointer Events for every tool (draw, erase, lasso/tap select, drag transforms, in-place text editing). Each mounted page has **two** canvases: `cache` (template + committed items, repainted rarely) and `view` (blits the cache, then paints what's in flight). `NotebookView` mounts only pages near the viewport and re-rasterises them at a quality tracking the settled zoom (`setQuality` / `pageQuality` / `applyQuality`, one page per animation frame, capped per-canvas by `canvasPixelFactor` in `const.ts` and globally by a total pixel budget). A page mid-gesture refuses the re-render rather than clearing its canvas under a live stroke.
+
+- `selection.ts` — a **single shared** `SelectionOverlay` owned by `NotebookView`, living in `.nb-scroll` (a sibling of `.nb-camera`), not one per page. `show()` is told which page's selection it is and positions everything through the shared camera, so a selection dragged across a page boundary never loses the paint-order fight. It has no delete affordance of its own; that's the callout's job.
+- `elements.ts` — text/image/shape/tape rendering and text wrapping.
+- `geom.ts` — the `Camera` type, world↔screen conversion, point-in-polygon, bounds, frame/rotation transforms.
+- `recognize.ts` — stroke → straight-line fitting for pen line-snap.
 - `guide.ts` — ruler/protractor overlays and edge snapping (view-only, never persisted).
-- `freehand.ts` — wraps `perfect-freehand` to produce a `Path2D`.
-- `templates.ts` — paper background rendering (blank/ruled/grid/dot), color-aware.
+- `freehand.ts` — wraps `perfect-freehand`; also owns the `"auto"` ink token resolved against paper colour.
+- `templates.ts` — paper background rendering (blank/ruled/grid/dot), colour-aware.
 
 ### Tools & UI state
 
-`src/tools.ts` holds current tool selection, colors, and sizes, persisted to `localStorage` (separate from the IndexedDB note data). `src/ui/notebook.ts` is the largest UI file: the notebook screen, toolbar/dock rendering per active tool, incremental page list, undo/redo stack. When adding a new per-tool dock option, follow the existing pattern of a `switch (toolState.kind)` in `renderTools()`.
+`src/tools.ts` holds current tool, colours and sizes, persisted to `localStorage` (separate from the IndexedDB note data). `src/ui/notebook.ts` is by far the largest UI file: notebook screen, per-tool dock, page list, camera, undo/redo. When adding a per-tool dock option, follow the existing `switch (toolState.kind)` in `renderTools()`.
 
 ### AI mode
 
-A per-page toggle (`src/ai-mode.ts`) that, while active, rasterizes newly-written page regions and POSTs them to `/api/gemini` (`api/gemini.ts`, a Vercel serverless function — the only piece that needs Vercel specifically, since its secrets live there as project env vars) via `src/ai-render.ts`. Replies come back as ordinary violet-tinted text elements on the page. Because AI mode forces all ink to one fixed violet color regardless of tool color selection (see `PageCanvas.aiInkColor`), UI code that shows color pickers should generally hide them while AI mode is active for the current page (existing precedent: `notebook.ts`'s `aiColorsHidden()`) — but tools that recolor *existing* permanent content (e.g. lasso's recolor-selection swatches) are intentionally exempted, since that's unrelated to what new ink gets forced to.
+`src/ai-mode.ts`. One **global on/off switch per notebook** (not per page): while active, ink drawn on any page is ephemeral, inks in a fixed violet, and never enters the main undo stack — AI mode keeps its own turn-scoped undo. Send rasterizes two structurally separate images (the violet question ink cropped to itself, plus the whole page as context, via `src/export/raster.ts`) and POSTs them to `/api/gemini` (`api/gemini.ts`, a Vercel serverless function — the only Vercel-specific piece, since its secrets are project env vars). Replies render in a **slide-out chat panel**, not as page content, and persist in the `aiConversations` store, which is deliberately outside the backup format. While active, `applyAiToolbarLockdown` genuinely disables every control but the pen, undo/redo, send and the split button.
 
-### Export & import
+### Split screen (`src/ui/secondary-pane.ts`)
 
-`src/export/pdf.ts` (vector PDF via `pdf-lib`, lazy-loaded on export) and `src/export/raster.ts` (PNG/JPEG) render a page/notebook out. `src/pdf-import.ts` + `src/pdf-render.ts` bring a PDF in as a notebook, storing the file once and rendering pages on demand via `pdf.js` (lazy-loaded, wasm copied into `public/` by `scripts/copy-pdfjs-wasm.mjs` in `predev`/`prebuild`).
+Read-only reference content beside the notebook you're drawing in, in two shapes:
+- a **pane split** — another notebook's pages, a reference PDF, docked beside the notebook (or detached into a floating window via the header's minimise/expand);
+- an **image overlay** — a reference image floating *over* the notebook, pinned to the viewport, never splitting the width.
+
+`page-scroller.ts` is a self-contained read-only scrolling column (its own camera, gestures, mount window and quality drain) deliberately **not** built on `NotebookView`, whose camera code is tangled with the dock, selection, AI mode and a window-level key handler. What it scrolls comes from a `PageSource` (`page-sources.ts`): `NotebookPageSource` (pages via the read-only `PageView`, polling `Notebook.updatedAt` for changes) or `PdfPageSource`. Everything is read-only by construction — no tool state, no undo, no selection, no store writes. The only thing flowing back is `refreshIfShowing`, so a page edited in the main view repaints in the pane.
+
+Persistence is per host notebook: a `SavedSplit` (kind, notebook/page, scroll anchor, float rect) in `localStorage` under `noteapp.split.<notebookId>`, and any binary payload (reference image or PDF bytes) in a **separate `noteapp-split` IndexedDB database** — deliberately outside the `noteapp` database, so a reference file is never part of a notebook's pages or its backup. Picking a notebook to split with parks state under `noteapp.split.pending` and routes through the library (`pendingSplitPick`/`chooseSplitNotebook`/`cancelSplitPick`, consumed in `library.ts`).
+
+### PDF rendering & import
+
+`src/pdf-import.ts` brings a PDF in as notebook pages, storing the file once in the `assets` store and referencing it per page as `background: { assetId, page }`. `src/pdf-render.ts` renders those on demand via lazy-loaded `pdf.js` (wasm copied into `public/` by `scripts/copy-pdfjs-wasm.mjs` in `predev`/`prebuild`), with a small LRU of rendered pages and a memo of pages that failed so a broken page isn't retried forever (`ensurePdfPage`, `getPdfPage`, `isPdfPageFailed`).
+
+It also exposes a **bytes API** for PDFs that are *not* entries in the `assets` store — used by the split pane's reference PDFs, which live in the `noteapp-split` database instead: `registerPdfBytes(key, data)` makes an arbitrary buffer renderable by the same pipeline, `hasPdfBytes(key)` tests it, `releasePdfBytes(key)` frees the parsed document and its cached pages, and `pdfPageSizes(key)` returns each page's own size in PDF points (the pane lays pages out in those units directly, rather than fitting them to the app's page box the way an import does). A caller that registers bytes owns releasing them.
+
+### Export
+
+`src/export/pdf.ts` (vector PDF via `pdf-lib`, lazy-loaded) and `src/export/raster.ts` (PNG/JPEG, plus the region/item rasterizers AI mode uses).
+
+### Service worker / offline
+
+`public/sw.js` plus the `swPrecache` plugin in `vite.config.ts` and `src/sw-register.ts`.
+
+- `sw.js` ships two placeholder tokens, `/*__SW_BUILD__*/ 'dev'` and `/*__SW_PRECACHE__*/ []`, which are the harmless dev defaults. At build time `swPrecache` (in `closeBundle`, after `public/` is copied) rewrites them with a digest of the build and the full asset list: `index.html`, every emitted `.js`/`.mjs`/`.css` chunk, and the un-fingerprinted `pdfjs-wasm/*.wasm` files. It throws if either token is missing — so **don't reformat those comment tokens**.
+- Precaching is all-or-nothing and covers *lazily imported* chunks too; before it, "Import PDF pages" failed offline with a dynamic-import error unless you'd used the feature while online.
+- Strategy: navigations network-first; other same-origin GETs cache-first, reading only the current build's cache. The cache name is versioned by that build digest, so a deploy gets a clean cache and `activate` deletes older ones. Because the digest lands in `sw.js` itself, the file's bytes change every deploy — which is what makes browsers pick up the new worker at all.
+- `sw-register.ts` skips registration entirely in `vite dev` (so hot reload is never served from cache). iOS only registers a SW over HTTPS or `http://localhost` — a plain-HTTP LAN address silently no-ops.
+- The worker also parks a file shared in via the manifest `share_target` in a `noteapp-share` cache, picked up once by `src/import-file.ts`.
 
 ## Working conventions
 
 - **Vanilla TypeScript only** — do not introduce a framework, state library, or build-step abstraction not already present.
-- **Strict scope**: implement exactly what's asked; do not opportunistically refactor, add abstractions, or touch unrelated code in the same change.
-- When a task explicitly asks for investigation/root-cause analysis before a fix, report the root cause before making changes.
+- **Strict scope**: implement exactly what's asked; do not opportunistically refactor or touch unrelated code in the same change.
+- Don't add new icons, buttons or chrome as an implementation detail — touch only the named button/feature.
+- When a task asks for investigation/root-cause analysis before a fix, report the root cause before making changes.
 - Run `npm run build` after any change and treat any `tsc` error as blocking.
-- If other pre-existing issues are noticed while working but are out of scope, list them at the end of a report rather than fixing them.
+- If pre-existing out-of-scope issues are noticed, list them at the end of a report rather than fixing them.
+- Other Claude sessions may be editing this repo in parallel — a broken build may not be yours; verify in a throwaway git worktree before "fixing" it.
 
 ### Verifying behavior
 
-There is no automated UI test suite. Real verification means driving the actual app in a browser: run `npm run dev` and use a headless-Chrome CDP harness (small numbered scripts run against `cdp.mjs`) to script real pointer/touch interactions and assert on live DOM/canvas state — treat this the same as manually testing the feature would be treated in a framework-based app. Two known blind spots of CDP-synthetic events worth remembering when a report can't be reproduced:
-- **`touch-action` gesture disambiguation** (tap vs. scroll/pan) is resolved by native gesture recognition on a real touchscreen before any pointer event fires; CDP's `Input.dispatch*` bypasses that entirely, so a missing `touch-action: none` on a small interactive element inside a pannable ancestor (`touch-action: pan-x pan-y`) can be a real device-only bug.
-- Bugs that depend on scroll position relative to `position: fixed` chrome (app-bar/dock) need a scripted scroll to a specific offset to reproduce — a test that never scrolls won't find them.
+There is no automated UI test suite. Real verification means driving the app in a browser: run `npm run dev` and use a headless-Chrome CDP harness (small scripts run against a `cdp.mjs`) to script real pointer/touch interactions and assert on live DOM/canvas state. Remember the `/DubNotes/` base path — module imports in evaluated script are `/DubNotes/src/...`, and a hash-only navigation does **not** reload the app, so seeding IndexedDB then jumping to `#/nb/<id>` needs a cache-busting query to force a fresh `store.init()`.
 
-Keep any throwaway CDP scripts and Chrome profile directories in the scratchpad directory, not the repo, and clean them up when done. Never kill Chrome by a blanket/name-based command (e.g. `taskkill /IM chrome.exe`) — only by the specific PID your own script spawned, since other Chrome instances may be running.
+Two known blind spots of CDP-synthetic events, worth remembering when a report can't be reproduced:
+- **`touch-action` gesture disambiguation** (tap vs. pan) is resolved by native gesture recognition before any pointer event fires; CDP's `Input.dispatch*` bypasses that, so a missing `touch-action: none` on a small interactive element inside a pannable ancestor can be a real device-only bug.
+- Bugs depending on scroll/camera position relative to `position: fixed` chrome need a scripted pan to a specific offset to reproduce.
+
+Keep throwaway CDP scripts and Chrome profile directories in the scratchpad directory, not the repo, and clean them up when done. Never kill Chrome by a blanket/name-based command (e.g. `taskkill /IM chrome.exe`) — only by the specific PID your own script spawned.
 
 ## Deployment
 
-Static site deploys to GitHub Pages (`.github/workflows/deploy.yml`, builds on push to `main`) or Cloudflare Pages; the Gemini proxy (`api/gemini.ts`) is Vercel-specific regardless of where the static site itself is hosted. See the README's "Deploy for free" section for the full setup, required env vars (`GEMINI_API_KEY`, `GEMINI_PROXY_SECRET`, `VITE_GEMINI_PROXY_SECRET`, `VITE_GEMINI_ENDPOINT`), and the `base` path caveat (`/DubNotes/` is GitHub-Pages-specific; other hosts need `base: './'`).
+Static site deploys to GitHub Pages (`.github/workflows/deploy.yml`, builds on push to `main`) or Cloudflare Pages; the Gemini proxy (`api/gemini.ts`) is Vercel-specific regardless of where the static site is hosted. See the README's "Deploy for free" section for required env vars (`GEMINI_API_KEY`, `GEMINI_PROXY_SECRET`, `VITE_GEMINI_PROXY_SECRET`, `VITE_GEMINI_ENDPOINT`) and the `base` path caveat (`/DubNotes/` is GitHub-Pages-specific; other hosts need `base: './'`).

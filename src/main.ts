@@ -1,4 +1,5 @@
 import './styles.css';
+import { sweepOrphanedAssets } from './db';
 import { importFile, takeSharedFile } from './import-file';
 import { store } from './store';
 import { registerSW } from './sw-register';
@@ -23,6 +24,16 @@ async function boot(): Promise<void> {
   route();
   registerSW();
 
+  // Reclaim PDF bytes no page references any more. Startup-only by design —
+  // see sweepOrphanedAssets' own doc comment for why it is safe here and
+  // nowhere else. Deferred to idle so it never competes with the first paint;
+  // requestIdleCallback only landed in Safari 16.4, hence the timer fallback.
+  const sweep = (): void => {
+    void sweepOrphanedAssets().catch((err) => console.warn('[noteapp] orphaned-asset sweep failed', err));
+  };
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(sweep, { timeout: 5000 });
+  else setTimeout(sweep, 2000);
+
   // launched from the share sheet ("Open in DubNotes" on a PDF): the service
   // worker has parked the file and sent us here with ?shared=1
   if (new URLSearchParams(location.search).has('shared')) {
@@ -35,6 +46,13 @@ async function boot(): Promise<void> {
 function route(): void {
   const app = document.getElementById('app');
   if (!app) return;
+  // Throwaway board phase-0 spike (src/ui/board-spike.ts) — hidden, nothing in
+  // the UI links here, and dynamically imported so it stays out of the app
+  // bundle. Delete this branch and the file together.
+  if (location.hash === '#board-spike') {
+    void import('./ui/board-spike').then((m) => m.mountBoardSpike(app));
+    return;
+  }
   const m = location.hash.match(/^#\/nb\/([^/]+)/);
   const f = location.hash.match(/^#\/f\/([^/]+)/);
   if (m && store.notebooks.has(m[1])) {

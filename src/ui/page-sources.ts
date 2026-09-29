@@ -1,9 +1,9 @@
 import { paperBg } from '../canvas/templates';
-import { pageH, pageW } from '../const';
+import { canvasPixelFactor, pageH, pageW } from '../const';
 import { getPdfPage, isPdfPageFailed, pdfPageSizes, registerPdfBytes, releasePdfBytes } from '../pdf-render';
 import { store } from '../store';
 import { el } from './dom';
-import { canvasPixelFactor, PageView } from './page-view';
+import { PageView } from './page-view';
 import type { PageHandle, PageSource, SourcePage } from './page-scroller';
 
 /**

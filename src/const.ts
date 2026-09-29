@@ -27,3 +27,33 @@ export function pageW(page: Page): number {
 export function pageH(page: Page): number {
   return page.h ?? PAGE_H;
 }
+
+/**
+ * Largest backing-store side, and largest total backing-store area, any page
+ * canvas will ask for. iOS Safari silently hands back a blank (or refuses to
+ * allocate a) canvas past its own internal limits, and a page zoomed in hard
+ * can ask for far more than that — `pw * DPR * quality` is 7380px across at
+ * quality 3 / DPR 3. Past these bounds the backing store stops following
+ * `quality` and the page simply renders softer, which is the right failure: a
+ * slightly blurry page beats a blank one.
+ */
+const MAX_SIDE = 4096;
+const MAX_AREA = 12e6;
+
+/**
+ * Backing-store pixels per laid-out CSS pixel for a `w × h` (CSS px) canvas:
+ * `DPR × quality`, reduced as far as MAX_SIDE/MAX_AREA require. Shared so
+ * every page canvas in the app — the main view's PageCanvas, and the split
+ * pane's PageView — hits the same ceiling, and so overshooting it costs
+ * sharpness rather than a canvas iOS silently hands back blank.
+ *
+ * This is a *per-canvas* ceiling only. A caller holding several canvases at
+ * once (the main view's mount window) also has to budget across them; see
+ * NotebookView.pageQuality.
+ */
+export function canvasPixelFactor(w: number, h: number, quality = 1): number {
+  if (!(w > 0) || !(h > 0)) return 1;
+  const bySide = Math.min(MAX_SIDE / w, MAX_SIDE / h);
+  const byArea = Math.sqrt(MAX_AREA / (w * h));
+  return Math.max(0.5, Math.min(DPR * quality, bySide, byArea));
+}

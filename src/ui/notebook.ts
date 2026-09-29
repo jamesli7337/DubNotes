@@ -76,6 +76,39 @@ const SHAPE_OPTIONS: Record<PlacedShape, { icon: IconName; label: string }> = {
 const ZOOM_MIN = 0.5;
 const ZOOM_MAX = 3;
 /**
+ * Re-rasterise mounted pages once a zoom gesture has been quiet this long —
+ * same value, and same reasoning, as the split pane's own SETTLE_MS
+ * (page-scroller.ts): a page re-render is a canvas resize plus a full
+ * repaint, far too costly to do per frame of a pinch.
+ */
+const QUALITY_SETTLE_MS = 180;
+/**
+ * Preload band around the viewport, as screen px — a page this far outside
+ * the viewport is already mounted when it scrolls in, so there's no pop-in.
+ * Divided by the zoom to reach world units, exactly as before.
+ */
+const MOUNT_MARGIN_PX = 1200;
+/**
+ * ...but never more than this many *world* units, however far zoomed out.
+ * `MOUNT_MARGIN_PX / zoom` alone meant zooming out widened the band in world
+ * terms without bound — at zoom 0.5 it reached 2400 world units either side
+ * and kept ~6 pages mounted at once. This only bites below zoom ~0.86; at
+ * 100% and above the band is unchanged, and at 0.5 it still preloads 700
+ * screen px either way, which is most of a viewport ahead of the scroll.
+ */
+const MOUNT_MARGIN_MAX = 1400;
+/** Hard ceiling on simultaneously mounted pages, whatever the band says — the pages nearest the viewport centre win. Bounds worst-case canvas memory on its own, independent of the pixel budget below. */
+const MAX_MOUNTED_PAGES = 5;
+/**
+ * Total canvas backing-store budget across every mounted page, in device
+ * pixels (~160 MB at 4 bytes each). Each page holds *two* canvases (cache and
+ * view), so the per-page share is halved; canvasPixelFactor's own per-canvas
+ * ceiling still applies on top. iPad Safari discards canvases well before its
+ * nominal limit, so this is set to leave plenty of room for the split pane,
+ * the drag-preview surface and page thumbnails alongside it.
+ */
+const PAGE_PIXEL_BUDGET = 40e6;
+/**
  * Screen-px gap left between the dock's bottom edge and the top of page 1 when
  * the notebook is scrolled all the way up.
  *
@@ -184,6 +217,18 @@ class NotebookView {
   } | null = null;
   /** rAF handle for the momentum/rubber-band-snap-back animation — see startMomentum/stopMomentum. */
   private momentumRaf = 0;
+  /**
+   * Backing-store quality every mounted page is currently rendered at (see
+   * PageCanvas.setQuality). Tracks the settled zoom, capped by
+   * PAGE_PIXEL_BUDGET across the whole mount window — recomputed by
+   * applyQuality, and handed to each page as it mounts.
+   */
+  private renderQuality = 1;
+  /** Debounce for applyQuality; pages are only re-rasterised once a zoom has stopped moving. */
+  private qualitySettleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Mounted pages still waiting to be re-rendered at the settled quality, drained one per frame. */
+  private qualityQueue: PageCanvas[] = [];
+  private qualityRaf = 0;
   /**
    * Palm-vs-pen tracking, shared by bindZoomGestures, bindScrollbarThumb, and
    * SelectionOverlay (via isBlockedTouch) — see bindZoomGestures's own doc
@@ -398,6 +443,7 @@ class NotebookView {
       this.deactivateAll(); // commit an open text edit before the canvases go away
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
       this.stopMomentum();
+      this.stopQuality();
       if (this.dockSettleTimer) clearTimeout(this.dockSettleTimer);
       this.dockSettleTimer = null;
       this.destroyScrollbarThumb();
@@ -809,6 +855,85 @@ class NotebookView {
     for (const pc of this.pcByPage.values()) pc.zoomChanged(); // a pending line's handles stay screen-sized
     this.layoutScrollbarThumb(); // zoom changes the thumb's size/range, not just its position
     this.applyCamera();
+    this.settleQuality(); // ...and, once it stops moving, the resolution pages are rasterised at
+  }
+
+  // ---------------------------------------------------------------- quality
+  /**
+   * How many device pixels per page unit every mounted page should rasterise
+   * at, expressed as a multiplier on DPR (so 1 = the old fixed behaviour).
+   *
+   * Two bounds, both needed:
+   *  - the camera's own zoom, so ink is drawn at the resolution it is being
+   *    *shown* at rather than always at DPR (the reason zoomed-in ink used to
+   *    look soft) — and, zoomed out, so a page at 50% isn't rasterised at 4×
+   *    the pixels it can possibly display;
+   *  - PAGE_PIXEL_BUDGET spread across the whole mount window, which is what
+   *    keeps "zoom in on a long notebook" from asking iOS for more canvas
+   *    than it will give. Each page holds two canvases, hence the 2×.
+   *
+   * canvasPixelFactor applies its own per-canvas ceiling inside PageCanvas on
+   * top of this, so the effective factor is the lower of the two.
+   */
+  private pageQuality(): number {
+    const desired = clamp(this.camera.zoom, ZOOM_MIN, ZOOM_MAX);
+    let area = 0;
+    for (const id of this.mounted) {
+      const p = store.pages.get(id);
+      if (p) area += pageW(p) * pageH(p);
+    }
+    if (area <= 0) return desired;
+    const maxFactor = Math.sqrt(PAGE_PIXEL_BUDGET / (2 * area));
+    return clamp(desired, ZOOM_MIN, Math.max(ZOOM_MIN, maxFactor / DPR));
+  }
+
+  /**
+   * Re-rasterises every mounted page at the settled quality, one per animation
+   * frame so a window of several never repaints them all in one go (the same
+   * drain the split pane's scroller uses).
+   *
+   * A page mid-stroke/mid-drag/mid-text-edit refuses (setQuality returns
+   * false) rather than clearing its canvas out from under the gesture; when
+   * that happens the whole pass is simply rescheduled, so it retries every
+   * QUALITY_SETTLE_MS until the user is idle. That is also why nothing here
+   * is on the per-frame camera path.
+   */
+  private applyQuality(): void {
+    this.renderQuality = this.pageQuality();
+    const q = this.renderQuality;
+    this.qualityQueue = [...this.mounted]
+      .map((id) => this.pcByPage.get(id))
+      .filter((pc): pc is PageCanvas => pc != null && pc.mounted);
+    if (!this.qualityQueue.length) return;
+    let deferred = false;
+    const drain = (): void => {
+      this.qualityRaf = 0;
+      const pc = this.qualityQueue.shift();
+      // it may have been unmounted between frames (the user kept scrolling)
+      if (pc?.mounted && !pc.setQuality(q)) deferred = true;
+      if (this.qualityQueue.length) this.qualityRaf = requestAnimationFrame(drain);
+      else if (deferred) this.settleQuality(); // come back for the busy ones
+    };
+    if (this.qualityRaf) cancelAnimationFrame(this.qualityRaf);
+    this.qualityRaf = requestAnimationFrame(drain);
+  }
+
+  /** Debounced applyQuality — called from anything that changes the zoom or which pages are mounted. */
+  private settleQuality(): void {
+    if (this.qualitySettleTimer) clearTimeout(this.qualitySettleTimer);
+    this.qualitySettleTimer = setTimeout(() => {
+      this.qualitySettleTimer = null;
+      this.applyQuality();
+    }, QUALITY_SETTLE_MS);
+  }
+
+  /** Drops any queued/scheduled re-render — teardown, so nothing touches a page after onLeave. */
+  private stopQuality(): void {
+    if (this.qualitySettleTimer) clearTimeout(this.qualitySettleTimer);
+    this.qualitySettleTimer = null;
+    if (this.qualityRaf) cancelAnimationFrame(this.qualityRaf);
+    this.qualityRaf = 0;
+    this.qualityQueue = [];
   }
 
   /** Starts (or restarts) the momentum + rubber-band-settle animation after a pan gesture lifts with residual velocity, or lands out of bounds with none. `vx`/`vy` are world units/ms. */
@@ -3022,11 +3147,17 @@ class NotebookView {
    */
   private updateVisiblePages(): void {
     const viewH = this.scrollEl.clientHeight;
-    const margin = 1200 / this.camera.zoom; // world units — same preload buffer the old IntersectionObserver used (rootMargin '1200px 0px')
-    const loadTop = this.camera.y - margin;
-    const loadBottom = this.camera.y + viewH / this.camera.zoom + margin;
+    // world units. The screen-px band is what keeps pop-in away, but it is
+    // also capped in world terms so zooming out can't keep widening it — see
+    // MOUNT_MARGIN_PX / MOUNT_MARGIN_MAX.
+    const margin = Math.min(MOUNT_MARGIN_PX / this.camera.zoom, MOUNT_MARGIN_MAX);
     const viewTop = this.camera.y;
     const viewBottom = this.camera.y + viewH / this.camera.zoom;
+    const loadTop = viewTop - margin;
+    const loadBottom = viewBottom + margin;
+    const centre = (viewTop + viewBottom) / 2;
+
+    const candidates: Array<{ id: string; pc: PageCanvas; pageEl: HTMLElement; dist: number }> = [];
     for (const [id, wrap] of this.wrapById) {
       const pageEl = wrap.querySelector<HTMLElement>('.page');
       const pc = this.pcByPage.get(id);
@@ -3034,18 +3165,43 @@ class NotebookView {
       const pTop = pageEl.offsetTop;
       const pBottom = pTop + pageEl.offsetHeight;
       if (pBottom > loadTop && pTop < loadBottom) {
-        pc.mount(pageEl);
-        this.mounted.add(id);
-        if (this.guideKind && id === this.guidePageId) pc.showGuide(this.guideKind);
-      } else if (this.mounted.has(id)) {
-        pc.unmount();
-        if (!pc.mounted) this.mounted.delete(id);
+        candidates.push({ id, pc, pageEl, dist: Math.abs((pTop + pBottom) / 2 - centre) });
       }
       const visibleH = Math.max(0, Math.min(pBottom, viewBottom) - Math.max(pTop, viewTop));
       const ratio = pageEl.offsetHeight > 0 ? visibleH / pageEl.offsetHeight : 0;
       if (ratio > 0) this.pageVisibility.set(id, ratio);
       else this.pageVisibility.delete(id);
     }
+
+    // Nearest the viewport centre first, so when the band holds more pages
+    // than MAX_MOUNTED_PAGES the ones dropped are the furthest from view.
+    candidates.sort((a, b) => a.dist - b.dist);
+    const keep = new Set<string>();
+    for (const c of candidates.slice(0, MAX_MOUNTED_PAGES)) keep.add(c.id);
+
+    const before = this.mounted.size;
+    for (const c of candidates) {
+      if (!keep.has(c.id)) continue;
+      // only on the way in: re-rasterising an already-mounted page is
+      // applyQuality's job, one per frame, not something to do synchronously
+      // for every page on a camera tick
+      if (!this.mounted.has(c.id)) c.pc.setQuality(this.renderQuality);
+      c.pc.mount(c.pageEl);
+      this.mounted.add(c.id);
+      if (this.guideKind && c.id === this.guidePageId) c.pc.showGuide(this.guideKind);
+    }
+    for (const id of [...this.mounted]) {
+      if (keep.has(id)) continue;
+      const pc = this.pcByPage.get(id);
+      pc?.unmount();
+      // unmount() refuses mid-stroke / mid-edit; such a page stays mounted
+      // (and stays in `mounted`) until the gesture finishes
+      if (pc && !pc.mounted) this.mounted.delete(id);
+    }
+    // the budget in pageQuality is shared across whatever is mounted, so a
+    // change in how many that is re-balances it
+    if (this.mounted.size !== before) this.settleQuality();
+
     // Keep the last page when nothing is visible for a moment (e.g. mid-layout).
     const best = this.bestVisiblePage();
     if (best) this.setCurrentPage(best);

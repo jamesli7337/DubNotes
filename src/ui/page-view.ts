@@ -1,36 +1,10 @@
 import { drawBackground, drawElement } from '../canvas/elements';
 import { drawStroke } from '../canvas/freehand';
 import { drawTemplate } from '../canvas/templates';
-import { DPR, pageH, pageW } from '../const';
+import { canvasPixelFactor, pageH, pageW } from '../const';
 import { store } from '../store';
 import type { Page } from '../types';
 import { isStroke } from '../util';
-
-/**
- * Largest backing-store side, and largest total backing-store area, this will
- * ask a canvas for. iOS Safari silently hands back a blank (or refuses to
- * allocate a) canvas past its own internal limits, and a page zoomed in hard
- * inside a large pane can ask for far more than that — `pw * scale * DPR` is
- * 7380px across at scale 3 / DPR 3. Past these bounds the backing store stops
- * following `scale` and the page simply renders softer, which is the right
- * failure: a slightly blurry reference page beats a blank one.
- */
-const MAX_SIDE = 4096;
-const MAX_AREA = 12e6;
-
-/**
- * Backing-store pixels per laid-out CSS pixel for a `w × h` (CSS px) canvas:
- * `DPR × quality`, reduced as far as MAX_SIDE/MAX_AREA require. Shared so
- * every canvas the split pane allocates — notebook pages and PDF pages alike
- * — hits the same ceiling, and so overshooting it costs sharpness rather than
- * a canvas iOS silently hands back blank.
- */
-export function canvasPixelFactor(w: number, h: number, quality = 1): number {
-  if (!(w > 0) || !(h > 0)) return 1;
-  const bySide = Math.min(MAX_SIDE / w, MAX_SIDE / h);
-  const byArea = Math.sqrt(MAX_AREA / (w * h));
-  return Math.max(0.5, Math.min(DPR * quality, bySide, byArea));
-}
 
 /**
  * A page rendered read-only into an arbitrary container: the paper template,
