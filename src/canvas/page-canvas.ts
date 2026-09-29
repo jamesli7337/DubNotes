@@ -213,6 +213,8 @@ export class PageCanvas {
     | 'erase'
     | 'lasso'
     | 'text-press'
+    | 'text-create-press'
+    | 'text-created'
     | 'tape'
     | 'tape-tap'
     | 'laser'
@@ -274,6 +276,17 @@ export class PageCanvas {
   private lineEdit: LineEdit | null = null;
   /** which endpoint the current press is dragging: 'b' for the pen that just snapped, else the handle grabbed */
   private adjustEnd: 'a' | 'b' | null = null;
+  /**
+   * The current press dismissed some pending/selected state — either found one
+   * of its own here (a lineEdit committed away from its handles) or was told
+   * about one elsewhere (markDismissingPress, from the outside-press listener
+   * that also clears another page's/the overlay's selection). A zero-travel
+   * release of a flagged press throws away whatever the active tool was about
+   * to produce instead of committing it; a press that travels past the tap
+   * threshold still acts normally, since drawing right after dismissing a
+   * selection is a common, deliberate thing to do.
+   */
+  private dismissingPress = false;
   /** ruler / protractor on this page, and the edge the current stroke is snapped to */
   private guide: Guide | null = null;
   private snapEdge: EdgeLine | null = null;
@@ -700,11 +713,9 @@ export class PageCanvas {
     const kind = toolState.kind;
 
     // a snapped line waiting to be adjusted: a press on one of its endpoint
-    // handles drags that end; a press anywhere else commits it and is then
-    // spent. It deliberately doesn't fall through into the tool below — the
-    // adjustable phase is modal, and the press that leaves it must not also
-    // ink. A travel threshold can't tell that press apart from a deliberate
-    // dot (they're the same gesture), so the whole press is consumed instead.
+    // handles drags that end; a press anywhere else commits it and falls
+    // through into the tool below, flagged as a dismissing press — see
+    // dismissingPress for how that keeps a zero-travel tap from also inking.
     if (this.lineEdit) {
       const end = this.lineEndAt(pt);
       if (end) {
@@ -715,7 +726,7 @@ export class PageCanvas {
         return;
       }
       this.commitLine();
-      return;
+      this.dismissingPress = true;
     }
 
     // a press on a tape strip is a peel / cover tap unless it turns into a drag
@@ -778,6 +789,13 @@ export class PageCanvas {
         this.setSelection([hit.id]);
         this.mode = 'text-press';
         this.pressPt = pt;
+      } else if (this.dismissingPress) {
+        // creating a text box has no travel-gated commit step of its own — it
+        // happens the instant the press lands — so a dismissing press defers
+        // it instead: only actually opens the box once the press proves it's
+        // a drag, not a stationary dismiss tap (see onMove's matching case)
+        this.mode = 'text-create-press';
+        this.pressPt = pt;
       } else {
         this.startEdit(this.newText(pt[0], pt[1]), true);
         return;
@@ -793,6 +811,7 @@ export class PageCanvas {
       this.mode = 'erase';
       this.erased = new Set();
       this.partial = new Map();
+      this.pressPt = pt;
     } else {
       const t = resolveDrawTool()!;
       this.liveTool = { kind: t.kind, color: this.aiInkColor(t.color), size: t.size };
@@ -944,6 +963,14 @@ export class PageCanvas {
           }
           break;
         }
+        case 'text-create-press':
+          // proved to be a drag, not a dismiss tap — open the box now, at the
+          // press point (text has never placed itself at the drag's end, only
+          // where the press landed), then this contact has nothing left to do
+          if (Math.hypot(pt[0] - this.pressPt[0], pt[1] - this.pressPt[1]) < TAP_SLOP / this.zoom()) break;
+          this.mode = 'text-created';
+          this.startEdit(this.newText(this.pressPt[0], this.pressPt[1]), true);
+          break;
       }
     }
     this.schedule();
@@ -993,6 +1020,18 @@ export class PageCanvas {
         }
         this.dropLineEdit(); // the pointer was lost mid-snap — keep the ink it started as
       }
+      // a dismissing press that never travelled was a tap to leave whatever
+      // it dismissed, not a dot the user wanted — throw the ink away instead
+      // of committing it (see dismissingPress)
+      if (this.dismissingPress) {
+        const from = this.live[0];
+        const slop = TAP_SLOP / this.zoom();
+        if (!this.live.some((p) => Math.hypot(p[0] - from[0], p[1] - from[1]) > slop)) {
+          this.reset();
+          this.blit();
+          return;
+        }
+      }
       this.commitDrawStroke();
       return;
     }
@@ -1003,6 +1042,17 @@ export class PageCanvas {
         this.reset();
         this.rebuild();
         return;
+      }
+      // same rule as draw above: a dismissing tap that never travelled leaves
+      // no mark — the candidate erase never actually got persisted below, so
+      // discarding it here is the same as it never having eraseAt-ed at all
+      if (this.dismissingPress) {
+        const pt = this.toLocal(e);
+        if (Math.hypot(pt[0] - this.pressPt[0], pt[1] - this.pressPt[1]) < TAP_SLOP / this.zoom()) {
+          this.reset();
+          this.rebuild();
+          return;
+        }
       }
       if (this.partial.size) {
         this.commitPartialErase();
@@ -1142,6 +1192,7 @@ export class PageCanvas {
     this.pendingFit = null;
     this.adjustEnd = null; // lineEdit itself outlives the press: it stays until something commits it
     this.shapeMode = false;
+    this.dismissingPress = false;
     this.disarmHold();
   }
 
@@ -1326,6 +1377,15 @@ export class PageCanvas {
     this.dropLineEdit();
     this.schedule();
     return true;
+  }
+
+  /**
+   * Tells this page that the press currently landing on it already dismissed
+   * something elsewhere — the outside-press listener's counterpart to this
+   * page finding its own lineEdit to commit. See dismissingPress.
+   */
+  markDismissingPress(): void {
+    this.dismissingPress = true;
   }
 
   /** Adds the pending line to the page as one undo step; a no-op when there is none. */
@@ -1694,15 +1754,17 @@ export class PageCanvas {
     this.schedule();
   }
 
-  clearSelection(): void {
+  /** Clears any selection/edit here; returns whether there was actually anything to dismiss. */
+  clearSelection(): boolean {
+    const had = this.editor !== null || this.selected.size > 0 || this.lastLassoPath !== null;
     this.commitEdit();
-    if (!this.selected.size) {
+    if (this.selected.size) this.setSelection([]);
+    else {
       this.lastLassoPath = null;
       this.hooks.hideSelection(this);
       this.hooks.onSelectionFrame(this, null);
-      return;
     }
-    this.setSelection([]);
+    return had;
   }
 
   /** Called by the notebook when the active tool changes: finish any edit or pending line and drop the selection. */

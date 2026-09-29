@@ -921,6 +921,16 @@ class NotebookView {
    * check (isBlockedTouch, backed by palmTouchIds/stylusDown/the post-lift
    * cooldown) as everything else in the palm-rejection work, rather than a
    * new heuristic.
+   *
+   * Clearing/committing that state here is only half the fix: the very same
+   * press then goes on (via the normal bubble-phase pointerdown) to whatever
+   * page it actually landed on, which starts its own tool's press same as
+   * always. Left alone, a zero-travel tap that dismissed a selection would
+   * still leave a dot/mark from whatever tool is active. So when clearing
+   * the overlay's selection actually dismissed something, the landing page
+   * (if any — the gray gap has none) is flagged via markDismissingPress: its
+   * own startPress/onUp then throw away that tool's output if the press
+   * never travels, exactly like a lineEdit-dismissing press does for itself.
    */
   private bindOutsidePenPressCancelsSelection(): void {
     this.scrollEl.addEventListener(
@@ -929,11 +939,12 @@ class NotebookView {
         if (e.pointerType !== 'pen' || this.isBlockedTouch(e)) return;
         const target = e.target as HTMLElement;
         if (target.closest('.sel-box')) return; // inside - handled by SelectionOverlay's own onDown
-        if (this.overlayPc) this.overlayPc.clearSelection();
+        const dismissed = this.overlayPc ? this.overlayPc.clearSelection() : false;
         const samePageId = (target.closest('.page') as HTMLElement | null)?.dataset.pageId ?? null;
         for (const [pageId, pc] of this.pcByPage) {
           if (pageId !== samePageId) pc.commitLine();
         }
+        if (dismissed && samePageId) this.pcByPage.get(samePageId)?.markDismissingPress();
       },
       { capture: true }
     );
@@ -3067,6 +3078,16 @@ class NotebookView {
     this.aiToggleBtn.classList.toggle('active', active);
     this.aiToggleBtn.setAttribute('aria-pressed', String(active));
     this.aiSendBtn.hidden = !active;
+    // AI mode only inks with the pen — the lockdown below disables every
+    // other tool button, but leaves toolState.kind (and so pointer handling
+    // in page-canvas.ts) on whatever was active before. Force it to the pen,
+    // same as any other tool switch, so drawing always inks right away.
+    if (active && toolState.kind !== 'pen') {
+      this.deactivateAll();
+      toolState.kind = 'pen';
+      saveToolState();
+      this.renderTools();
+    }
     this.applyAiToolbarLockdown();
     this.syncHistory();
   }
