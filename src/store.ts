@@ -755,11 +755,11 @@ class Store {
   }
 
   /**
-   * The board's occupied extent, derived from which index cells are populated
-   * rather than from the items themselves — so it costs one pass over the live
-   * cells and can never drift out of date. Coarse to within one cell, which is
-   * exactly the resolution pan-clamping wants anyway (the clamp adds its own
-   * margin on top). Null when the board is empty.
+   * The board's occupied extent: the item-exact union of every item's bounds,
+   * cached and recomputed only when a removal or a move could have shrunk it
+   * (see BoardIndex.bounds). Item-exact rather than cell-granular so it also
+   * serves zoom-to-fit, not just pan-clamping. Null when the board is empty —
+   * which the pan clamp reads as "unbounded", not as a zero-size box.
    */
   boardBounds(notebookId: string): Rect | null {
     const idx = this.boards.get(notebookId);
@@ -898,12 +898,75 @@ class Store {
     }
   }
 
+  /**
+   * Removes by id from one page — or, when `pageId` names a *board* chunk, from
+   * wherever on that board those ids actually live.
+   *
+   * A board selection routinely spans chunks (a chunk is 2048 board units, a
+   * lasso is not), and a chunk is only a persistence detail. Resolving the ids
+   * through the board's own index here is what lets one gesture stay one undo
+   * step: every `Op` carries a single `pageId`, and the inverse (`addItems`)
+   * already routes per item via each item's own `pageId`, so this is the one
+   * side that needed to stop being page-keyed. A page notebook has no board
+   * index, so it never takes this branch.
+   */
   removeItems(pageId: string, ids: Set<string>): PageItem[] {
-    return [...this.removeStrokes(pageId, ids), ...this.removeElements(pageId, ids)];
+    const idx = this.boardIndexForPage(pageId);
+    if (!idx) return [...this.removeStrokes(pageId, ids), ...this.removeElements(pageId, ids)];
+    const byPage = new Map<string, Set<string>>();
+    for (const id of ids) {
+      const it = idx.items.get(id);
+      const home = it ? it.pageId : pageId;
+      const bucket = byPage.get(home);
+      if (bucket) bucket.add(id);
+      else byPage.set(home, new Set([id]));
+    }
+    const out: PageItem[] = [];
+    for (const [home, group] of byPage) {
+      out.push(...this.removeStrokes(home, group), ...this.removeElements(home, group));
+    }
+    return out;
   }
 
-  /** Swaps items in place by id (same page), keeping z-order. Unknown ids are ignored. */
+  /** The board index owning `pageId`, or null when that page isn't a board chunk. */
+  private boardIndexForPage(pageId: string): BoardIndex | null {
+    const nbId = this.pages.get(pageId)?.notebookId;
+    return (nbId && this.boards.get(nbId)) || null;
+  }
+
+  /**
+   * Swaps items in place by id (same page), keeping z-order. Unknown ids are ignored.
+   *
+   * On a board this is also where a move/resize/rotate lands, and the swapped-in
+   * items carry new geometry — so each one is re-filed in the spatial index that
+   * painting and hit-testing actually read. Without that the index would keep
+   * pointing at the pre-drag cells and an item would stop being findable where it
+   * now visibly is. The item's `pageId` deliberately does *not* follow it across
+   * chunk boundaries: a chunk is only a persistence detail (see `Page.col`/`row`),
+   * nothing reads it to paint, and keeping it stable is what lets a board's
+   * move/resize reuse the page path's `replace-items` op — and so the existing
+   * undo/redo — with no board-specific handling at all.
+   */
   replaceItems(pageId: string, items: PageItem[]): void {
+    // Same reasoning as removeItems: on a board the swapped-in items may belong
+    // to several chunks, so each goes back to its own rather than to whichever
+    // one the op happened to name.
+    if (this.boardIndexForPage(pageId)) {
+      const byPage = new Map<string, PageItem[]>();
+      for (const it of items) {
+        const arr = byPage.get(it.pageId);
+        if (arr) arr.push(it);
+        else byPage.set(it.pageId, [it]);
+      }
+      if (byPage.size > 1 || !byPage.has(pageId)) {
+        for (const [home, group] of byPage) this.replaceOnPage(home, group);
+        return;
+      }
+    }
+    this.replaceOnPage(pageId, items);
+  }
+
+  private replaceOnPage(pageId: string, items: PageItem[]): void {
     const byId = new Map(items.map((it) => [it.id, it]));
     const strokes = this.strokesByPage.get(pageId);
     const elements = this.elementsByPage.get(pageId);
@@ -933,6 +996,8 @@ class Store {
     if (touchedStrokes) this.dirtyStrokes.add(pageId);
     if (touchedElements) this.dirtyElements.add(pageId);
     if (nb) {
+      const board = this.boards.get(nb);
+      if (board) for (const it of items) if (board.items.has(it.id)) this.indexBoardItem(board, it);
       this.bump(nb);
       this.schedule();
     }

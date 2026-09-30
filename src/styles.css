@@ -1769,6 +1769,31 @@ select {
   will-change: transform;
 }
 
+/* Holds a board's in-place text editor. A page puts its textarea straight into
+   `.page-clip` and lets `.nb-camera`'s CSS transform scale it; a board draws
+   its camera into the canvas instead, so `.board-editor-camera` stands in for
+   that missing transformed layer — the same `scale(z) translate(-x, -y)`
+   formula, written from BoardCanvas.syncEditorCamera on every frame, which
+   lets the textarea itself be positioned in plain board units exactly as the
+   page path does. The layer is inert: only the textarea inside it takes
+   pointer events, so a tap anywhere else still reaches the canvas below. */
+.board-editor-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 1;
+}
+.board-editor-camera {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+}
+.board-editor-camera > .text-editor {
+  pointer-events: auto;
+}
+
 /* --pw/--ph: this page's own size (page units), set inline per page-wrap
    (buildPageWrap) from pageW/pageH — defaults here cover a page with no
    inline override (shouldn't happen, but keeps these rules self-contained).

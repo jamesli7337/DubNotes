@@ -52,6 +52,21 @@ import {
   type Frame,
 } from './geom';
 import type { OverlayOptions } from './selection';
+import {
+  cloneItem,
+  IMAGE_FIT,
+  marqueePolygon,
+  sameText,
+  selectionView,
+  SHAPE_MIN,
+  strokeLassoPath,
+  survivingSegments,
+  TAP_RADIUS,
+  topElementAt,
+  topItemAt,
+  type ItemSurface,
+  type SurfaceHooks,
+} from './item-surface';
 import { drawTemplate } from './templates';
 
 /** Undo-able edits a page can produce. Page add/delete is handled by NotebookView. */
@@ -66,37 +81,13 @@ export type Op =
   /** a selection was dragged off its page onto another one — `before`/`after` are the same items, with the old/new pageId and coordinates */
   | { kind: 'move-page'; fromPageId: string; toPageId: string; before: PageItem[]; after: PageItem[] };
 
-export interface PageHooks {
-  onOp: (op: Op) => void;
-  /** the set of selected items on this page changed; `count` 0 means cleared */
-  onSelection: (pc: PageCanvas, count: number) => void;
-  /**
-   * The visible selection's frame changed shape/position — on select, drag,
-   * resize, rotate, and deselect (`null`). Frame is in this page's own units;
-   * pair with `pageRect()` to place external UI (the lasso selection callout)
-   * against it in screen space. Fires far more often than onSelection (every
-   * drag frame), so keep this cheap.
-   */
-  onSelectionFrame: (pc: PageCanvas, frame: Frame | null) => void;
-  /**
-   * A lasso *drag* (not a tap) just ended over empty space — nothing was
-   * caught, so onSelection/onSelectionFrame both fire with 0/null as usual,
-   * but this fires right alongside them with the drawn lasso's own bounding
-   * box, so the notebook can still show a (Paste-only) callout near where
-   * the user gestured, instead of no UI at all. Never fires for a plain
-   * tap-to-deselect — only an actual drawn lasso shape.
-   */
-  onEmptyLassoSelection: (pc: PageCanvas, frame: Frame) => void;
-  /**
-   * A tap/hold on an *existing* tape strip while the tape tool itself is
-   * active — every other tool still treats the same tap as peel/cover (see
-   * toggleTape), unaffected by this. `frame` is that tape's own box, for
-   * positioning a popover (resize + delete) near it — a second such call for
-   * the same tape id is how the notebook's popover toggles closed again.
-   */
-  onTapeTap: (pc: PageCanvas, tapeId: string, frame: Frame) => void;
-  /** true while AI mode is on for this page — a fresh pen/highlighter stroke inks in AI_COLOR instead of the tool's own colour. */
-  isAiActive: () => boolean;
+/**
+ * Everything a page raises. The members a board raises too live in
+ * `SurfaceHooks` (see item-surface.ts); the ones below are page-only —
+ * they either name another page or paint onto the notebook-level drag
+ * canvas, neither of which a single-surface board has any use for.
+ */
+export interface PageHooks extends SurfaceHooks {
   /** A line entered or left its adjustable phase. Undo can drop such a line even with nothing on the history stack, so the button's enabled state has to track this as well as the stack. */
   onPendingLine: () => void;
   /** A cross-page drag (see endTransform) just changed another page's items directly in the store — repaint that page's own PageCanvas if it's mounted (a no-op otherwise; it'll read the fresh store on its next mount). */
@@ -110,19 +101,6 @@ export interface PageHooks {
    * selection. Only called when the drag started as a lasso selection.
    */
   adoptCrossPageLasso: (pageId: string, ids: string[], lassoPath: number[][]) => void;
-  /**
-   * Shows (or re-places) this page's selection in the single, notebook-level
-   * SelectionOverlay — there's one shared instance, not one per page, so a
-   * selection dragged across a page boundary never has to fight a per-page
-   * stacking context (see selection.ts's own doc comment). `frame` is in
-   * this page's own units; the notebook converts it to screen space itself
-   * via the shared camera and this page's own world position.
-   */
-  showSelection: (pc: PageCanvas, frame: Frame, opts: OverlayOptions) => void;
-  /** Re-places the shared overlay's current frame without changing its handle set (e.g. as text grows while typing) — a no-op if the overlay isn't currently showing this page's selection. */
-  updateSelection: (pc: PageCanvas, frame: Frame) => void;
-  /** Hides the shared overlay — a no-op if it's currently showing a *different* page's selection (see onSelectionFrame's own doc comment for why that distinction matters). */
-  hideSelection: (pc: PageCanvas) => void;
   /**
    * Returns a context to paint this tick's live drag preview onto, already
    * cleared and transformed so drawing with `pc`'s own page-local unit
@@ -151,17 +129,11 @@ const STILL_TRAIL = 5;
 /** Radius of a pending line's endpoint handles (screen px, counter-scaled for zoom). Drawn smaller than LINE_HANDLE_HIT (how close a press must be to grab one) on purpose — the grab target stays generous even though the dot itself reads small. */
 const LINE_HANDLE_R = 5;
 const LINE_HANDLE_HIT = 14;
-/** Extra hit radius, in page units, when tapping a stroke to select it. */
-const TAP_RADIUS = 6;
 /** Max gap between two taps (ms) and how far apart they may land (page units) to still count as one double-tap — see isDoubleTap. */
 const DOUBLE_TAP_MS = 350;
 const DOUBLE_TAP_SLOP = 24;
 /** Smallest tape strip a drag can create. */
 export const TAPE_MIN = 12;
-/** Smallest box the Shapes tool places (screen px, counter-scaled for zoom — see shapeFromDrag); an arrow only needs this much length. */
-const SHAPE_MIN = 12;
-/** An inserted image is fitted into this fraction of the page width. */
-const IMAGE_FIT = 0.6;
 
 /** A `Touch` carries this on WebKit (stylus vs finger); not in the standard Touch Events types. */
 type WebKitTouch = Touch & { touchType?: 'direct' | 'stylus' };
@@ -189,7 +161,7 @@ interface LineEdit {
  *    path, or the items being dragged.
  *  - the selection overlay (handles) and the text editor sit above `view`.
  */
-export class PageCanvas {
+export class PageCanvas implements ItemSurface {
   readonly page: Page;
   /** this page's own size, in page units — see pageW/pageH's doc comment (const.ts). Read once at construction since a page's size never changes after creation. */
   private readonly pw: number;
@@ -354,6 +326,17 @@ export class PageCanvas {
   /** This mounted page's own screen rect — for external UI (the lasso selection callout) anchored against a Frame from onSelectionFrame. */
   pageRect(): DOMRect | null {
     return this.host?.getBoundingClientRect() ?? null;
+  }
+
+  /** See ItemSurface.tapeSizeLimit — a page caps a strip at its own size. */
+  tapeSizeLimit(): { w: number; h: number } {
+    return { w: this.pw, h: this.ph };
+  }
+
+  /** See ItemSurface.calloutBasis. A page's own rect already carries the camera (it lives inside the transformed layer), so page units scale by rect.width / pw exactly. */
+  calloutBasis(): { rect: DOMRect; pw: number } | null {
+    const rect = this.pageRect();
+    return rect ? { rect, pw: this.pw } : null;
   }
 
   mount(host: HTMLElement): void {
@@ -566,7 +549,7 @@ export class PageCanvas {
         // page's own `v` is a fixed bitmap bounded to its own width/height,
         // so the outline would otherwise vanish the moment it crossed into
         // the gray gap or another page's screen area, well before the drop.
-        if (this.lastLassoPath && this.lastLassoPath.length > 1) this.strokeLassoPath(dv, this.lastLassoPath, true);
+        if (this.lastLassoPath && this.lastLassoPath.length > 1) strokeLassoPath(dv, this.lastLassoPath, true, this.zoom());
       }
     }
     if (this.mode === 'tape' && this.live.length > 1) {
@@ -591,7 +574,7 @@ export class PageCanvas {
       // lasso is not closePath()ed either: the visible outline is only the
       // dashed line along the path actually drawn, with no straight segment
       // connecting end to start. A box / circle is a closed figure, so it is.
-      this.strokeLassoPath(v, this.lasso, toolState.lassoShape !== 'free');
+      strokeLassoPath(v, this.lasso, toolState.lassoShape !== 'free', this.zoom());
     } else if (!this.xfLive && this.lastLassoPath && this.lastLassoPath.length > 1) {
       // decorative echo of the finalized selection's lasso shape (page-space
       // points, so pan/zoom are already handled the same way as the live
@@ -600,48 +583,9 @@ export class PageCanvas {
       // or resized afterwards, and goes stale once that happens. Only while
       // not mid-drag — the xfLive block above already painted it on the
       // shared drag-preview canvas instead for that case (see its comment).
-      this.strokeLassoPath(v, this.lastLassoPath, true);
+      strokeLassoPath(v, this.lastLassoPath, true, this.zoom());
     }
   };
-
-  /**
-   * Draws the lasso outline. A freehand path (`!closed`) is raw pointer
-   * samples — connecting them with straight `lineTo`s reads as a jagged,
-   * faceted line, so it's smoothed with the standard quadratic-curve-through-
-   * midpoints technique (each segment curves toward the midpoint of the next
-   * one) for a clean, consistent line instead. Box/circle marquees are
-   * already clean geometry (4 rectangle corners, or a 48-point circle) built
-   * in marqueePolygon, not sampled input, so they're drawn as plain straight
-   * segments — smoothing them would just round the box's sharp corners.
-   */
-  private strokeLassoPath(v: CanvasRenderingContext2D, path: number[][], closed: boolean): void {
-    v.save();
-    v.beginPath();
-    v.moveTo(path[0][0], path[0][1]);
-    if (closed) {
-      for (let i = 1; i < path.length; i++) v.lineTo(path[i][0], path[i][1]);
-      v.closePath();
-    } else {
-      for (let i = 1; i < path.length - 1; i++) {
-        const mx = (path[i][0] + path[i + 1][0]) / 2;
-        const my = (path[i][1] + path[i + 1][1]) / 2;
-        v.quadraticCurveTo(path[i][0], path[i][1], mx, my);
-      }
-      if (path.length > 1) v.lineTo(path[path.length - 1][0], path[path.length - 1][1]);
-    }
-    v.lineCap = 'round';
-    v.lineJoin = 'round';
-    // dash size/spacing and line width are screen-px constants, counter-
-    // scaled for zoom like every other fixed-on-screen-size UI constant in
-    // this file (see zoom()'s own doc comment) — otherwise the dashes grow
-    // or shrink with the page instead of staying a uniform on-screen dotted line
-    const z = this.zoom();
-    v.setLineDash([6 / z, 4 / z]);
-    v.lineWidth = 1.5 / z;
-    v.strokeStyle = 'rgba(37, 99, 235, 0.9)';
-    v.stroke();
-    v.restore();
-  }
 
   private schedule(): void {
     if (!this.raf) this.raf = requestAnimationFrame(this.frame);
@@ -1609,43 +1553,22 @@ export class PageCanvas {
   }
 
   // ---------------------------------------------------------- hit testing
+  // All four resolve against this page's own item list; the ordering and
+  // tolerance rules themselves are shared with the board (item-surface.ts).
   private topItemAt(x: number, y: number): PageItem | null {
-    const items = store.itemsOf(this.page.id);
-    for (let i = items.length - 1; i >= 0; i--) {
-      const it = items[i];
-      const hit = isStroke(it)
-        ? nearPolyline(x, y, it.points, it.size / 2 + TAP_RADIUS)
-        : pointInElement(it, x, y);
-      if (hit) return it;
-    }
-    return null;
+    return topItemAt(store.itemsOf(this.page.id), x, y);
   }
 
   private topTextAt(x: number, y: number): TextElement | null {
-    const els = store.elementsOf(this.page.id);
-    for (let i = els.length - 1; i >= 0; i--) {
-      const e = els[i];
-      if (e.kind === 'text' && pointInElement(e, x, y)) return e;
-    }
-    return null;
+    return topElementAt(store.elementsOf(this.page.id), 'text', x, y);
   }
 
   private topShapeAt(x: number, y: number): ShapeElement | null {
-    const els = store.elementsOf(this.page.id);
-    for (let i = els.length - 1; i >= 0; i--) {
-      const e = els[i];
-      if (e.kind === 'shape' && pointInElement(e, x, y)) return e;
-    }
-    return null;
+    return topElementAt(store.elementsOf(this.page.id), 'shape', x, y);
   }
 
   private topTapeAt(x: number, y: number): TapeElement | null {
-    const els = store.elementsOf(this.page.id);
-    for (let i = els.length - 1; i >= 0; i--) {
-      const e = els[i];
-      if (e.kind === 'tape' && pointInElement(e, x, y)) return e;
-    }
-    return null;
+    return topElementAt(store.elementsOf(this.page.id), 'tape', x, y);
   }
 
   // ------------------------------------------------------- tape & images
@@ -1863,22 +1786,13 @@ export class PageCanvas {
    * never automatically from selecting, dragging, resizing or rotating.
    */
   private showSelection(): void {
-    const items = this.selectedItems();
-    const lasso = this.lastLassoPath;
-    const frame = lasso ? { ...aabb(lasso), rot: 0 } : itemsFrame(items);
-    if (!frame) {
+    const view = selectionView(this.selectedItems(), this.lastLassoPath, this.editor != null);
+    if (!view) {
       this.hooks.hideSelection(this);
       this.hooks.onSelectionFrame(this, null);
       return;
     }
-    const single = !lasso && items.length === 1 && !isStroke(items[0]) ? items[0] : null;
-    const isText = single?.kind === 'text';
-    this.hooks.showSelection(this, frame, {
-      rotate: single != null, // never for a lasso selection — see above
-      aspect: lasso != null || isText || single?.kind === 'image', // photos (and lasso groups) keep their proportions on a corner drag
-      edges: lasso ? 'none' : isText ? 'horizontal' : 'all',
-      passThrough: this.editor != null,
-    });
+    this.hooks.showSelection(this, view.frame, view.opts);
     this.hooks.onSelectionFrame(this, null);
   }
 
@@ -2241,69 +2155,8 @@ export class PageCanvas {
   }
 
   /** Builds a copy of `el` for another page/position; used by paste and duplicate. */
-  static cloneItem(it: PageItem, pageId: string, notebookId: string, dx: number, dy: number): PageItem {
-    const base = { id: uid(), pageId, notebookId, createdAt: Date.now() };
-    if (isStroke(it)) {
-      return { ...it, ...base, points: it.points.map((p) => [p[0] + dx, p[1] + dy, p[2]]) };
-    }
-    const el: PageElement = { ...it, ...base, x: it.x + dx, y: it.y + dy };
-    return el;
-  }
+  static cloneItem = cloneItem;
 }
 
-/** The box or ellipse spanning two corners, as a polygon the lasso hit-tests can use as-is. */
-function marqueePolygon(shape: 'box' | 'circle', a: number[], b: number[]): number[][] {
-  const x0 = Math.min(a[0], b[0]);
-  const y0 = Math.min(a[1], b[1]);
-  const x1 = Math.max(a[0], b[0]);
-  const y1 = Math.max(a[1], b[1]);
-  if (shape === 'box') {
-    return [
-      [x0, y0],
-      [x1, y0],
-      [x1, y1],
-      [x0, y1],
-    ];
-  }
-  const cx = (x0 + x1) / 2;
-  const cy = (y0 + y1) / 2;
-  const rx = (x1 - x0) / 2;
-  const ry = (y1 - y0) / 2;
-  const n = 48;
-  const pts: number[][] = [];
-  for (let i = 0; i < n; i++) {
-    const t = (i / n) * Math.PI * 2;
-    pts.push([cx + rx * Math.cos(t), cy + ry * Math.sin(t)]);
-  }
-  return pts;
-}
 
-/** Maximal runs of points not in `gone`; runs shorter than two points can't be drawn and are dropped. */
-function survivingSegments(points: number[][], gone: Set<number>): number[][][] {
-  const segs: number[][][] = [];
-  let run: number[][] = [];
-  for (let i = 0; i <= points.length; i++) {
-    if (i < points.length && !gone.has(i)) {
-      run.push(points[i]);
-      continue;
-    }
-    if (run.length >= 2) segs.push(run);
-    run = [];
-  }
-  return segs;
-}
 
-/** True when nothing an edit session can change (text or geometry) differs. */
-function sameText(a: PageElement, b: TextElement): boolean {
-  return (
-    a.kind === 'text' &&
-    a.text === b.text &&
-    a.x === b.x &&
-    a.y === b.y &&
-    a.w === b.w &&
-    a.h === b.h &&
-    a.rotation === b.rotation &&
-    a.fontSize === b.fontSize &&
-    a.color === b.color
-  );
-}

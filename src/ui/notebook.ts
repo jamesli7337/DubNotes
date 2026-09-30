@@ -3,6 +3,7 @@ import { AUTO_COLOR, resolveInkColor } from '../canvas/freehand';
 import { itemBounds, rotateAround, unionRects, worldToScreen, type Camera, type Frame } from '../canvas/geom';
 import type { GuideKind } from '../canvas/guide';
 import { BoardCanvas } from '../canvas/board-canvas';
+import type { ItemSurface } from '../canvas/item-surface';
 import { PageCanvas, TAPE_MIN } from '../canvas/page-canvas';
 import type { Op } from '../canvas/page-canvas';
 import { SelectionOverlay } from '../canvas/selection';
@@ -276,7 +277,7 @@ class NotebookView {
   /** The single, notebook-level selection box/handles overlay — see selection.ts's own doc comment for why there's one shared instance instead of one per page. */
   private overlay!: SelectionOverlay;
   /** Which page's selection the shared overlay is currently showing, if any — its onDragStart/onDrag/onDragEnd/onTap hooks route to this page's own PageCanvas. */
-  private overlayPc: PageCanvas | null = null;
+  private overlayPc: ItemSurface | null = null;
   /**
    * A shared, viewport-sized canvas (sibling of `.nb-camera`, like the
    * selection overlay) that a page's own live drag preview paints onto
@@ -302,7 +303,7 @@ class NotebookView {
   private readonly redoStack: ViewOp[] = [];
 
   /** The page holding the current selection, if any (only one page at a time). */
-  private selPc: PageCanvas | null = null;
+  private selPc: ItemSurface | null = null;
   /** In-app clipboard: deep copies of the last copied items and where they came from. */
   private clipboard: PageItem[] = [];
   private clipboardPage: string | null = null;
@@ -338,7 +339,7 @@ class NotebookView {
   private calloutEl: HTMLElement | null = null;
   /** The visible pill inside calloutEl — a separate element so its `overflow: hidden` (which rounds the outer buttons' corners to match the pill) doesn't also clip the arrow, which lives on calloutEl itself. */
   private calloutPill: HTMLElement | null = null;
-  private calloutPc: PageCanvas | null = null;
+  private calloutPc: ItemSurface | null = null;
   /** The frame the callout is currently positioned against — re-placed (not re-shown) on scroll/resize, since neither changes the frame itself, only where it lands on screen. */
   private calloutFrame: Frame | null = null;
 
@@ -354,19 +355,19 @@ class NotebookView {
    */
   private tapePopoverAnchor: HTMLElement | null = null;
   private tapePopoverModal: Modal | null = null;
-  private tapePopoverPc: PageCanvas | null = null;
+  private tapePopoverPc: ItemSurface | null = null;
   private tapePopoverFrame: Frame | null = null;
   private tapePopoverTapeId: string | null = null;
 
   /** Bound so the same reference can be added to and removed from `window` — see the scroll/resize wiring in buildChrome and its cleanup in onLeave. */
   private readonly repositionCallout = (): void => {
     if (this.calloutEl && this.calloutPc && this.calloutFrame) {
-      const pageRect = this.calloutPc.pageRect();
-      if (pageRect) this.positionCallout(this.calloutEl, this.calloutFrame, pageRect, pageW(this.calloutPc.page));
+      const basis = this.calloutPc.calloutBasis();
+      if (basis) this.positionCallout(this.calloutEl, this.calloutFrame, basis.rect, basis.pw);
     }
     if (this.tapePopoverAnchor && this.tapePopoverPc && this.tapePopoverFrame) {
-      const pageRect = this.tapePopoverPc.pageRect();
-      if (pageRect) this.positionTapeAnchor(this.tapePopoverAnchor, this.tapePopoverFrame, pageRect, pageW(this.tapePopoverPc.page));
+      const basis = this.tapePopoverPc.calloutBasis();
+      if (basis) this.positionTapeAnchor(this.tapePopoverAnchor, this.tapePopoverFrame, basis.rect, basis.pw);
     }
   };
 
@@ -612,11 +613,12 @@ class NotebookView {
     // — undo/redo used to live in the right zone; now that they're in the
     // dock's top row instead, this keeps the bar from reading lopsided.
     const rightGroup = el('div', { class: 'nb-appbar__right' });
-    // A board has no page list to manage, and image/PDF import plus export
-    // land in later phases — so those buttons are left out entirely rather
-    // than shown doing nothing. Split stays: a board can host a reference
-    // pane exactly like a notebook can.
-    if (this.isBoard) rightGroup.append(this.splitBtn, paperBtn);
+    // A board has no page list to manage, and AI mode and export land in later
+    // phases — so those buttons are left out entirely rather than shown doing
+    // nothing. Split stays (a board can host a reference pane exactly like a
+    // notebook can), and so does Import, whose menu drops its PDF-pages entry
+    // on a board and keeps Insert image (see openInsertMenu).
+    if (this.isBoard) rightGroup.append(this.splitBtn, importBtn, paperBtn);
     else rightGroup.append(this.aiToggleBtn, this.aiSendBtn, this.splitBtn, importBtn, exportBtn, pagesBtn, paperBtn);
     bar.append(back, this.titleEl, rightGroup);
     this.appBarRightGroup = rightGroup;
@@ -736,8 +738,12 @@ class NotebookView {
     if (this.isBoard) {
       // A board draws the camera into its own canvas transform rather than
       // moving a DOM layer, so there is nothing to transform here — just ask
-      // for a frame. Everything else below is page chrome a board has none of.
+      // for a frame. The selection overlay and callout are DOM that floats
+      // above the canvas, though, so they still need re-placing every tick;
+      // everything else below is page chrome a board has none of.
       this.board?.schedule();
+      this.overlay.update();
+      this.repositionCallout();
       return;
     }
     this.cameraEl.style.transform = `scale(${zoom}) translate(${-x}px, ${-y}px)`;
@@ -1845,7 +1851,8 @@ class NotebookView {
       });
       menu.append(b);
     };
-    item('Import PDF pages', 'import', () => this.pdfInput.click());
+    // importing a PDF means adding pages, which a board has none of
+    if (!this.isBoard) item('Import PDF pages', 'import', () => this.pdfInput.click());
     item('Insert image', 'image', () => this.imageInput.click());
     modal = openAnchoredModal(anchor, menu);
   }
@@ -2001,10 +2008,11 @@ class NotebookView {
     // kept so applyAiToolbarLockdown can leave just this one enabled (and
     // colour it violet) while AI mode is on — see its own doc comment.
     this.penToolBtn = toolBtn('pen', 'pen', 'Pen') as HTMLButtonElement;
-    // Phase 1 boards ink, erase and pan — the selection/placement tools all
-    // assume a page to live on and land in a later phase, so the dock simply
-    // doesn't offer them rather than offering them broken.
-    const boardTools: ToolKind[] = ['pen', 'highlighter', 'eraser', 'hand'];
+    // Everything except the laser, whose trail is drawn by PageCanvas's own
+    // frame loop and has no board equivalent yet — offered nowhere rather than
+    // offered broken. The guide tools are filtered separately below, for the
+    // same reason (they need a mounted PageCanvas to attach to).
+    const boardTools: ToolKind[] = ['pen', 'highlighter', 'eraser', 'lasso', 'text', 'shapes', 'tape', 'hand'];
     const offer = (kind: ToolKind, name: IconName, label: string): HTMLElement[] =>
       !this.isBoard || boardTools.includes(kind) ? [toolBtn(kind, name, label)] : [];
     top.append(
@@ -2179,7 +2187,11 @@ class NotebookView {
 
   /** Reads a picked photo / GIF and drops it on the page in view, selected, with the lasso tool active. */
   private async insertImage(file: File): Promise<void> {
-    const target = this.currentPageId ? this.pcByPage.get(this.currentPageId) : null;
+    const target: ItemSurface | null = this.isBoard
+      ? this.board
+      : this.currentPageId
+        ? (this.pcByPage.get(this.currentPageId) ?? null)
+        : null;
     if (!target?.mounted) return;
     let loaded;
     try {
@@ -2614,7 +2626,7 @@ class NotebookView {
   }
 
   // ------------------------------------------------------------ selection
-  private onSelection(pc: PageCanvas, count: number): void {
+  private onSelection(pc: ItemSurface, count: number): void {
     if (count > 0) {
       const prev = this.selPc;
       this.selPc = pc;
@@ -2635,7 +2647,7 @@ class NotebookView {
    * callout accordingly; a no-op outside the lasso tool (the Shapes tool's
    * own selection keeps using the dock's Delete action, unchanged).
    */
-  private onSelectionFrame(pc: PageCanvas, frame: Frame | null): void {
+  private onSelectionFrame(pc: ItemSurface, frame: Frame | null): void {
     if (frame && toolState.kind === 'lasso') {
       this.calloutPc = pc;
       this.showSelectionCallout(pc, frame);
@@ -2715,13 +2727,13 @@ class NotebookView {
    * subtree — an element there can't out-rank the dock's z-index no matter
    * its own value (see the dock's own comment on this same trap), and this
    * needs to float above everything the same way. Positioned from `frame`
-   * (this page's own units) via `pc.pageRect()` (that page's live screen
-   * rect) so it tracks scroll/zoom/drag for free, each time it's told the
-   * frame changed.
+   * (the surface's own units) via `pc.calloutBasis()` (that surface's live
+   * screen mapping) so it tracks scroll/zoom/drag for free, each time it's
+   * told the frame changed.
    */
-  private showSelectionCallout(pc: PageCanvas, frame: Frame): void {
-    const pageRect = pc.pageRect();
-    if (!pageRect) {
+  private showSelectionCallout(pc: ItemSurface, frame: Frame): void {
+    const basis = pc.calloutBasis();
+    if (!basis) {
       this.hideSelectionCallout();
       return;
     }
@@ -2733,7 +2745,7 @@ class NotebookView {
     }
     this.renderCalloutButtons(this.calloutPill!);
     this.calloutFrame = frame;
-    this.positionCallout(this.calloutEl, frame, pageRect, pageW(pc.page));
+    this.positionCallout(this.calloutEl, frame, basis.rect, basis.pw);
   }
 
   /**
@@ -2744,9 +2756,9 @@ class NotebookView {
    * consistent place to check/attempt paste, positioned near the lasso
    * itself rather than no UI at all.
    */
-  private showEmptyLassoCallout(pc: PageCanvas, frame: Frame): void {
-    const pageRect = pc.pageRect();
-    if (!pageRect) {
+  private showEmptyLassoCallout(pc: ItemSurface, frame: Frame): void {
+    const basis = pc.calloutBasis();
+    if (!basis) {
       this.hideSelectionCallout();
       return;
     }
@@ -2759,7 +2771,7 @@ class NotebookView {
     }
     this.renderEmptyCalloutButtons(this.calloutPill!);
     this.calloutFrame = frame;
-    this.positionCallout(this.calloutEl, frame, pageRect, pageW(pc.page));
+    this.positionCallout(this.calloutEl, frame, basis.rect, basis.pw);
   }
 
   /**
@@ -2844,9 +2856,9 @@ class NotebookView {
    * triggers the generic outside-dismiss for whatever was open, and this
    * method then opens fresh for the new one.
    */
-  private showTapePopover(pc: PageCanvas, tapeId: string, frame: Frame): void {
-    const pageRect = pc.pageRect();
-    if (!pageRect) return;
+  private showTapePopover(pc: ItemSurface, tapeId: string, frame: Frame): void {
+    const basis = pc.calloutBasis();
+    if (!basis) return;
     this.tapePopoverPc = pc;
     this.tapePopoverFrame = frame;
     this.tapePopoverTapeId = tapeId;
@@ -2861,12 +2873,12 @@ class NotebookView {
       // actually positioned over the strip
       anchor.addEventListener('click', () => this.openTapePopoverModal(pc, tapeId, anchor!));
     }
-    this.positionTapeAnchor(anchor, frame, pageRect, pageW(pc.page));
+    this.positionTapeAnchor(anchor, frame, basis.rect, basis.pw);
     this.openTapePopoverModal(pc, tapeId, anchor);
   }
 
   /** Opens (or, per openAnchoredModal's own toggle rule, closes) the popover for `anchor` — a null return there just means this call closed the existing one instead of opening; onClose below already settles the state either way. */
-  private openTapePopoverModal(pc: PageCanvas, tapeId: string, anchor: HTMLElement): void {
+  private openTapePopoverModal(pc: ItemSurface, tapeId: string, anchor: HTMLElement): void {
     const modal = openAnchoredModal(anchor, this.buildTapePopoverPanel(pc, tapeId), {
       onClose: () => {
         if (this.tapePopoverTapeId !== tapeId) return; // a newer popover already replaced this one
@@ -2900,7 +2912,7 @@ class NotebookView {
    * step per drag/keypress session via pc.beginTapeResize/commitTapeResize)
    * plus Delete — see showTapePopover.
    */
-  private buildTapePopoverPanel(pc: PageCanvas, tapeId: string): HTMLElement {
+  private buildTapePopoverPanel(pc: ItemSurface, tapeId: string): HTMLElement {
     const menu = el('div', { class: 'menu tape-popover', role: 'menu' });
     const current = pc.tapeGeometry(tapeId);
     if (!current) return menu;
@@ -2940,8 +2952,9 @@ class NotebookView {
       return { row, input };
     };
 
-    const w = sizeRow('Width', current.w, pageW(pc.page));
-    const h = sizeRow('Height', current.h, pageH(pc.page));
+    const limit = pc.tapeSizeLimit();
+    const w = sizeRow('Width', current.w, limit.w);
+    const h = sizeRow('Height', current.h, limit.h);
     wInput = w.input;
     hInput = h.input;
     menu.append(w.row, h.row);
@@ -2958,9 +2971,10 @@ class NotebookView {
     return menu;
   }
 
-  /** Finishes any text edit and drops any selection on every page. */
+  /** Finishes any text edit and drops any selection on every page — or on the board. */
   private deactivateAll(): void {
     for (const pc of this.pcByPage.values()) pc.deactivate();
+    this.board?.deactivate();
     this.selPc = null;
   }
 
@@ -2996,7 +3010,12 @@ class NotebookView {
    */
   private pasteClipboard(at?: Frame): boolean {
     if (!this.clipboard.length) return false;
-    const target = at ? this.calloutPc : (this.selPc ?? (this.currentPageId ? this.pcByPage.get(this.currentPageId) : null));
+    const inView: ItemSurface | null = this.isBoard
+      ? this.board
+      : this.currentPageId
+        ? (this.pcByPage.get(this.currentPageId) ?? null)
+        : null;
+    const target = at ? this.calloutPc : (this.selPc ?? inView);
     if (!target?.mounted) return false;
     let dx: number;
     let dy: number;
@@ -3130,7 +3149,35 @@ class NotebookView {
       // One canvas for the whole board, mounted once into the camera layer's
       // own host. There is no page list to reconcile.
       if (!this.board) {
-        this.board = new BoardCanvas(this.nb, this.camera, { onOp: (op) => this.pushOp(op) });
+        // the same hook object shape a page gets, minus the page-only members
+        // (see BoardHooks) — every selection/callout/tape path above is shared
+        this.board = new BoardCanvas(this.nb, this.camera, {
+          onOp: (op) => {
+            const isAiInk = this.aiMode.isActive() && (op.kind === 'add-stroke' || (op.kind === 'add-items' && op.aiInk));
+            if (!isAiInk) this.pushOp(op);
+            this.aiMode.handleOp(op);
+          },
+          onSelection: (s, n) => this.onSelection(s, n),
+          onSelectionFrame: (s, frame) => this.onSelectionFrame(s, frame),
+          onEmptyLassoSelection: (s, frame) => this.showEmptyLassoCallout(s, frame),
+          onTapeTap: (s, tapeId, frame) => this.showTapePopover(s, tapeId, frame),
+          isAiActive: () => this.aiMode.isActive(),
+          showSelection: (s, frame, opts) => {
+            this.overlayPc = s;
+            // board items are already in world coordinates, so the overlay's
+            // origin is the world origin and a frame *is* a world rect
+            this.overlay.show(frame, opts, { origin: { x: 0, y: 0 }, pw: 0, ph: 0 });
+          },
+          updateSelection: (s, frame) => {
+            if (this.overlayPc === s) this.overlay.update(frame);
+          },
+          hideSelection: (s) => {
+            if (this.overlayPc === s) {
+              this.overlay.hide();
+              this.overlayPc = null;
+            }
+          },
+        });
         this.board.mount(this.scrollEl);
       }
       return;
@@ -3212,25 +3259,25 @@ class NotebookView {
           if (!isAiInk) this.pushOp(op);
           this.aiMode.handleOp(op);
         },
-        onSelection: (p, n) => this.onSelection(p, n),
-        onSelectionFrame: (p, frame) => this.onSelectionFrame(p, frame),
-        onEmptyLassoSelection: (p, frame) => this.showEmptyLassoCallout(p, frame),
-        onTapeTap: (p, tapeId, frame) => this.showTapePopover(p, tapeId, frame),
+        onSelection: (s, n) => this.onSelection(s, n),
+        onSelectionFrame: (s, frame) => this.onSelectionFrame(s, frame),
+        onEmptyLassoSelection: (s, frame) => this.showEmptyLassoCallout(s, frame),
+        onTapeTap: (s, tapeId, frame) => this.showTapePopover(s, tapeId, frame),
         isAiActive: () => this.aiMode.isActive(),
         onPendingLine: () => this.syncHistory(),
         refreshPage: (pageId) => this.rebuildIfMounted(pageId),
         adoptCrossPageLasso: (pageId, ids, lassoPath) => {
           if (this.mounted.has(pageId)) this.pcByPage.get(pageId)?.adoptCrossPageLasso(ids, lassoPath);
         },
-        showSelection: (p, frame, opts) => {
-          this.overlayPc = p;
-          this.overlay.show(frame, opts, { origin: { x: pageEl.offsetLeft, y: pageEl.offsetTop }, pw: pageW(p.page), ph: pageH(p.page) });
+        showSelection: (s, frame, opts) => {
+          this.overlayPc = s;
+          this.overlay.show(frame, opts, { origin: { x: pageEl.offsetLeft, y: pageEl.offsetTop }, pw: pageW(page), ph: pageH(page) });
         },
-        updateSelection: (p, frame) => {
-          if (this.overlayPc === p) this.overlay.update(frame);
+        updateSelection: (s, frame) => {
+          if (this.overlayPc === s) this.overlay.update(frame);
         },
-        hideSelection: (p) => {
-          if (this.overlayPc === p) {
+        hideSelection: (s) => {
+          if (this.overlayPc === s) {
             this.overlay.hide();
             this.overlayPc = null;
           }
@@ -3842,8 +3889,11 @@ class NotebookView {
   private rebuildIfMounted(pageId: string): void {
     if (this.isBoard) {
       // undo/redo and every other store edit land here; the board repaints
-      // wholesale rather than per page
-      this.board?.invalidate();
+      // wholesale rather than per page. `refresh` rather than `invalidate`
+      // for the same reason a page uses it: an undone item may be one the
+      // selection still names, and a selection box floating over nothing is
+      // worse than no selection.
+      this.board?.refresh();
       return;
     }
     if (this.mounted.has(pageId)) this.pcByPage.get(pageId)?.refresh();
