@@ -1817,6 +1817,7 @@ export class PageCanvas {
   /** Clears any selection/edit here; returns whether there was actually anything to dismiss. */
   clearSelection(): boolean {
     const had = this.editor !== null || this.selected.size > 0 || this.lastLassoPath !== null;
+    const hadLassoPath = this.lastLassoPath !== null;
     this.commitEdit();
     if (this.selected.size) this.setSelection([]);
     else {
@@ -1824,6 +1825,11 @@ export class PageCanvas {
       this.hooks.hideSelection(this);
       this.hooks.onSelectionFrame(this, null);
     }
+    // setSelection (and the branch above) only clear the DOM selection box —
+    // the canvas-drawn dashed outline is a separate paint pass gated on
+    // lastLassoPath, so erasing it needs its own scheduled frame or the last
+    // painted outline just sits there until something unrelated repaints
+    if (hadLassoPath) this.schedule();
     return had;
   }
 
