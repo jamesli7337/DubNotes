@@ -1049,25 +1049,30 @@ class NotebookView {
    *
    * Clearing/committing that state here is only half the fix: the very same
    * press then goes on (via the normal bubble-phase pointerdown) to whatever
-   * page it actually landed on, which starts its own tool's press same as
-   * always. Left alone, a zero-travel tap that dismissed a selection would
-   * still leave a dot/mark from whatever tool is active. So when clearing
-   * the overlay's selection actually dismissed something, the landing page
-   * (if any — the gray gap has none) is flagged via markDismissingPress: its
-   * own startPress/onUp then throw away that tool's output if the press
-   * never travels, exactly like a lineEdit-dismissing press does for itself.
+   * page it actually landed on, which would otherwise start its own tool's
+   * press as always and leave a mark. So whenever anything was actually
+   * dismissed, the landing page (if any — the gray gap has none) is flagged
+   * via markDismissingPress, and its startPress refuses to run any tool at
+   * all for that press. This capture-phase listener is what makes the flag
+   * land *before* the page's own pointerdown, so nothing is ever drawn and
+   * then withdrawn.
    */
   private bindOutsidePenPressCancelsSelection(): void {
     this.scrollEl.addEventListener(
       'pointerdown',
       (e) => {
+        // every new press starts clean, whatever its pointer type — see
+        // clearDismissingPress for the flagged presses that never reach a canvas
+        for (const pc of this.pcByPage.values()) pc.clearDismissingPress();
         if (e.pointerType !== 'pen' || this.isBlockedTouch(e)) return;
         const target = e.target as HTMLElement;
         if (target.closest('.sel-box')) return; // inside - handled by SelectionOverlay's own onDown
-        const dismissed = this.overlayPc ? this.overlayPc.clearSelection() : false;
+        let dismissed = this.overlayPc ? this.overlayPc.clearSelection() : false;
         const samePageId = (target.closest('.page') as HTMLElement | null)?.dataset.pageId ?? null;
         for (const [pageId, pc] of this.pcByPage) {
-          if (pageId !== samePageId) pc.commitLine();
+          // another page's adjustable line counts as dismissed state too, so
+          // the press that settles it is spent on that and draws nothing
+          if (pageId !== samePageId && pc.commitLine()) dismissed = true;
         }
         if (dismissed && samePageId) this.pcByPage.get(samePageId)?.markDismissingPress();
       },
