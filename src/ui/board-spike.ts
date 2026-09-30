@@ -103,15 +103,26 @@ function seedItems(): Item[] {
     const ang = rand() * Math.PI * 2;
     const wob = 8 + rand() * 26;
     const n = 8 + Math.floor(rand() * 10);
+    // Both of these are per *stroke*, deliberately hoisted out of the point
+    // loop. Drawing them per point made the seeded strokes something no pen
+    // could produce — the path's curvature and the pen pressure both jumping
+    // between adjacent samples — and `thinning: 0.62` then swung each stroke's
+    // radius by ~50% from one sample to the next. perfect-freehand's outline
+    // scalloped in and out to follow it, which at zoom 4 read as white cracks
+    // biting into thick strokes at every joint. The renderer was innocent; the
+    // seed data was not. See the report that traced this.
+    const freq = 1 + rand() * 2;
+    const press = 0.35 + rand() * 0.2;
     const points: number[][] = [];
     for (let j = 0; j < n; j++) {
       const t = j / (n - 1);
       const along = t * len;
-      const across = Math.sin(t * Math.PI * (1 + rand() * 2)) * wob;
+      const across = Math.sin(t * Math.PI * freq) * wob;
       points.push([
         cx + Math.cos(ang) * along - Math.sin(ang) * across,
         cy + Math.sin(ang) * along + Math.cos(ang) * across,
-        0.4 + rand() * 0.5,
+        // a real stroke tapers in and out over its length rather than jittering
+        press + 0.4 * Math.sin(t * Math.PI),
       ]);
     }
     const highlighter = rand() < 0.12;
