@@ -213,8 +213,9 @@ class NotebookView {
     snapT: number;
   } | null = null;
   /**
-   * One-finger pan (touch or pen — mouse panning is bindHandToolGestures'
-   * own, hand-tool-only path). `vx`/`vy` (world units/ms) are a running
+   * One-finger pan (a finger specifically — a stylus contact is never
+   * eligible here, and pen/mouse panning with the hand tool is
+   * bindHandToolGestures' own path). `vx`/`vy` (world units/ms) are a running
    * estimate of the finger's velocity, sampled each touchmove, used to kick
    * off momentum on lift — see startMomentum.
    */
@@ -258,7 +259,7 @@ class NotebookView {
   private stylusDown = false;
   /** performance.now() of the stylus's most recent liftoff (0 = never lifted this session). */
   private stylusLiftAt = 0;
-  /** Hand tool, mouse only — touch/pen panning goes through the same one-finger-pan gesture as any other tool, see bindZoomGestures. */
+  /** Hand tool, pen and mouse — a finger pans through the same one-finger-pan gesture as any other tool instead, see bindZoomGestures. */
   private handPan: { pointerId: number; x: number; y: number; camX: number; camY: number } | null = null;
   /** Recomputes the custom scrollbar thumb's size/position (see bindScrollbarThumb); called after anything that changes the camera or the notebook's total content height without itself going through applyCamera (syncPages). */
   private layoutScrollbarThumb: () => void = () => {};
@@ -1449,19 +1450,32 @@ class NotebookView {
   }
 
   /**
-   * Hand tool: drag anywhere to pan. Touch and pen already pan via the same
-   * one-finger gesture bindZoomGestures recognizes for any tool (PageCanvas's
-   * own onDown steps aside entirely for this tool, see its own comment
-   * there, letting the touch reach here instead of being claimed for
-   * drawing). Mice have no such gesture of their own, so this handles that
-   * one case manually — scoped to `pointerType === 'mouse'` specifically, so
-   * it never double-pans a touch or pen drag bindZoomGestures is already
-   * panning.
+   * Hand tool: drag anywhere to pan, with the pencil or the mouse.
+   *
+   * A *finger* never reaches here — it pans through the same one-finger
+   * gesture bindZoomGestures recognizes for every tool, and this is scoped to
+   * `pen`/`mouse` specifically so a finger drag is panned once, there, rather
+   * than twice.
+   *
+   * The pencil is the case this exists for. bindZoomGestures deliberately
+   * refuses a stylus-tagged contact outright (pen priority: a Pencil stroke
+   * must never be corrupted by the palm resting alongside it) — right for
+   * every tool that draws, and exactly wrong for the one tool whose whole job
+   * is to pan with the pencil, which is why the Pencil previously did nothing
+   * at all here. Panning it from the Pointer Event stream instead keeps that
+   * rule untouched: palms are `pointerType: 'touch'` and so can't enter this
+   * path at all, and the touch path still refuses them for itself.
+   *
+   * Nothing competes for the contact either way. The touch path only listens
+   * to Touch Events, which a mouse never fires and which this ignores; and
+   * PageCanvas/BoardCanvas both step aside for this tool before claiming a
+   * press (see PageCanvas.onDown's own comment), so the press arrives here
+   * unclaimed and this pointer capture is the only one on it.
    */
   private bindHandToolGestures(): void {
     const s = this.scrollEl;
     s.addEventListener('pointerdown', (e) => {
-      if (toolState.kind !== 'hand' || e.pointerType !== 'mouse') return;
+      if (toolState.kind !== 'hand' || (e.pointerType !== 'pen' && e.pointerType !== 'mouse')) return;
       this.stopMomentum();
       this.handPan = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, camX: this.camera.x, camY: this.camera.y };
       try {
@@ -1474,8 +1488,8 @@ class NotebookView {
       const p = this.handPan;
       if (!p || e.pointerId !== p.pointerId) return;
       // Unlike touch-pan and wheel-pan, this path was landing the camera
-      // straight from the pointer delta with no clampCamera call, so a mouse
-      // drag with the hand tool could push it arbitrarily far past the
+      // straight from the pointer delta with no clampCamera call, so a
+      // hand-tool drag could push it arbitrarily far past the
       // content's actual bounds with no snap-back on release — leaving
       // nothing on screen for a subsequent lasso (or anything else) to hit.
       const clamped = this.clampCamera(

@@ -1669,9 +1669,9 @@ select {
   touch-action: none;
   position: relative;
 }
-/* Hand tool active: a grab cursor for the mouse-drag-to-pan path (see
-   bindHandToolGestures) — touch/pen panning already goes through the same
-   camera-pan gesture as any other tool, unaffected by this. */
+/* Hand tool active: a grab cursor for the pointer drag-to-pan path (see
+   bindHandToolGestures, which pans the pencil and the mouse) — a finger goes
+   through the same camera-pan gesture as any other tool, unaffected by this. */
 .nb-scroll--hand {
   cursor: grab;
 }
@@ -2067,12 +2067,12 @@ select {
  * separate style recalculation contending with the recognizer's own read of
  * the property, just a class-list mutation.
  *
- * `.nb-scroll` (the real scrollable ancestor) is deliberately left untouched
- * and always pan-x pan-y: `.page`'s own touch-action already governs any
- * touch landing on a page (touch-action is the intersection of an element and
- * all its ancestors — a nearer, more-restrictive value always wins), so
- * `.nb-scroll` doesn't need — and for touches landing on its own background
- * outside any page, must keep — its scrolling permission.
+ * `.nb-scroll` is `touch-action: none` and has been since the camera rewrite
+ * — it isn't a scrolling element any more, and every gesture over it is
+ * recognized by our own JS. touch-action is the intersection of an element
+ * and all its ancestors, so that already suppresses the native recognizer for
+ * anything landing on a page; the values here are what keeps `.page` honest
+ * on its own terms, not a scrolling permission anything still relies on.
  */
 .page--capturing,
 .page--capturing canvas {
