@@ -14,10 +14,54 @@ import {
 } from './db';
 import { DEFAULT_PAPER } from './const';
 import type { Divider, Folder, Notebook, NotebookCover, Page, PageElement, PageItem, Paper, Stroke } from './types';
+import { itemBounds, type Rect } from './canvas/geom';
 import { isStroke, uid } from './util';
 
 /** One row of a folder's list: a notebook or a divider, in manual order. */
 export type FolderItem = { kind: 'notebook'; nb: Notebook } | { kind: 'divider'; divider: Divider };
+
+/**
+ * Board persistence grid, in board units. An item is filed in the chunk its
+ * bounding-box origin falls in, and a chunk is one `Page` record — so an
+ * autosave rewrites only the items near whatever was just drawn rather than
+ * the whole board (`replacePageStrokes` replaces a record wholesale).
+ *
+ * Large on purpose: chunks are a write-batching device, not a render or query
+ * structure, so a coarse grid keeps the number of `Page` records (and the
+ * per-record flush overhead) low. Querying is the spatial index's job below.
+ */
+export const BOARD_CHUNK = 2048;
+
+/**
+ * Board spatial index cell, in board units — the grid painting and hit-testing
+ * actually query. Much finer than a chunk: a redraw asks for the items
+ * overlapping the visible rect, and a cell far larger than a stroke would drag
+ * in most of the board.
+ */
+const BOARD_CELL = 512;
+
+const cellKey = (cx: number, cy: number): string => `${cx},${cy}`;
+
+/** Every index cell an axis-aligned box touches. */
+function cellsForRect(r: Rect): string[] {
+  const out: string[] = [];
+  const x0 = Math.floor(r.x / BOARD_CELL);
+  const x1 = Math.floor((r.x + r.w) / BOARD_CELL);
+  const y0 = Math.floor(r.y / BOARD_CELL);
+  const y1 = Math.floor((r.y + r.h) / BOARD_CELL);
+  for (let cx = x0; cx <= x1; cx++) for (let cy = y0; cy <= y1; cy++) out.push(cellKey(cx, cy));
+  return out;
+}
+
+/** One board's live query structures, rebuilt from its chunks on load. */
+interface BoardIndex {
+  /** every item on the board by id — what a cell lookup resolves against */
+  items: Map<string, PageItem>;
+  /** index cell -> ids of the items whose bounds touch it */
+  cells: Map<string, Set<string>>;
+  /** id -> the cells it was registered in, so a removal is exact */
+  placed: Map<string, string[]>;
+}
 
 const byCreated = (a: PageItem, b: PageItem): number =>
   a.createdAt - b.createdAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
@@ -34,6 +78,8 @@ class Store {
   readonly dividers = new Map<string, Divider>();
   private readonly strokesByPage = new Map<string, Stroke[]>();
   private readonly elementsByPage = new Map<string, PageElement[]>();
+  /** Per-board query structures, keyed by notebook id — see BoardIndex. Built in `init`, maintained by add/remove below. Ordinary notebooks never appear here. */
+  private readonly boards = new Map<string, BoardIndex>();
 
   private dirtyNb = new Set<string>();
   private dirtyPg = new Set<string>();
@@ -82,6 +128,18 @@ class Store {
     }
     for (const arr of this.strokesByPage.values()) arr.sort(byCreated);
     for (const arr of this.elementsByPage.values()) arr.sort(byCreated);
+
+    // Boards get their spatial index built once, here: every chunk's items are
+    // already in the per-page maps above, and nothing else walks a whole board.
+    this.boards.clear();
+    for (const n of notebooks) {
+      if (n.kind !== 'board') continue;
+      const idx = this.boardIndex(n.id);
+      for (const p of pages) {
+        if (p.notebookId !== n.id) continue;
+        for (const it of this.itemsOf(p.id)) this.indexBoardItem(idx, it);
+      }
+    }
     if (
       migration.pagesChanged.length ||
       migration.strokePagesChanged.length ||
@@ -99,22 +157,37 @@ class Store {
   }
 
   /** New notebooks go to the top of their folder's list. `paper`, if given, becomes the starting page's paper (instead of DEFAULT_PAPER) — every later page still inherits from whichever page precedes it, same as always (see addPage). */
-  createNotebook(name: string, folderId: string | null = null, paper?: Paper): Notebook {
+  createNotebook(name: string, folderId: string | null = null, paper?: Paper, kind: 'pages' | 'board' = 'pages'): Notebook {
     const now = Date.now();
     const nb: Notebook = {
       id: uid(),
-      name: name.trim() || 'Untitled notebook',
+      name: name.trim() || (kind === 'board' ? 'Untitled board' : 'Untitled notebook'),
       folderId,
       order: this.topOrder(folderId),
       createdAt: now,
       updatedAt: now,
     };
+    if (kind === 'board') nb.kind = 'board';
     this.notebooks.set(nb.id, nb);
     this.dirtyNb.add(nb.id);
-    const page = this.addPage(nb.id);
-    if (paper) page.paper = { ...paper };
+    if (kind === 'board') {
+      // The origin chunk exists from the start and holds the board's paper —
+      // see boardPaper. Every later chunk copies it, so the board reads as one
+      // continuous sheet however far it grows.
+      this.boardIndex(nb.id);
+      const origin = this.ensureChunk(nb.id, 0, 0);
+      if (paper) origin.paper = { ...paper };
+    } else {
+      const page = this.addPage(nb.id);
+      if (paper) page.paper = { ...paper };
+    }
     this.schedule();
     return nb;
+  }
+
+  /** True for a board — the one thing callers branch on. */
+  isBoard(notebookId: string): boolean {
+    return this.notebooks.get(notebookId)?.kind === 'board';
   }
 
   setCover(id: string, cover: NotebookCover | undefined): void {
@@ -317,6 +390,7 @@ class Store {
       this.delPg.delete(p.id);
     }
     this.notebooks.delete(id);
+    this.boards.delete(id);
     this.dirtyNb.delete(id);
     this.delNb.add(id);
     this.schedule();
@@ -521,12 +595,185 @@ class Store {
     });
   }
 
+  // ------------------------------------------------------------------- boards
+  private boardIndex(notebookId: string): BoardIndex {
+    let idx = this.boards.get(notebookId);
+    if (!idx) {
+      idx = { items: new Map(), cells: new Map(), placed: new Map() };
+      this.boards.set(notebookId, idx);
+    }
+    return idx;
+  }
+
+  /**
+   * Files an item into every index cell its bounds touch, replacing any
+   * previous placement. Idempotent, so it doubles as the "this item moved or
+   * resized" path: `unindexBoardItem` first, then re-file against fresh bounds.
+   */
+  private indexBoardItem(idx: BoardIndex, item: PageItem): void {
+    this.unindexBoardItem(idx, item.id);
+    idx.items.set(item.id, item);
+    const cells = cellsForRect(itemBounds(item));
+    idx.placed.set(item.id, cells);
+    for (const key of cells) {
+      const set = idx.cells.get(key);
+      if (set) set.add(item.id);
+      else idx.cells.set(key, new Set([item.id]));
+    }
+  }
+
+  /** Removes an item from the cells it was actually placed in — never a scan. */
+  private unindexBoardItem(idx: BoardIndex, id: string): void {
+    const cells = idx.placed.get(id);
+    if (cells) {
+      for (const key of cells) {
+        const set = idx.cells.get(key);
+        if (!set) continue;
+        set.delete(id);
+        if (!set.size) idx.cells.delete(key);
+      }
+    }
+    idx.placed.delete(id);
+    idx.items.delete(id);
+  }
+
+  /**
+   * The chunk record an item at `(x, y)` belongs to, created on first use.
+   *
+   * Deliberately not `addPage`: that scans every page in the app to pick an
+   * index and then renumbers all of the notebook's siblings, which for a board
+   * (whose chunks have no order and are never shown) is both meaningless and
+   * O(all pages) per new chunk.
+   */
+  private ensureChunk(notebookId: string, col: number, row: number): Page {
+    const id = `${notebookId}:${col},${row}`;
+    const existing = this.pages.get(id);
+    if (existing) return existing;
+    const now = Date.now();
+    const origin = this.pages.get(`${notebookId}:0,0`);
+    const page: Page = {
+      id,
+      notebookId,
+      index: 0, // boards have no page order; nothing reads this
+      paper: origin ? { ...origin.paper } : { ...DEFAULT_PAPER },
+      col,
+      row,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.pages.set(id, page);
+    this.dirtyPg.add(id);
+    return page;
+  }
+
+  /** The chunk id an item whose bounds start at `(x, y)` is stored under, creating the chunk if this is the first item to land there. */
+  boardChunkAt(notebookId: string, x: number, y: number): string {
+    return this.ensureChunk(notebookId, Math.floor(x / BOARD_CHUNK), Math.floor(y / BOARD_CHUNK)).id;
+  }
+
+  /** A board's paper, held by its origin chunk (see createNotebook). */
+  boardPaper(notebookId: string): Paper {
+    return this.pages.get(`${notebookId}:0,0`)?.paper ?? { ...DEFAULT_PAPER };
+  }
+
+  /** Sets the paper for a whole board — every chunk, so chunks created later inherit it too. */
+  setBoardPaper(notebookId: string, patch: Partial<Paper>): void {
+    const now = Date.now();
+    for (const p of this.pages.values()) {
+      if (p.notebookId !== notebookId) continue;
+      p.paper = { ...p.paper, ...patch };
+      p.updatedAt = now;
+      this.dirtyPg.add(p.id);
+    }
+    this.ensureChunk(notebookId, 0, 0); // a board with no chunks yet still needs somewhere to keep it
+    this.bump(notebookId);
+    this.schedule();
+  }
+
+  /**
+   * Every item whose bounds overlap `rect`, in z-order. This is what a board
+   * repaint and every hit-test go through — the cell grid keeps it proportional
+   * to what is on screen rather than to the size of the board.
+   */
+  boardItemsIn(notebookId: string, rect: Rect): PageItem[] {
+    const idx = this.boards.get(notebookId);
+    if (!idx) return [];
+    const seen = new Set<string>();
+    const out: PageItem[] = [];
+    for (const key of cellsForRect(rect)) {
+      const ids = idx.cells.get(key);
+      if (!ids) continue;
+      for (const id of ids) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const it = idx.items.get(id);
+        // a cell can only ever be a superset of the rect, so confirm the
+        // overlap before handing the item to a caller that will paint it
+        if (!it) continue;
+        const b = itemBounds(it);
+        if (b.x + b.w < rect.x || b.x > rect.x + rect.w || b.y + b.h < rect.y || b.y > rect.y + rect.h) continue;
+        out.push(it);
+      }
+    }
+    return out.sort(byCreated);
+  }
+
+  /** One board item by id, straight from the registry — no scan. */
+  boardItem(notebookId: string, id: string): PageItem | undefined {
+    return this.boards.get(notebookId)?.items.get(id);
+  }
+
+  /** How many items a board holds — for the debug readout and for deciding whether a board is empty. */
+  boardItemCount(notebookId: string): number {
+    return this.boards.get(notebookId)?.items.size ?? 0;
+  }
+
+  /**
+   * The board's occupied extent, derived from which index cells are populated
+   * rather than from the items themselves — so it costs one pass over the live
+   * cells and can never drift out of date. Coarse to within one cell, which is
+   * exactly the resolution pan-clamping wants anyway (the clamp adds its own
+   * margin on top). Null when the board is empty.
+   */
+  boardBounds(notebookId: string): Rect | null {
+    const idx = this.boards.get(notebookId);
+    if (!idx || !idx.cells.size) return null;
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    for (const key of idx.cells.keys()) {
+      const comma = key.indexOf(',');
+      const cx = Number(key.slice(0, comma));
+      const cy = Number(key.slice(comma + 1));
+      if (cx < x0) x0 = cx;
+      if (cy < y0) y0 = cy;
+      if (cx > x1) x1 = cx;
+      if (cy > y1) y1 = cy;
+    }
+    return { x: x0 * BOARD_CELL, y: y0 * BOARD_CELL, w: (x1 - x0 + 1) * BOARD_CELL, h: (y1 - y0 + 1) * BOARD_CELL };
+  }
+
+  /**
+   * Re-files an item whose geometry changed in place (a move or a resize).
+   * Phase 1 has no tool that does this — a partial erase replaces items rather
+   * than mutating them, so it goes through add/remove — but the index has to
+   * stay correct for the ones that will, and doing it here keeps that knowledge
+   * in one place.
+   */
+  reindexBoardItem(notebookId: string, item: PageItem): void {
+    const idx = this.boards.get(notebookId);
+    if (idx) this.indexBoardItem(idx, item);
+  }
+
   // ------------------------------------------------------------------ strokes
   strokesOf(pageId: string): Stroke[] {
     return this.strokesByPage.get(pageId) ?? [];
   }
 
   addStroke(s: Stroke): void {
+    const board = this.boards.get(s.notebookId);
+    if (board) this.indexBoardItem(board, s);
     const arr = this.strokesByPage.get(s.pageId);
     if (arr) {
       arr.push(s);
@@ -552,6 +799,8 @@ class Store {
     });
     this.strokesByPage.set(pageId, keep);
     if (removed.length) {
+      const board = this.boards.get(removed[0].notebookId);
+      if (board) for (const r of removed) this.unindexBoardItem(board, r.id);
       this.dirtyStrokes.add(pageId);
       this.bump(removed[0].notebookId);
       this.schedule();
@@ -565,6 +814,8 @@ class Store {
   }
 
   addElement(e: PageElement): void {
+    const board = this.boards.get(e.notebookId);
+    if (board) this.indexBoardItem(board, e);
     const arr = this.elementsByPage.get(e.pageId);
     if (arr) {
       arr.push(e);
@@ -590,6 +841,8 @@ class Store {
     });
     this.elementsByPage.set(pageId, keep);
     if (removed.length) {
+      const board = this.boards.get(removed[0].notebookId);
+      if (board) for (const r of removed) this.unindexBoardItem(board, r.id);
       this.dirtyElements.add(pageId);
       this.bump(removed[0].notebookId);
       this.schedule();

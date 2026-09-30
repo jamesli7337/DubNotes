@@ -46,11 +46,18 @@ const DB_VERSION = 6;
  *       remain valid; nothing to migrate.
  *   8 — TextElement gained optional `bg` (a tint painted behind the text,
  *       used by AI-mode replies). Additive; nothing to migrate.
+ *   9 — boards: Notebook gained optional `kind` ('pages' | 'board', absent =
+ *       'pages') and Page gained optional `col`/`row`, set only on the storage
+ *       chunks of a board. Both additive — an older record simply has neither
+ *       and reads as an ordinary paged notebook, so there is nothing to
+ *       migrate. Board items live in the same `strokes`/`elements` stores as
+ *       any other item, keyed by their chunk's page id, so backup/restore and
+ *       the cascade deletes need no board-specific handling.
  *
  * `aiConversations`'s own shape never bumps this: it's outside the backup
  * format entirely (see ALL_STORES), so nothing about it affects Backup's shape.
  */
-export const FORMAT_VERSION = 8;
+export const FORMAT_VERSION = 9;
 
 /** The hex value the pen's first swatch used before it became the "auto" token. */
 const OLD_BLACK_SWATCH = '#1f2530';

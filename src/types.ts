@@ -144,6 +144,20 @@ export interface Page {
    *  fields directly, so the fallback stays in one place. */
   w?: number;
   h?: number;
+  /**
+   * Board chunks only (v9): which cell of the board's persistence grid this
+   * record holds, `col = floor(x / BOARD_CHUNK)`. Present together or not at
+   * all; a page in an ordinary notebook has neither.
+   *
+   * A chunk exists purely so a board's items are written in bounded batches —
+   * `replacePageStrokes` rewrites every stroke of one record, so a single
+   * record per board would rewrite the whole board on every autosave. It is
+   * *not* a coordinate space: items in a chunk keep their global board
+   * coordinates, and which chunk an item lands in is decided once, from its
+   * bounding box origin, and never affects how it draws or hit-tests.
+   */
+  col?: number;
+  row?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -160,6 +174,16 @@ export interface NotebookCover {
 export interface Notebook {
   id: string;
   name: string;
+  /**
+   * What this notebook *is* (v9). Absent (the overwhelming case) means the
+   * original paged notebook, so nothing older needs migrating.
+   *
+   * A `'board'` is one unbounded canvas instead of a run of pages: its items
+   * carry global board coordinates and are never remapped, and its `Page`
+   * records are storage chunks (see `Page.col`/`row`), not things the user
+   * ever sees or orders.
+   */
+  kind?: 'pages' | 'board';
   /** containing folder; `null` = the library root (v6) */
   folderId: string | null;
   /** manual position within its folder's list, ascending (v6) */

@@ -1748,6 +1748,19 @@ select {
   pointer-events: none;
   z-index: 1;
 }
+/* A board's single canvas: it fills the stage and is NOT inside `.nb-camera`,
+   because a board draws the camera into its own canvas transform rather than
+   having a DOM layer moved under it. `touch-action: none` for the same reason
+   `.nb-scroll` has it — every gesture here is recognised in JS. Pointer events
+   reach it for pen/mouse ink; touch falls through to the notebook's own
+   pan/pinch handling on `.nb-scroll`. */
+.board-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  touch-action: none;
+}
+
 /* --pw/--ph: this page's own size (page units), set inline per page-wrap
    (buildPageWrap) from pageW/pageH — defaults here cover a page with no
    inline override (shouldn't happen, but keeps these rules self-contained).

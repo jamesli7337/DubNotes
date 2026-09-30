@@ -227,7 +227,11 @@ function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
     content.append(featSection);
   }
 
-  const items = store.folderItems(folder?.id ?? null);
+  // While picking something to show in the split pane, boards are left out:
+  // the pane scrolls a column of pages (PageScroller over a PageSource), which
+  // a board has none of. Everywhere else the list is unfiltered.
+  const allItems = store.folderItems(folder?.id ?? null);
+  const items = pickMode ? allItems.filter((it) => it.kind !== 'notebook' || it.nb.kind !== 'board') : allItems;
   const notebooks = items.filter((it): it is Extract<FolderItem, { kind: 'notebook' }> => it.kind === 'notebook');
   const grid = el('div', { class: 'nb-grid' });
 
@@ -778,12 +782,13 @@ function setSegmentedDisabled(row: HTMLElement, disabled: boolean): void {
  * really "set the notebook's starting paper" rather than a separate stored
  * per-notebook default.
  */
-function newNotebookDialog(): Promise<{ name: string; paper: Paper } | null> {
+function newNotebookDialog(): Promise<{ name: string; paper: Paper; kind: 'pages' | 'board' } | null> {
   return new Promise((resolve) => {
     const TEMPLATES: PaperTemplate[] = ['blank', 'ruled', 'grid', 'dot'];
     const SPACINGS: PaperSpacing[] = ['narrow', 'medium', 'wide'];
     const COLORS: PaperColor[] = ['white', 'cream', 'dark'];
     let draft: Paper = { ...DEFAULT_PAPER };
+    let kind: 'pages' | 'board' = 'pages';
 
     const form = document.createElement('form');
     form.className = 'dlg';
@@ -794,6 +799,14 @@ function newNotebookDialog(): Promise<{ name: string; paper: Paper } | null> {
       autocomplete: 'off',
       placeholder: 'Notebook name',
     }) as HTMLInputElement;
+
+    // Notebook (a run of pages) or Board (one unbounded canvas). Paper applies
+    // to both — a board's is one sheet rather than per page.
+    const kindRow = segmented(['Notebook', 'Board'], 0, (i) => {
+      kind = i === 1 ? 'board' : 'pages';
+      input.placeholder = kind === 'board' ? 'Board name' : 'Notebook name';
+      nameLabel.textContent = kind === 'board' ? 'Board name' : 'Notebook name';
+    });
 
     const spacingRow = segmented(['Narrow', 'Medium', 'Wide'], SPACINGS.indexOf(draft.spacing), (i) => {
       draft = { ...draft, spacing: SPACINGS[i] };
@@ -814,9 +827,11 @@ function newNotebookDialog(): Promise<{ name: string; paper: Paper } | null> {
     const row = el('div', { class: 'dlg__row' });
     row.append(cancelBtn, okBtn);
 
+    const nameLabel = el('label', { class: 'dlg__label', text: 'Notebook name' });
     form.append(
-      el('h2', { class: 'dlg__title', text: 'New notebook' }),
-      el('label', { class: 'dlg__label', text: 'Notebook name' }),
+      el('h2', { class: 'dlg__title', text: 'New' }),
+      field('Type', kindRow),
+      nameLabel,
       input,
       field('Template', templateRow),
       field('Line spacing', spacingRow),
@@ -825,7 +840,7 @@ function newNotebookDialog(): Promise<{ name: string; paper: Paper } | null> {
     );
 
     let settled = false;
-    const finish = (v: { name: string; paper: Paper } | null): void => {
+    const finish = (v: { name: string; paper: Paper; kind: 'pages' | 'board' } | null): void => {
       if (settled) return;
       settled = true;
       resolve(v);
@@ -842,7 +857,7 @@ function newNotebookDialog(): Promise<{ name: string; paper: Paper } | null> {
     });
     form.addEventListener('submit', (e) => {
       e.preventDefault();
-      finish({ name: input.value.trim(), paper: draft });
+      finish({ name: input.value.trim(), paper: draft, kind });
     });
     cancelBtn.addEventListener('click', () => finish(null));
     requestAnimationFrame(() => {
@@ -860,7 +875,7 @@ function buildFab(root: HTMLElement, folder: Folder | null): HTMLElement {
   newBtn.addEventListener('click', async () => {
     const result = await newNotebookDialog();
     if (!result) return;
-    const nb = store.createNotebook(result.name, folder?.id ?? null, result.paper);
+    const nb = store.createNotebook(result.name, folder?.id ?? null, result.paper, result.kind);
     location.hash = `#/nb/${nb.id}`;
   });
   const folderBtn = el('button', { text: 'New folder', title: 'New folder' });

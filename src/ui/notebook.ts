@@ -2,6 +2,7 @@ import { AiMode } from '../ai-mode';
 import { AUTO_COLOR, resolveInkColor } from '../canvas/freehand';
 import { itemBounds, rotateAround, unionRects, worldToScreen, type Camera, type Frame } from '../canvas/geom';
 import type { GuideKind } from '../canvas/guide';
+import { BoardCanvas } from '../canvas/board-canvas';
 import { PageCanvas, TAPE_MIN } from '../canvas/page-canvas';
 import type { Op } from '../canvas/page-canvas';
 import { SelectionOverlay } from '../canvas/selection';
@@ -178,6 +179,21 @@ class NotebookView {
    * reassigned) so every PageCanvas holding it always sees the current values.
    */
   private readonly camera: Camera = { x: 0, y: 0, zoom: 1 };
+  /**
+   * Board mode. A board is one unbounded canvas instead of a run of pages, so
+   * every page-derived thing below either branches on this or is skipped
+   * outright: the camera clamps, the page list, the mount window, the
+   * scrollbar, the page manager, the trailing-blank rule, and which tools the
+   * dock offers. The camera and gesture code itself is untouched — it only
+   * ever calls clampCamera/hasHorizontalRange/setZoom/applyCamera, all of
+   * which branch internally, so pan, pinch, momentum, rubber-banding and
+   * palm/pen rejection are reused exactly as they are for pages.
+   */
+  private readonly isBoard: boolean;
+  /** The board's single canvas, in board mode only. */
+  private board: BoardCanvas | null = null;
+  /** How far past its content a board can be panned, in board units — a board is unbounded, so this is what stops it drifting into empty space forever. */
+  private static readonly BOARD_SLACK = 1200;
   /** Resting clearance above page 1, in screen px — see refreshTopClearance, which keeps it in step with the dock's height. */
   private topClearance = TOP_GAP;
   /** Re-measures the dock once its open/close animation has finished — see dockHeightChanged. */
@@ -379,6 +395,7 @@ class NotebookView {
   constructor(root: HTMLElement, nb: Notebook) {
     this.root = root;
     this.nb = nb;
+    this.isBoard = nb.kind === 'board';
     this.aiMode = new AiMode(nb.id, {
       refreshPage: (pageId) => this.rebuildIfMounted(pageId),
       onActiveChanged: () => this.refreshAiControls(),
@@ -390,7 +407,7 @@ class NotebookView {
 
     this.buildChrome();
 
-    store.enforceTrailingBlank(this.nb.id);
+    if (!this.isBoard) store.enforceTrailingBlank(this.nb.id); // a board has no pages to keep a blank one after
     this.syncPages();
     // start fitted to the width on narrow screens, 100% otherwise — fit
     // against the first page's own width (a landscape-imported first page is
@@ -398,8 +415,16 @@ class NotebookView {
     // wait until here (pages actually built into cameraEl by syncPages, not
     // just buildChrome's own DOM scaffolding) since setZoom's own clamping
     // needs a real content height to clamp against.
-    const first = store.pagesOf(this.nb.id)[0];
-    this.setZoom(Math.min(1, (this.scrollEl.clientWidth - 24) / (first ? pageW(first) : PAGE_W)) || 1); // applyCamera() (called from within) also runs the first updateVisiblePages()
+    if (this.isBoard) {
+      // open on the board's content (or the origin, when it is empty) at 100%
+      const b = store.boardBounds(this.nb.id);
+      this.camera.x = b ? b.x + b.w / 2 - this.scrollEl.clientWidth / 2 : -this.scrollEl.clientWidth / 2;
+      this.camera.y = b ? b.y + b.h / 2 - this.scrollEl.clientHeight / 2 : -this.scrollEl.clientHeight / 2;
+      this.setZoom(1);
+    } else {
+      const first = store.pagesOf(this.nb.id)[0];
+      this.setZoom(Math.min(1, (this.scrollEl.clientWidth - 24) / (first ? pageW(first) : PAGE_W)) || 1); // applyCamera() (called from within) also runs the first updateVisiblePages()
+    }
 
     this.onKey = (e) => {
       if (!this.root.contains(this.scrollEl)) return;
@@ -444,6 +469,7 @@ class NotebookView {
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
       this.stopMomentum();
       this.stopQuality();
+      this.board?.unmount();
       if (this.dockSettleTimer) clearTimeout(this.dockSettleTimer);
       this.dockSettleTimer = null;
       this.destroyScrollbarThumb();
@@ -563,7 +589,11 @@ class NotebookView {
     paperBtn.append(icon('paper'));
     paperBtn.addEventListener('click', () => {
       if (Date.now() < this.paperMenuGuardUntil) return; // swallow the touch ghost-click right after a dismiss — see the field's own doc comment
-      const page = this.currentPageId ? store.pages.get(this.currentPageId) : undefined;
+      const page = this.isBoard
+        ? store.pages.get(`${this.nb.id}:0,0`) // the board's origin chunk holds its paper
+        : this.currentPageId
+          ? store.pages.get(this.currentPageId)
+          : undefined;
       if (page) this.openPaperMenu(page);
     });
 
@@ -582,7 +612,12 @@ class NotebookView {
     // — undo/redo used to live in the right zone; now that they're in the
     // dock's top row instead, this keeps the bar from reading lopsided.
     const rightGroup = el('div', { class: 'nb-appbar__right' });
-    rightGroup.append(this.aiToggleBtn, this.aiSendBtn, this.splitBtn, importBtn, exportBtn, pagesBtn, paperBtn);
+    // A board has no page list to manage, and image/PDF import plus export
+    // land in later phases — so those buttons are left out entirely rather
+    // than shown doing nothing. Split stays: a board can host a reference
+    // pane exactly like a notebook can.
+    if (this.isBoard) rightGroup.append(this.splitBtn, paperBtn);
+    else rightGroup.append(this.aiToggleBtn, this.aiSendBtn, this.splitBtn, importBtn, exportBtn, pagesBtn, paperBtn);
     bar.append(back, this.titleEl, rightGroup);
     this.appBarRightGroup = rightGroup;
 
@@ -697,8 +732,15 @@ class NotebookView {
    */
   private applyCamera(): void {
     const { x, y, zoom } = this.camera;
-    this.cameraEl.style.transform = `scale(${zoom}) translate(${-x}px, ${-y}px)`;
     this.scrollEl.style.setProperty('--zoom', String(zoom));
+    if (this.isBoard) {
+      // A board draws the camera into its own canvas transform rather than
+      // moving a DOM layer, so there is nothing to transform here — just ask
+      // for a frame. Everything else below is page chrome a board has none of.
+      this.board?.schedule();
+      return;
+    }
+    this.cameraEl.style.transform = `scale(${zoom}) translate(${-x}px, ${-y}px)`;
     this.repositionScrollbarThumb();
     this.overlay.update();
     this.repositionCallout();
@@ -815,6 +857,7 @@ class NotebookView {
 
   /** Clamps horizontally against the page content's own world-space bounds (not a fixed 0, which only happens to be correct at 100% zoom) — once zoomed in far enough that a page renders wider than the viewport, panning across it needs a real, positive-or-negative range either side of 0. Narrower than the viewport (the common case): centres it exactly instead of leaving any slack to pan into. */
   private clampCamera(x: number, y: number): { x: number; y: number } {
+    if (this.isBoard) return this.clampBoard(x, y);
     const viewW = this.scrollEl.clientWidth;
     const z = this.camera.zoom;
     const { left, right } = this.contentWorldXBounds();
@@ -826,8 +869,40 @@ class NotebookView {
 
   /** Whether the horizontal axis has any real pan range at all — false in the common case (page narrower than the viewport), where clampCamera above collapses left/right to one fixed point rather than a genuine [min, max]. The soft-clamp paths (one-finger rubber-band, pinch pan, momentum) use this to skip their elastic drag-then-spring-back treatment entirely on that axis: with no range, there's no edge to overscroll, so it should just stay put instead of drifting and snapping back. */
   private hasHorizontalRange(): boolean {
+    // A board pans in all four directions by definition, so the soft-clamp
+    // paths must never collapse its x axis the way they do for a page column
+    // narrower than the viewport.
+    if (this.isBoard) return true;
     const { left, right } = this.contentWorldXBounds();
     return right - left > this.scrollEl.clientWidth / this.camera.zoom;
+  }
+
+  /**
+   * A board's pan bounds. Nothing here is page-derived: the extent comes from
+   * the store's spatial index (`boardBounds`), not from measuring DOM, and
+   * both axes are treated the same — there is no top clearance to rest page 1
+   * against and no content height to pin the bottom to.
+   *
+   * The content box is grown by BOARD_SLACK on every side and by a viewport,
+   * so you can always pan past what you have drawn to reach fresh space —
+   * which on an infinite canvas is the point — while still having something
+   * for the rubber band to spring back against instead of drifting forever.
+   * An empty board clamps around the origin.
+   */
+  private clampBoard(x: number, y: number): { x: number; y: number } {
+    const z = this.camera.zoom || 1;
+    const viewW = this.scrollEl.clientWidth / z;
+    const viewH = this.scrollEl.clientHeight / z;
+    const b = store.boardBounds(this.nb.id) ?? { x: 0, y: 0, w: 0, h: 0 };
+    const slack = NotebookView.BOARD_SLACK;
+    const minX = b.x - slack - viewW;
+    const maxX = b.x + b.w + slack;
+    const minY = b.y - slack - viewH;
+    const maxY = b.y + b.h + slack;
+    return {
+      x: clamp(x, minX, Math.max(minX, maxX - viewW)),
+      y: clamp(y, minY, Math.max(minY, maxY - viewH)),
+    };
   }
 
   /**
@@ -847,15 +922,17 @@ class NotebookView {
     const wx = sx / this.camera.zoom + this.camera.x;
     const wy = sy / this.camera.zoom + this.camera.y;
     this.camera.zoom = next;
-    this.refreshTopClearance(); // the label's scaled height, and so the clearance, moves with the zoom
+    if (!this.isBoard) this.refreshTopClearance(); // the label's scaled height, and so the clearance, moves with the zoom
     const clamped = this.clampCamera(wx - sx / next, wy - sy / next);
     this.camera.x = clamped.x;
     this.camera.y = clamped.y;
     this.refreshAutoColors(); // the size dot previews at the on-screen stroke width
-    for (const pc of this.pcByPage.values()) pc.zoomChanged(); // a pending line's handles stay screen-sized
-    this.layoutScrollbarThumb(); // zoom changes the thumb's size/range, not just its position
+    if (!this.isBoard) {
+      for (const pc of this.pcByPage.values()) pc.zoomChanged(); // a pending line's handles stay screen-sized
+      this.layoutScrollbarThumb(); // zoom changes the thumb's size/range, not just its position
+    }
     this.applyCamera();
-    this.settleQuality(); // ...and, once it stops moving, the resolution pages are rasterised at
+    if (!this.isBoard) this.settleQuality(); // ...and, once it stops moving, the resolution pages are rasterised at
   }
 
   // ---------------------------------------------------------------- quality
@@ -1407,6 +1484,9 @@ class NotebookView {
    * own drag uses.
    */
   private bindScrollbarThumb(): void {
+    // A board pans in two axes with no fixed extent, so a one-axis thumb would
+    // misrepresent it; phase 1 simply has none.
+    if (this.isBoard) return;
     const s = this.scrollEl;
     const thumb = el('div', { class: 'nb-scrollbar-thumb' });
     document.body.append(thumb);
@@ -1887,16 +1967,22 @@ class NotebookView {
     // kept so applyAiToolbarLockdown can leave just this one enabled (and
     // colour it violet) while AI mode is on — see its own doc comment.
     this.penToolBtn = toolBtn('pen', 'pen', 'Pen') as HTMLButtonElement;
+    // Phase 1 boards ink, erase and pan — the selection/placement tools all
+    // assume a page to live on and land in a later phase, so the dock simply
+    // doesn't offer them rather than offering them broken.
+    const boardTools: ToolKind[] = ['pen', 'highlighter', 'eraser', 'hand'];
+    const offer = (kind: ToolKind, name: IconName, label: string): HTMLElement[] =>
+      !this.isBoard || boardTools.includes(kind) ? [toolBtn(kind, name, label)] : [];
     top.append(
       this.penToolBtn,
-      toolBtn('highlighter', 'highlighter', 'Highlighter'),
-      toolBtn('eraser', 'eraser', 'Eraser'),
-      toolBtn('lasso', 'lasso', 'Lasso select'),
-      toolBtn('text', 'text', 'Text'),
-      toolBtn('shapes', 'shapes', 'Shapes'),
-      toolBtn('tape', 'tape', 'Tape'),
-      toolBtn('laser', 'laser', 'Laser pointer'),
-      toolBtn('hand', 'hand', 'Hand — drag to pan with pen or mouse, like a finger'),
+      ...offer('highlighter', 'highlighter', 'Highlighter'),
+      ...offer('eraser', 'eraser', 'Eraser'),
+      ...offer('lasso', 'lasso', 'Lasso select'),
+      ...offer('text', 'text', 'Text'),
+      ...offer('shapes', 'shapes', 'Shapes'),
+      ...offer('tape', 'tape', 'Tape'),
+      ...offer('laser', 'laser', 'Laser pointer'),
+      ...offer('hand', 'hand', 'Hand — drag to pan with pen or mouse, like a finger'),
       el('span', { class: 'divider' })
     );
 
@@ -2995,6 +3081,15 @@ class NotebookView {
    * background are refreshed in place.
    */
   private syncPages(): void {
+    if (this.isBoard) {
+      // One canvas for the whole board, mounted once into the camera layer's
+      // own host. There is no page list to reconcile.
+      if (!this.board) {
+        this.board = new BoardCanvas(this.nb, this.camera, { onOp: (op) => this.pushOp(op) });
+        this.board.mount(this.scrollEl);
+      }
+      return;
+    }
     const pages = store.pagesOf(this.nb.id);
     const wanted = new Set(pages.map((p) => p.id));
 
@@ -3151,6 +3246,7 @@ class NotebookView {
    * change) and syncPages (page add/remove/reorder).
    */
   private updateVisiblePages(): void {
+    if (this.isBoard) return; // no page mount window on a board
     const viewH = this.scrollEl.clientHeight;
     // world units. The screen-px band is what keeps pop-in away, but it is
     // also capped in world terms so zooming out can't keep widening it — see
@@ -3289,6 +3385,7 @@ class NotebookView {
 
   /** Paper of the page currently in view, for resolving the "auto" ink token. */
   private currentPaper(): Paper {
+    if (this.isBoard) return store.boardPaper(this.nb.id);
     const current = this.currentPageId ? store.pages.get(this.currentPageId) : undefined;
     return current?.paper ?? store.pagesOf(this.nb.id)[0]?.paper ?? DEFAULT_PAPER;
   }
@@ -3366,9 +3463,15 @@ class NotebookView {
       },
     });
     confirmBtn.addEventListener('click', () => {
-      store.setPaper(page.id, draft, scope);
-      if (scope === 'all') for (const p of store.pagesOf(this.nb.id)) this.refreshPagePaper(p);
-      else this.refreshPagePaper(page);
+      if (this.isBoard) {
+        // one sheet, so there is no per-page/all distinction to make
+        store.setBoardPaper(this.nb.id, draft);
+        this.board?.paperChanged();
+      } else {
+        store.setPaper(page.id, draft, scope);
+        if (scope === 'all') for (const p of store.pagesOf(this.nb.id)) this.refreshPagePaper(p);
+        else this.refreshPagePaper(page);
+      }
       this.refreshAutoColors();
       modal.close();
     });
@@ -3390,6 +3493,7 @@ class NotebookView {
 
   /** Runs the "one trailing blank page" invariant; reconciles pages if it changed structure. */
   private enforceAndMaybeRerender(): void {
+    if (this.isBoard) return; // nothing to keep a blank page after
     if (store.enforceTrailingBlank(this.nb.id)) this.syncPages();
   }
 
@@ -3691,6 +3795,12 @@ class NotebookView {
 
   /** After undo/redo touched a page: drop any selection there (it may reference gone items) and repaint. */
   private rebuildIfMounted(pageId: string): void {
+    if (this.isBoard) {
+      // undo/redo and every other store edit land here; the board repaints
+      // wholesale rather than per page
+      this.board?.invalidate();
+      return;
+    }
     if (this.mounted.has(pageId)) this.pcByPage.get(pageId)?.refresh();
     // the split pane may be showing this same page read-only — it holds its
     // own PageView, which `pcByPage` knows nothing about
