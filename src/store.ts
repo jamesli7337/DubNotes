@@ -61,6 +61,15 @@ interface BoardIndex {
   cells: Map<string, Set<string>>;
   /** id -> the cells it was registered in, so a removal is exact */
   placed: Map<string, string[]>;
+  /**
+   * Item-exact union of every item's bounds — not cell-granular, so it is
+   * usable for zoom-to-fit as well as for clamping. Maintained incrementally:
+   * adding an item is a cheap union, while removing or moving one can *shrink*
+   * the box and so only marks it stale. The recompute is O(items) but happens
+   * once per mutation batch, not per read — and reads are per pan frame.
+   */
+  bounds: Rect | null;
+  boundsStale: boolean;
 }
 
 const byCreated = (a: PageItem, b: PageItem): number =>
@@ -599,7 +608,7 @@ class Store {
   private boardIndex(notebookId: string): BoardIndex {
     let idx = this.boards.get(notebookId);
     if (!idx) {
-      idx = { items: new Map(), cells: new Map(), placed: new Map() };
+      idx = { items: new Map(), cells: new Map(), placed: new Map(), bounds: null, boundsStale: false };
       this.boards.set(notebookId, idx);
     }
     return idx;
@@ -611,9 +620,26 @@ class Store {
    * resized" path: `unindexBoardItem` first, then re-file against fresh bounds.
    */
   private indexBoardItem(idx: BoardIndex, item: PageItem): void {
+    // A re-file (the item moved or resized) can shrink the board's extent, so
+    // it can only invalidate; a genuinely new item can only grow it, which is
+    // a union and needs no rescan.
+    const isRefile = idx.placed.has(item.id);
     this.unindexBoardItem(idx, item.id);
     idx.items.set(item.id, item);
-    const cells = cellsForRect(itemBounds(item));
+    const b = itemBounds(item);
+    if (isRefile) {
+      idx.boundsStale = true;
+    } else if (idx.bounds) {
+      const x1 = Math.max(idx.bounds.x + idx.bounds.w, b.x + b.w);
+      const y1 = Math.max(idx.bounds.y + idx.bounds.h, b.y + b.h);
+      idx.bounds.x = Math.min(idx.bounds.x, b.x);
+      idx.bounds.y = Math.min(idx.bounds.y, b.y);
+      idx.bounds.w = x1 - idx.bounds.x;
+      idx.bounds.h = y1 - idx.bounds.y;
+    } else if (!idx.boundsStale) {
+      idx.bounds = { ...b };
+    }
+    const cells = cellsForRect(b);
     idx.placed.set(item.id, cells);
     for (const key of cells) {
       const set = idx.cells.get(key);
@@ -633,7 +659,7 @@ class Store {
         if (!set.size) idx.cells.delete(key);
       }
     }
-    idx.placed.delete(id);
+    if (idx.placed.delete(id)) idx.boundsStale = true; // removing can shrink the box
     idx.items.delete(id);
   }
 
@@ -737,21 +763,26 @@ class Store {
    */
   boardBounds(notebookId: string): Rect | null {
     const idx = this.boards.get(notebookId);
-    if (!idx || !idx.cells.size) return null;
-    let x0 = Infinity;
-    let y0 = Infinity;
-    let x1 = -Infinity;
-    let y1 = -Infinity;
-    for (const key of idx.cells.keys()) {
-      const comma = key.indexOf(',');
-      const cx = Number(key.slice(0, comma));
-      const cy = Number(key.slice(comma + 1));
-      if (cx < x0) x0 = cx;
-      if (cy < y0) y0 = cy;
-      if (cx > x1) x1 = cx;
-      if (cy > y1) y1 = cy;
+    if (!idx) return null;
+    if (idx.boundsStale) {
+      idx.boundsStale = false;
+      idx.bounds = null;
+      let x0 = Infinity;
+      let y0 = Infinity;
+      let x1 = -Infinity;
+      let y1 = -Infinity;
+      for (const it of idx.items.values()) {
+        const b = itemBounds(it);
+        if (b.x < x0) x0 = b.x;
+        if (b.y < y0) y0 = b.y;
+        if (b.x + b.w > x1) x1 = b.x + b.w;
+        if (b.y + b.h > y1) y1 = b.y + b.h;
+      }
+      if (x0 !== Infinity) idx.bounds = { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
     }
-    return { x: x0 * BOARD_CELL, y: y0 * BOARD_CELL, w: (x1 - x0 + 1) * BOARD_CELL, h: (y1 - y0 + 1) * BOARD_CELL };
+    // a copy: the stored box is mutated in place as items are added, so
+    // handing out the reference would change under a caller that kept it
+    return idx.bounds ? { ...idx.bounds } : null;
   }
 
   /**

@@ -192,8 +192,7 @@ class NotebookView {
   private readonly isBoard: boolean;
   /** The board's single canvas, in board mode only. */
   private board: BoardCanvas | null = null;
-  /** How far past its content a board can be panned, in board units — a board is unbounded, so this is what stops it drifting into empty space forever. */
-  private static readonly BOARD_SLACK = 1200;
+
   /** Resting clearance above page 1, in screen px — see refreshTopClearance, which keeps it in step with the dock's height. */
   private topClearance = TOP_GAP;
   /** Re-measures the dock once its open/close animation has finished — see dockHeightChanged. */
@@ -803,6 +802,15 @@ class NotebookView {
    * rather than letting the dock cover it.
    */
   private dockHeightChanged(): void {
+    // The whole top-clearance mechanism exists to keep page 1 resting clear of
+    // the dock, and `settleTopClearance` re-pins the camera whenever
+    // `camera.y < 0`. A board has no page 1, and its `camera.y` is routinely
+    // negative (an empty board opens centred on the origin, at -viewH/2), so
+    // that re-pin snapped the view by hundreds of units on every tool switch —
+    // `renderTools` opens the options row, which lands here. `.nb-dock` is
+    // `position: fixed`, so it never changes `.nb-scroll`'s own box either:
+    // there is nothing about a dock height change a board needs to react to.
+    if (this.isBoard) return;
     this.settleTopClearance();
     // `.nb-dock` animates its options row in and out (`transition: gap 0.16s`),
     // so the height it reports right now is still the old one — settle again
@@ -878,30 +886,31 @@ class NotebookView {
   }
 
   /**
-   * A board's pan bounds. Nothing here is page-derived: the extent comes from
-   * the store's spatial index (`boardBounds`), not from measuring DOM, and
-   * both axes are treated the same — there is no top clearance to rest page 1
-   * against and no content height to pin the bottom to.
+   * A board's pan bounds: the item-exact content box (from the store, never
+   * from measuring DOM) grown by exactly one viewport on every side, so there
+   * is always a full screen of fresh space just past the outermost drawing —
+   * which on an infinite canvas is the point — and nothing beyond that, so a
+   * pan into the void still meets resistance and springs back rather than
+   * drifting forever.
    *
-   * The content box is grown by BOARD_SLACK on every side and by a viewport,
-   * so you can always pan past what you have drawn to reach fresh space —
-   * which on an infinite canvas is the point — while still having something
-   * for the rubber band to spring back against instead of drifting forever.
-   * An empty board clamps around the origin.
+   * Both axes are treated alike: no top clearance to rest page 1 against, no
+   * content height pinning the bottom. Because the margin is a viewport rather
+   * than a fixed distance, the reachable area grows as you zoom out, which is
+   * what makes "zoom out, pan, zoom in somewhere new" work. An empty board
+   * clamps around the origin.
    */
   private clampBoard(x: number, y: number): { x: number; y: number } {
     const z = this.camera.zoom || 1;
     const viewW = this.scrollEl.clientWidth / z;
     const viewH = this.scrollEl.clientHeight / z;
     const b = store.boardBounds(this.nb.id) ?? { x: 0, y: 0, w: 0, h: 0 };
-    const slack = NotebookView.BOARD_SLACK;
-    const minX = b.x - slack - viewW;
-    const maxX = b.x + b.w + slack;
-    const minY = b.y - slack - viewH;
-    const maxY = b.y + b.h + slack;
+    // camera.x may range from "content's left edge at the right of the screen"
+    // to "content's right edge at the left of the screen"
+    const minX = b.x - viewW;
+    const minY = b.y - viewH;
     return {
-      x: clamp(x, minX, Math.max(minX, maxX - viewW)),
-      y: clamp(y, minY, Math.max(minY, maxY - viewH)),
+      x: clamp(x, minX, Math.max(minX, b.x + b.w)),
+      y: clamp(y, minY, Math.max(minY, b.y + b.h)),
     };
   }
 
