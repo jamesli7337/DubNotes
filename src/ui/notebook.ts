@@ -896,14 +896,25 @@ class NotebookView {
    * Both axes are treated alike: no top clearance to rest page 1 against, no
    * content height pinning the bottom. Because the margin is a viewport rather
    * than a fixed distance, the reachable area grows as you zoom out, which is
-   * what makes "zoom out, pan, zoom in somewhere new" work. An empty board
-   * clamps around the origin.
+   * what makes "zoom out, pan, zoom in somewhere new" work. An empty board is
+   * not clamped at all — see below.
    */
   private clampBoard(x: number, y: number): { x: number; y: number } {
+    const b = store.boardBounds(this.nb.id);
+    // An empty board has no content to hang a limit off, and clamping to a
+    // degenerate box at the origin would fence a blank canvas into one screen
+    // before a single mark existed. Until the first item lands it is simply
+    // unbounded — pan anywhere, in any direction, with nothing to spring back
+    // against because there is no "back".
+    //
+    // The handover is jump-free for free: the first item is drawn *on screen*,
+    // so its bounds necessarily intersect the viewport, and "bounds intersect
+    // the viewport" is exactly the condition the box below permits. Wherever
+    // the camera is when that stroke is released, it is already legal.
+    if (!b) return { x, y };
     const z = this.camera.zoom || 1;
     const viewW = this.scrollEl.clientWidth / z;
     const viewH = this.scrollEl.clientHeight / z;
-    const b = store.boardBounds(this.nb.id) ?? { x: 0, y: 0, w: 0, h: 0 };
     // camera.x may range from "content's left edge at the right of the screen"
     // to "content's right edge at the left of the screen"
     const minX = b.x - viewW;
@@ -2134,8 +2145,19 @@ class NotebookView {
       b.addEventListener('click', () => this.toggleGuide(kind));
       return b;
     };
-    top.append(guideBtn('ruler', 'ruler', 'Ruler'), guideBtn('protractor', 'protractor', 'Protractor'));
-    top.append(el('span', { class: 'divider' }), this.undoBtn, this.redoBtn);
+    // Both guides need a mounted PageCanvas to show themselves on (toggleGuide
+    // bails without one), so on a board they were rendered but inert — hidden
+    // there for the same reason the page manager and the scrollbar are. The
+    // trailing divider goes with them: with nothing between it and the one
+    // ending the tool block above, two would sit side by side.
+    if (!this.isBoard) {
+      top.append(
+        guideBtn('ruler', 'ruler', 'Ruler'),
+        guideBtn('protractor', 'protractor', 'Protractor'),
+        el('span', { class: 'divider' })
+      );
+    }
+    top.append(this.undoBtn, this.redoBtn);
     // a rebuild discards and recreates every button above — reapply the AI
     // lockdown (and the pen's violet colouring) to the fresh ones right away.
     this.applyAiToolbarLockdown();

@@ -1759,6 +1759,14 @@ select {
   inset: 0;
   display: block;
   touch-action: none;
+  /* Own compositing layer. The dock is `position: fixed` directly over this
+     canvas and rebuilds both its rows on every tool switch; without this the
+     canvas shares the dock's paint layer, so that rebuild re-rasterises the
+     full-viewport canvas underneath it (on a DPR-2 iPad, ~2048x2732 device
+     px) purely to repaint a few dozen px of toolbar. `.nb-camera` has had the
+     same hint for the page view since the camera rewrite — this gives a board
+     the layer a page notebook already had. */
+  will-change: transform;
 }
 
 /* --pw/--ph: this page's own size (page units), set inline per page-wrap
