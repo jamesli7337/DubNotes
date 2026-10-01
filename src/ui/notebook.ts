@@ -104,13 +104,20 @@ const MOUNT_MARGIN_MAX = 1400;
 const MAX_MOUNTED_PAGES = 5;
 /**
  * Total canvas backing-store budget across every mounted page, in device
- * pixels (~160 MB at 4 bytes each). Each page holds *two* canvases (cache and
+ * pixels (~80 MB at 4 bytes each). Each page holds *two* canvases (cache and
  * view), so the per-page share is halved; canvasPixelFactor's own per-canvas
- * ceiling still applies on top. iPad Safari discards canvases well before its
- * nominal limit, so this is set to leave plenty of room for the split pane,
- * the drag-preview surface and page thumbnails alongside it.
+ * ceiling (MAX_AREA, in const.ts) still applies on top. iPad Safari discards
+ * canvases well before its nominal limit, so this is set to leave plenty of
+ * room for the split pane, the drag-preview surface and page thumbnails
+ * alongside it.
+ *
+ * Halved from 40e6 together with MAX_AREA — see that constant for the
+ * reasoning, the sharpness crossover, and the next rung down (10e6 here).
+ * When this term binds it caps the total exactly: pageQuality solves for
+ * `2 * area * pf^2 = PAGE_PIXEL_BUDGET`, so a full mount window of five pages
+ * lands on 20e6 device px however far out the camera is.
  */
-const PAGE_PIXEL_BUDGET = 40e6;
+const PAGE_PIXEL_BUDGET = 20e6;
 /**
  * Screen-px gap left between the dock's bottom edge and the top of page 1 when
  * the notebook is scrolled all the way up.
@@ -3583,6 +3590,7 @@ class NotebookView {
     const active = this.aiMode.isActive();
     if (active) this.sizePopover?.close(); // its trigger is about to be disabled too
     this.penToolBtn?.classList.toggle('tool--ai', active);
+    this.eraserToolBtn?.classList.toggle('tool--ai', active);
     for (const b of this.toolsTopEl.querySelectorAll('button')) {
       if (b === this.penToolBtn || b === this.eraserToolBtn || b === this.undoBtn || b === this.redoBtn) continue;
       (b as HTMLButtonElement).disabled = active;

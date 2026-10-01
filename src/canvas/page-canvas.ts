@@ -486,13 +486,24 @@ export class PageCanvas implements ItemSurface {
       this.paintItem(c, it, pending?.has(it.id) ? PENDING_OPACITY : 1);
     }
     this.blit();
-    // blit() above only repaints the committed-items cache, not the overlay
-    // pass that draws the active lasso selection's decorative outline (see
-    // frame()) — without this, that outline vanished the instant any rebuild
-    // ran (e.g. right when a drag/resize/rotate ends), even though the
-    // selection itself was still active. Scheduling a frame keeps it drawn
-    // through every rebuild, not just while a gesture is still in flight.
-    if (this.lastLassoPath) this.schedule();
+    // blit() above repaints only the committed-items cache. Everything that
+    // lives on the *view* layer instead is painted by frame(), and a rebuild
+    // wipes all of it off the screen unless a frame is scheduled to put it
+    // back — even though every one of these is still live:
+    //
+    //  - the lasso selection's decorative outline (the original case: it
+    //    vanished the instant any rebuild ran, e.g. as a drag/resize ended);
+    //  - a pending line-snap and its endpoint handles, plus the ghosted cue
+    //    shown partway through the hold — these are deliberately not in the
+    //    store yet, so the cache knows nothing about them;
+    //  - the stroke currently in flight;
+    //  - anything hiddenIds() is holding out of the cache for the view to
+    //    draw instead: an item mid-drag, mid-text-edit, or partially erased.
+    //
+    // A rebuild is not rare while those are live — a settled-zoom
+    // re-rasterise, a paper change, a cross-page refreshPage, or an image or
+    // PDF page finishing its async load all land here.
+    if (this.lastLassoPath || this.lineEdit || this.pendingFit || this.live.length || this.hiddenIds()) this.schedule();
   }
 
   private paintItem(ctx: CanvasRenderingContext2D, it: PageItem, opacity = 1): void {
@@ -854,7 +865,23 @@ export class PageCanvas implements ItemSurface {
           // input jitter during an otherwise-still hold) can't by itself
           // read as real movement and restart the whole hold-still timer
           const moved = trailMoved(this.live, pt);
-          this.live.push(this.snapped(pt));
+          const next = this.snapped(pt);
+          // A pen held still still delivers events — at Pencil rate ~120 a
+          // second, each coalescing several more. Appending every one of them
+          // piled thousands of coincident points onto a stroke that had
+          // stopped growing: committed to the store for good, and re-rendered
+          // through perfect-freehand on every later rebuild of that page.
+          // (Measured: a 9s hold stored 391 points for ~31 points of actual
+          // drawing, growing 1:1 with events.) Overwriting the last point
+          // instead keeps the stroke's end exactly where the pen is, so the
+          // shape is the same one it would have been, while bounding what a
+          // hold can add. `moved` is the same trailing-average test the hold
+          // itself uses, so a point is only ever collapsed when the hold
+          // agrees the pen is stationary; a genuinely slow stroke drifts past
+          // that threshold and appends as before. Never collapses into the
+          // press point itself, which has to survive as the stroke's start.
+          if (!moved && this.live.length > 1) this.live[this.live.length - 1] = next;
+          else this.live.push(next);
           if (this.shapeMode && moved) {
             if (this.pendingFit) {
               // translucent cue: keep tracking the pen so the ghost's length and

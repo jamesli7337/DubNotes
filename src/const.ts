@@ -38,7 +38,22 @@ export function pageH(page: Page): number {
  * slightly blurry page beats a blank one.
  */
 const MAX_SIDE = 4096;
-const MAX_AREA = 12e6;
+/**
+ * Halved from 12e6, which a page zoomed past ~1.9x sat exactly on: 3047x3939
+ * per canvas, twice that per page (cache + view) — 96 MB of backing store for
+ * a single mounted page, which is more than iPad Safari will reliably hand
+ * back and hold onto. At 6e6 the same page asks for 2154x2785, 48 MB a page.
+ *
+ * Costs nothing at or below 100% zoom, where DPR alone is still the binding
+ * term; above ~1.31x zoom ink is rasterised at this cap rather than at the
+ * zoom (see the note on canvasPixelFactor's own return).
+ *
+ * NEXT RUNG DOWN, if 6e6 still cuts: 3e6 here and 10e6 for PAGE_PIXEL_BUDGET
+ * in ui/notebook.ts — 1523x1969 per canvas, 24 MB a page, 40 MB total. Change
+ * the two together; they bound different things (per canvas vs. across the
+ * whole mount window) and lowering only one leaves the other binding.
+ */
+const MAX_AREA = 6e6;
 
 /**
  * Backing-store pixels per laid-out CSS pixel for a `w × h` (CSS px) canvas:
