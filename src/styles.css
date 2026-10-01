@@ -1928,6 +1928,22 @@ select {
 .ai-toggle.active:hover {
   color: #6d28d9;
 }
+/* Mind-map mode (boards only): a persistent on/off switch, not an action, so
+   it takes the same filled treatment the dock gives the active tool rather
+   than the AI toggle's tint — violet is reserved for AI. Without a rule of its
+   own the toggle would paint nothing at all: `.iconbtn` has no `.active`
+   state. */
+.mindmap-toggle.active {
+  background: var(--primary-container);
+  color: var(--on-primary);
+}
+/* .iconbtn:hover:not(:disabled) is the more specific selector, so on hover it
+   would otherwise drop the toggle back to the default tint — the same guard
+   .ai-toggle.active:hover needs. */
+.mindmap-toggle.active:hover {
+  background: var(--primary-container);
+  color: var(--on-primary);
+}
 /* the send button always matches the AI accent (AI_COLOR in ai-mode.ts) rather
    than the default .iconbtn tint, since it only ever appears while AI mode is
    active on the current page. */

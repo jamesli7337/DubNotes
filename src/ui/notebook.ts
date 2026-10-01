@@ -634,10 +634,15 @@ class NotebookView {
       // Mind-map mode: one switch for the whole board, remembered per board
       // (see mindMapEnabled). Boards only — a paged notebook has no bubbles,
       // so the button isn't built at all there rather than shown doing nothing.
+      // `.mindmap-toggle` carries the on-state styling: a bare `.iconbtn` has
+      // no `.active` rule of its own, so without this the class the toggle
+      // flips would paint nothing and the button would read as dead (the AI
+      // toggle carries `.ai-toggle` for exactly the same reason).
       this.mindMapBtn = el('button', {
-        class: 'iconbtn',
+        class: 'iconbtn mindmap-toggle',
         title: 'Mind map',
         'aria-label': 'Mind map',
+        'aria-pressed': 'false',
       }) as HTMLButtonElement;
       this.mindMapBtn.append(icon('mindmap'));
       this.mindMapBtn.addEventListener('click', () => {
