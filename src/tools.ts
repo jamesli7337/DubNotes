@@ -3,6 +3,19 @@ import { clamp } from './util';
 
 export type ToolKind = 'pen' | 'highlighter' | 'eraser' | 'lasso' | 'text' | 'shapes' | 'tape' | 'laser' | 'hand';
 
+/** Every tool the dock can show, in the order a fresh install puts them in. Also the source of truth for repairing a stored order (see cleanToolOrder). */
+export const TOOL_ORDER: ToolKind[] = [
+  'pen',
+  'highlighter',
+  'eraser',
+  'lasso',
+  'text',
+  'shapes',
+  'tape',
+  'laser',
+  'hand',
+];
+
 /** What the Shapes tool places on a drag. Lines are the pen's business (hold-to-snap), not this tool's. */
 export type PlacedShape = 'rect' | 'ellipse' | 'arrow' | 'triangle';
 export const PLACED_SHAPES: PlacedShape[] = ['rect', 'ellipse', 'triangle', 'arrow'];
@@ -90,6 +103,8 @@ interface ToolState {
    */
   penDeletedPresets: string[];
   hiDeletedPresets: string[];
+  /** The dock's tool buttons in on-screen order — drag-to-reorder writes this. */
+  toolOrder: ToolKind[];
 }
 
 const KEY = 'noteapp.tools';
@@ -107,6 +122,7 @@ const DEFAULTS: ToolState = {
   hiSwatches: [...HI_COLORS],
   penDeletedPresets: [],
   hiDeletedPresets: [],
+  toolOrder: [...TOOL_ORDER],
 };
 
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -192,6 +208,34 @@ export function setSwatchOrder(tool: 'pen' | 'highlighter', order: string[]): vo
   toolState[key] = order;
 }
 
+/** Drops anything that isn't a tool (or is a duplicate), then appends any tool the stored order predates, so a newly added one still shows up. */
+function cleanToolOrder(v: unknown): ToolKind[] {
+  const out: ToolKind[] = [];
+  if (Array.isArray(v)) {
+    for (const k of v) {
+      if (typeof k === 'string' && (TOOL_ORDER as string[]).includes(k) && !out.includes(k as ToolKind)) {
+        out.push(k as ToolKind);
+      }
+    }
+  }
+  for (const k of TOOL_ORDER) if (!out.includes(k)) out.push(k);
+  return out;
+}
+
+/**
+ * Commits a reordering of the tool row. `order` only has to hold the tools
+ * that were on screen: each listed tool is dealt back into the slots those
+ * tools already occupied, so any tool the dock is currently hiding (see the
+ * board filter in renderTools) keeps its own position instead of being
+ * dropped from the order entirely.
+ */
+export function setToolOrder(order: ToolKind[]): void {
+  const moving = new Set(order);
+  if (order.length !== moving.size || order.some((k) => !toolState.toolOrder.includes(k))) return;
+  let i = 0;
+  toolState.toolOrder = toolState.toolOrder.map((k) => (moving.has(k) ? order[i++] : k));
+}
+
 /** Brings a deleted preset back, appended to the end of the swatch row. */
 export function restorePreset(tool: 'pen' | 'highlighter', color: string): void {
   const dKey = deletedKey(tool);
@@ -242,6 +286,7 @@ function load(): ToolState {
   st.hiSwatches = foldLegacyCustoms(cleanSwatches(st.hiSwatches, 'highlighter'), 'highlighter', legacy.customHi);
   st.penDeletedPresets = cleanDeletedPresets(st.penDeletedPresets, 'pen');
   st.hiDeletedPresets = cleanDeletedPresets(st.hiDeletedPresets, 'highlighter');
+  st.toolOrder = cleanToolOrder(st.toolOrder);
   if (!st.penSwatches.includes(st.penColor)) st.penColor = st.penSwatches[0];
   if (!st.hiSwatches.includes(st.hiColor)) st.hiColor = st.hiSwatches[0];
   if (!st.penSwatches.includes(st.textColor)) st.textColor = st.penSwatches[0];

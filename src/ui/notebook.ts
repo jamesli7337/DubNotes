@@ -18,6 +18,7 @@ import {
   restorePreset,
   saveToolState,
   setSwatchOrder,
+  setToolOrder,
   sizeRange,
   toolState,
   type EraserMode,
@@ -169,6 +170,8 @@ class NotebookView {
   private appBarRightGroup!: HTMLElement;
   /** The dock's own Pen button — the one tool button AI mode leaves enabled (and turns violet); set fresh by renderTools each rebuild. */
   private penToolBtn!: HTMLButtonElement;
+  /** The dock's own Eraser button — also left enabled by AI mode's lockdown; set fresh by renderTools each rebuild. */
+  private eraserToolBtn!: HTMLButtonElement;
   /**
    * The single camera: `x`/`y` (world-space, pre-camera-transform "page-wrap
    * layout" units — see geom.ts's own Camera doc comment) is the point
@@ -1168,10 +1171,19 @@ class NotebookView {
         // every new press starts clean, whatever its pointer type — see
         // clearDismissingPress for the flagged presses that never reach a canvas
         for (const pc of this.pcByPage.values()) pc.clearDismissingPress();
+        this.board?.clearDismissingPress();
         if (e.pointerType !== 'pen' || this.isBlockedTouch(e)) return;
         const target = e.target as HTMLElement;
         if (target.closest('.sel-box')) return; // inside - handled by SelectionOverlay's own onDown
         let dismissed = this.overlayPc ? this.overlayPc.clearSelection() : false;
+        if (this.isBoard) {
+          // one surface, so there is no "some other page's line" to settle —
+          // the board's own onDown handles its pending line directly. All this
+          // has to do is stop the press that cleared a selection from also
+          // drawing, which on a page is what markDismissingPress buys.
+          if (dismissed) this.board?.markDismissingPress();
+          return;
+        }
         const samePageId = (target.closest('.page') as HTMLElement | null)?.dataset.pageId ?? null;
         for (const [pageId, pc] of this.pcByPage) {
           // another page's adjustable line counts as dismissed state too, so
@@ -1987,8 +1999,29 @@ class NotebookView {
         title: label,
         'aria-label': label,
       });
+      b.dataset.tool = kind; // marks the reorderable buttons — the ruler/protractor below share `.tool` but aren't draggable
       b.append(icon(name));
+      // long-press to drag this tool to a new slot in the row; unlike the
+      // colour swatches there's nothing to drop it on, so a drop outside the
+      // dock just snaps it back
+      const drag = this.enableReorderDrag({
+        container: top,
+        item: b,
+        items: () => Array.from(top.querySelectorAll<HTMLElement>('.tool[data-tool]')),
+        liftedClass: 'tool--lifted',
+        ghost: () => {
+          const g = el('div', { class: 'tool-ghost' });
+          g.append(icon(name));
+          return g;
+        },
+        commit: (order) => {
+          setToolOrder(order.map((e) => e.dataset.tool as ToolKind));
+          saveToolState();
+          this.renderTools();
+        },
+      });
       b.addEventListener('click', () => {
+        if (drag.tookClick()) return;
         if (toolState.kind === kind) {
           // re-tapping the already-active tool: eraser's icon doubles as its
           // mode dropdown (its own anchored popover, toggled the same way);
@@ -2005,28 +2038,44 @@ class NotebookView {
       });
       return b;
     };
-    // kept so applyAiToolbarLockdown can leave just this one enabled (and
-    // colour it violet) while AI mode is on — see its own doc comment.
-    this.penToolBtn = toolBtn('pen', 'pen', 'Pen') as HTMLButtonElement;
-    // Everything except the laser, whose trail is drawn by PageCanvas's own
-    // frame loop and has no board equivalent yet — offered nowhere rather than
-    // offered broken. The guide tools are filtered separately below, for the
-    // same reason (they need a mounted PageCanvas to attach to).
-    const boardTools: ToolKind[] = ['pen', 'highlighter', 'eraser', 'lasso', 'text', 'shapes', 'tape', 'hand'];
-    const offer = (kind: ToolKind, name: IconName, label: string): HTMLElement[] =>
-      !this.isBoard || boardTools.includes(kind) ? [toolBtn(kind, name, label)] : [];
-    top.append(
-      this.penToolBtn,
-      ...offer('highlighter', 'highlighter', 'Highlighter'),
-      ...offer('eraser', 'eraser', 'Eraser'),
-      ...offer('lasso', 'lasso', 'Lasso select'),
-      ...offer('text', 'text', 'Text'),
-      ...offer('shapes', 'shapes', 'Shapes'),
-      ...offer('tape', 'tape', 'Tape'),
-      ...offer('laser', 'laser', 'Laser pointer'),
-      ...offer('hand', 'hand', 'Hand — drag to pan with pen or mouse, like a finger'),
-      el('span', { class: 'divider' })
-    );
+    // Every tool a board has a surface for. Only the ruler and protractor are
+    // left out, filtered separately below — they attach to a mounted
+    // PageCanvas, which a board has none of.
+    const boardTools: ToolKind[] = [
+      'pen',
+      'highlighter',
+      'eraser',
+      'lasso',
+      'text',
+      'shapes',
+      'tape',
+      'laser',
+      'hand',
+    ];
+    const TOOL_BUTTONS: Record<ToolKind, { icon: IconName; label: string }> = {
+      pen: { icon: 'pen', label: 'Pen' },
+      highlighter: { icon: 'highlighter', label: 'Highlighter' },
+      eraser: { icon: 'eraser', label: 'Eraser' },
+      lasso: { icon: 'lasso', label: 'Lasso select' },
+      text: { icon: 'text', label: 'Text' },
+      shapes: { icon: 'shapes', label: 'Shapes' },
+      tape: { icon: 'tape', label: 'Tape' },
+      laser: { icon: 'laser', label: 'Laser pointer' },
+      hand: { icon: 'hand', label: 'Hand — drag to pan with pen or mouse, like a finger' },
+    };
+    // built in the user's own order (drag-to-reorder writes toolState.toolOrder)
+    const built = new Map<ToolKind, HTMLElement>();
+    for (const kind of toolState.toolOrder) {
+      if (this.isBoard && !boardTools.includes(kind)) continue;
+      const spec = TOOL_BUTTONS[kind];
+      built.set(kind, toolBtn(kind, spec.icon, spec.label));
+    }
+    // kept so applyAiToolbarLockdown can leave just these two enabled (and
+    // colour the pen violet) while AI mode is on — see its own doc comment.
+    // Both are in boardTools, so neither lookup is ever empty.
+    this.penToolBtn = built.get('pen') as HTMLButtonElement;
+    this.eraserToolBtn = built.get('eraser') as HTMLButtonElement;
+    top.append(...built.values(), el('span', { class: 'divider' }));
 
     switch (toolState.kind) {
       case 'eraser': {
@@ -2368,16 +2417,10 @@ class NotebookView {
     tool?: 'pen' | 'highlighter'
   ): HTMLElement {
     const swatches = el('div', { class: 'dock-group' });
-    const HOLD_MS = 350;
-    const SLOP = 6;
-    /** How long a displaced swatch takes to slide into its new slot. Short enough that the gap keeps up with a quick drag. */
-    const SLIDE_MS = 140;
     // both built below when `tool` is set; the trash is only in the DOM while a
     // swatch is actually being dragged, and sits immediately before the "+"
     let trash: HTMLElement | null = null;
     let plus: HTMLElement | null = null;
-    /** Shared by the whole row: holds `is-reordering` on past the end of a drag so the gap can close, and is cleared if another drag starts first. */
-    let slideTimer: ReturnType<typeof setTimeout> | null = null;
 
     const add = (c: string, index: number): void => {
       const isAuto = c === AUTO_COLOR;
@@ -2399,193 +2442,50 @@ class NotebookView {
         paint();
         this.colorRefreshers.push(paint);
       }
-      let suppressClick = false;
+      const drag = tool
+        ? this.enableReorderDrag({
+            container: swatches,
+            item: s,
+            items: () => Array.from(swatches.querySelectorAll<HTMLElement>('.swatch[data-color]')),
+            liftedClass: 'swatch--lifted',
+            ghost: () => {
+              const g = el('div', { class: 'swatch-ghost' + (isAuto ? ' swatch--auto' : '') });
+              g.style.background = isAuto ? s.style.background : c;
+              return g;
+            },
+            commit: (order) => {
+              setSwatchOrder(tool, order.map((e) => e.dataset.color ?? ''));
+              saveToolState();
+              this.renderTools();
+            },
+            // the dotted ring marks whichever colour would land first, so
+            // during a drag it belongs to the swatch heading for slot 0
+            onPreviewOrder: (order) => {
+              const first = (order ?? Array.from(swatches.querySelectorAll<HTMLElement>('.swatch[data-color]')))[0];
+              for (const e of swatches.querySelectorAll<HTMLElement>('.swatch[data-color]')) {
+                e.classList.toggle('swatch--primary', e === first);
+              }
+            },
+            dropZone: {
+              el: () => trash,
+              place: () => {
+                if (trash && plus) swatches.insertBefore(trash, plus); // only the "+" shifts over, so the measured slots are unaffected
+              },
+              // a refused drop (the primary) changes nothing, which the caller
+              // reads as "handled" — so the swatch just snaps back
+              drop: () => {
+                if (colors[0] === c) return;
+                removeSwatch(tool, c);
+                saveToolState();
+                this.renderTools();
+              },
+            },
+          })
+        : null;
       s.addEventListener('click', () => {
-        if (suppressClick) {
-          suppressClick = false;
-          return;
-        }
+        if (drag?.tookClick()) return;
         onPick(c);
       });
-
-      if (tool) {
-        let holdTimer: ReturnType<typeof setTimeout> | null = null;
-        let downX = 0;
-        let downY = 0;
-        let pointerId: number | null = null;
-        let ghost: HTMLElement | null = null;
-
-        const clearHold = (): void => {
-          if (holdTimer != null) clearTimeout(holdTimer);
-          holdTimer = null;
-        };
-        const positionGhost = (x: number, y: number): void => {
-          if (ghost) {
-            ghost.style.left = `${x}px`;
-            ghost.style.top = `${y}px`;
-          }
-        };
-        const overTrash = (x: number, y: number): boolean => {
-          if (!trash?.isConnected) return false;
-          const r = trash.getBoundingClientRect();
-          return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
-        };
-        /**
-         * The row's slots, measured once when the drag arms: `center` is each
-         * swatch's layout centre (a scaled swatch — the active one — still
-         * reports its own centre, since a scale is about the origin), `pitch`
-         * the distance between neighbours.
-         *
-         * The preview below deliberately never touches the DOM. Re-inserting
-         * `s` to reorder it would implicitly release the pointer capture taken
-         * on pointerdown — the capture is dropped the moment the element
-         * leaves the document, even for the instant `insertBefore` takes — and
-         * the rest of the gesture would then be delivered to whatever happened
-         * to be under the pointer instead. So the gap is opened purely by
-         * sliding transforms, and the layout the hit test reads stays fixed
-         * for the whole drag, which also leaves it nothing to oscillate
-         * against.
-         */
-        let slots: { el: HTMLElement; center: number }[] = [];
-        let pitch = 0;
-        let fromIdx = 0;
-        let toIdx = 0;
-        const swatchEls = (): HTMLElement[] => Array.from(swatches.querySelectorAll<HTMLElement>('.swatch[data-color]'));
-        /** The swatches in the order the current preview would commit. */
-        const previewed = (): HTMLElement[] => {
-          const rest = slots.map((sl) => sl.el).filter((e) => e !== s);
-          rest.splice(toIdx, 0, s);
-          return rest;
-        };
-        /** Opens the gap at the slot the pointer is over: `s` slides to it, everything it displaces slides one slot the other way. */
-        const previewDropAt = (x: number): void => {
-          if (slots.length < 2 || !pitch) return;
-          const next = Math.max(0, Math.min(slots.length - 1, Math.round((x - slots[0].center) / pitch)));
-          if (next === toIdx) return;
-          toIdx = next;
-          slots.forEach((sl, i) => {
-            let dx = 0;
-            if (i === fromIdx) dx = slots[toIdx].center - slots[fromIdx].center;
-            else if (fromIdx < toIdx && i > fromIdx && i <= toIdx) dx = -pitch;
-            else if (toIdx < fromIdx && i >= toIdx && i < fromIdx) dx = pitch;
-            sl.el.style.setProperty('--slide', `${dx}px`);
-          });
-          // the dotted ring marks whichever colour would land first, so while a
-          // drag is previewing it belongs to the swatch heading for slot 0
-          const first = previewed()[0];
-          for (const sl of slots) sl.el.classList.toggle('swatch--primary', sl.el === first);
-        };
-        const startDrag = (): void => {
-          holdTimer = null; // the timer that called this has already fired — clearHold's clearTimeout would be a harmless no-op, but leaving the id set would make pointermove's "still waiting to arm" check below misfire
-          suppressClick = true;
-          s.classList.add('swatch--lifted');
-          if (trash && plus) swatches.insertBefore(trash, plus); // only the "+" shifts over, so the slots measured below are unaffected
-          if (slideTimer != null) clearTimeout(slideTimer);
-          slideTimer = null;
-          swatches.classList.add('is-reordering'); // turns on the slide transition for the duration
-          const els = swatchEls();
-          slots = els.map((e) => {
-            const r = e.getBoundingClientRect();
-            return { el: e, center: r.left + r.width / 2 };
-          });
-          pitch = slots.length > 1 ? slots[1].center - slots[0].center : 0;
-          fromIdx = els.indexOf(s);
-          toIdx = fromIdx;
-          ghost = el('div', { class: 'swatch-ghost' + (isAuto ? ' swatch--auto' : '') });
-          ghost.style.background = isAuto ? s.style.background : c;
-          document.body.append(ghost);
-          positionGhost(downX, downY);
-        };
-        /** Tears the drag down: the gap closes back up, and the dotted ring returns to the swatch that actually holds slot 0. */
-        const teardownDrag = (): void => {
-          s.classList.remove('swatch--lifted');
-          ghost?.remove();
-          ghost = null;
-          trash?.classList.remove('is-over');
-          trash?.remove();
-          slots.forEach((sl, i) => {
-            sl.el.style.setProperty('--slide', '0px');
-            sl.el.classList.toggle('swatch--primary', i === 0);
-          });
-          // the transition has to outlive the reset above so the gap closes
-          // smoothly; a commit rebuilds the row before this lands, which is
-          // just as well — there's nothing left to transition by then
-          slideTimer = setTimeout(() => {
-            swatches.classList.remove('is-reordering');
-            slideTimer = null;
-          }, SLIDE_MS);
-          // swallow the trailing `click` the browser may still send for this
-          // press, then clear the flag so it can never eat a later real tap
-          setTimeout(() => {
-            suppressClick = false;
-          }, 0);
-        };
-        const endDrag = (x: number, y: number): void => {
-          const droppedOnTrash = overTrash(x, y);
-          const dock = this.toolsEl.getBoundingClientRect();
-          const insideDock = x >= dock.left && x <= dock.right && y >= dock.top && y <= dock.bottom;
-          // whatever the preview was showing is exactly what commits
-          const order = previewed().map((e) => e.dataset.color ?? '');
-          const reordered = toIdx !== fromIdx;
-          teardownDrag(); // the measurements above are taken first — this removes the trash
-          if (droppedOnTrash) {
-            if (colors[0] === c) return; // the primary colour is never removed
-            removeSwatch(tool, c);
-            saveToolState();
-            this.renderTools();
-            return;
-          }
-          if (!insideDock || !reordered) return; // off the toolbar, or never left its slot: the gap just closes again
-          setSwatchOrder(tool, order);
-          saveToolState();
-          this.renderTools();
-        };
-
-        s.addEventListener('pointerdown', (e) => {
-          if (e.button !== 0) return;
-          downX = e.clientX;
-          downY = e.clientY;
-          pointerId = e.pointerId;
-          s.setPointerCapture(pointerId);
-          clearHold();
-          holdTimer = setTimeout(startDrag, HOLD_MS);
-        });
-        s.addEventListener('pointermove', (e) => {
-          if (holdTimer != null) {
-            if (Math.abs(e.clientX - downX) > SLOP || Math.abs(e.clientY - downY) > SLOP) clearHold();
-            return;
-          }
-          if (ghost) {
-            e.preventDefault();
-            positionGhost(e.clientX, e.clientY);
-            const onTrash = overTrash(e.clientX, e.clientY);
-            trash?.classList.toggle('is-over', onTrash);
-            if (!onTrash) previewDropAt(e.clientX); // aiming at the trash isn't aiming at a slot
-          }
-        });
-        const releaseCapture = (): void => {
-          clearHold();
-          if (pointerId != null) {
-            try {
-              s.releasePointerCapture(pointerId);
-            } catch {
-              /* already released */
-            }
-          }
-          pointerId = null;
-        };
-        s.addEventListener('pointerup', (e) => {
-          releaseCapture();
-          if (ghost) endDrag(e.clientX, e.clientY);
-        });
-        // the browser took the gesture over (a scroll/zoom pan, a system
-        // gesture): its coordinates are zeroed, so it can never be read as a
-        // drop — drop the preview and re-render the row back from state
-        s.addEventListener('pointercancel', () => {
-          releaseCapture();
-          if (ghost) teardownDrag();
-        });
-      }
       swatches.append(s);
     };
     colors.forEach(add);
@@ -2623,6 +2523,216 @@ class NotebookView {
       swatches.append(addBtn);
     }
     return swatches;
+  }
+
+  /**
+   * Long-press-to-reorder for one item of a dock row, shared by the colour
+   * swatches and the tool buttons.
+   *
+   * Holding an item for HOLD_MS arms a drag: the item dims in place, a ghost
+   * appended to `<body>` tracks the pointer (the row clips overflow — see
+   * `.nb-dock__row`'s doc comment — so the item itself can't float past it),
+   * and the row opens a gap wherever the drop would land. Dropping inside
+   * `.nb-dock` commits that order; dropping outside, or never leaving the
+   * starting slot, just closes the gap again.
+   *
+   * The preview deliberately never touches the DOM. Re-inserting the dragged
+   * item would implicitly release the pointer capture taken on pointerdown —
+   * capture is dropped the moment an element leaves the document, even for
+   * the instant `insertBefore` takes — and the rest of the gesture would then
+   * go to whatever happened to be under the pointer. So the gap is opened
+   * purely by sliding transforms, which also keeps the layout the hit test
+   * reads fixed for the whole drag, leaving it nothing to oscillate against.
+   *
+   * Returns `tookClick()`, which the caller must consult in its own click
+   * handler: the browser may still send a trailing `click` for the press that
+   * turned into a drag, and that must not read as a tap.
+   */
+  private enableReorderDrag(opts: {
+    /** The row the items sit in; carries `is-reordering` while a drag is live. */
+    container: HTMLElement;
+    /** The one item these listeners are for. */
+    item: HTMLElement;
+    /** Every reorderable item in the row, in DOM order (must include `item`). */
+    items: () => HTMLElement[];
+    /** Put on `item` for the duration of the drag. */
+    liftedClass: string;
+    /** Builds the element that tracks the pointer. */
+    ghost: () => HTMLElement;
+    /** Commits a finished reorder. */
+    commit: (order: HTMLElement[]) => void;
+    /** Called with the previewed order as it changes, and with null on teardown (meaning: back to the real DOM order). */
+    onPreviewOrder?: (order: HTMLElement[] | null) => void;
+    /** An extra target that consumes the drop instead of reordering — the swatch row's trash. */
+    dropZone?: { el: () => HTMLElement | null; place: () => void; drop: () => void };
+  }): { tookClick: () => boolean } {
+    const { container, item, items, liftedClass, ghost: makeGhost, commit, onPreviewOrder, dropZone } = opts;
+    const HOLD_MS = 350;
+    const SLOP = 6;
+    /** How long a displaced item takes to slide into its new slot. Short enough that the gap keeps up with a quick drag. */
+    const SLIDE_MS = 140;
+
+    let holdTimer: ReturnType<typeof setTimeout> | null = null;
+    let slideTimer: ReturnType<typeof setTimeout> | null = null;
+    let downX = 0;
+    let downY = 0;
+    let pointerId: number | null = null;
+    let ghost: HTMLElement | null = null;
+    let suppressClick = false;
+    /** Each item's layout centre, measured once when the drag arms (a scaled item still reports its own centre, since a scale is about the origin). */
+    let slots: { el: HTMLElement; center: number }[] = [];
+    let pitch = 0;
+    let fromIdx = 0;
+    let toIdx = 0;
+
+    const clearHold = (): void => {
+      if (holdTimer != null) clearTimeout(holdTimer);
+      holdTimer = null;
+    };
+    const positionGhost = (x: number, y: number): void => {
+      if (ghost) {
+        ghost.style.left = `${x}px`;
+        ghost.style.top = `${y}px`;
+      }
+    };
+    const overDropZone = (x: number, y: number): boolean => {
+      const z = dropZone?.el();
+      if (!z?.isConnected) return false;
+      const r = z.getBoundingClientRect();
+      return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+    };
+    /** The items in the order the current preview would commit. */
+    const previewed = (): HTMLElement[] => {
+      const rest = slots.map((sl) => sl.el).filter((e) => e !== item);
+      rest.splice(toIdx, 0, item);
+      return rest;
+    };
+    /** Opens the gap at the slot the pointer is over: the dragged item slides to it, everything it displaces slides one slot the other way. */
+    const previewDropAt = (x: number): void => {
+      if (slots.length < 2 || !pitch) return;
+      const next = Math.max(0, Math.min(slots.length - 1, Math.round((x - slots[0].center) / pitch)));
+      if (next === toIdx) return;
+      toIdx = next;
+      slots.forEach((sl, i) => {
+        let dx = 0;
+        if (i === fromIdx) dx = slots[toIdx].center - slots[fromIdx].center;
+        else if (fromIdx < toIdx && i > fromIdx && i <= toIdx) dx = -pitch;
+        else if (toIdx < fromIdx && i >= toIdx && i < fromIdx) dx = pitch;
+        sl.el.style.setProperty('--slide', `${dx}px`);
+      });
+      onPreviewOrder?.(previewed());
+    };
+    const startDrag = (): void => {
+      holdTimer = null; // the timer that called this has already fired — clearHold's clearTimeout would be a harmless no-op, but leaving the id set would make pointermove's "still waiting to arm" check below misfire
+      suppressClick = true;
+      item.classList.add(liftedClass);
+      dropZone?.place();
+      if (slideTimer != null) clearTimeout(slideTimer);
+      slideTimer = null;
+      container.classList.add('is-reordering'); // turns on the slide transition for the duration
+      const els = items();
+      slots = els.map((e) => {
+        const r = e.getBoundingClientRect();
+        return { el: e, center: r.left + r.width / 2 };
+      });
+      pitch = slots.length > 1 ? slots[1].center - slots[0].center : 0;
+      fromIdx = els.indexOf(item);
+      toIdx = fromIdx;
+      ghost = makeGhost();
+      document.body.append(ghost);
+      positionGhost(downX, downY);
+    };
+    /** Tears the drag down: the gap closes back up and the preview hooks are put back to the real order. */
+    const teardownDrag = (): void => {
+      item.classList.remove(liftedClass);
+      ghost?.remove();
+      ghost = null;
+      const z = dropZone?.el();
+      z?.classList.remove('is-over');
+      z?.remove();
+      for (const sl of slots) sl.el.style.setProperty('--slide', '0px');
+      onPreviewOrder?.(null);
+      // the transition has to outlive the reset above so the gap closes
+      // smoothly; a commit rebuilds the row before this lands, which is
+      // just as well — there's nothing left to transition by then
+      slideTimer = setTimeout(() => {
+        container.classList.remove('is-reordering');
+        slideTimer = null;
+      }, SLIDE_MS);
+      // swallow the trailing `click` the browser may still send for this
+      // press, then clear the flag so it can never eat a later real tap
+      setTimeout(() => {
+        suppressClick = false;
+      }, 0);
+    };
+    const endDrag = (x: number, y: number): void => {
+      const onZone = overDropZone(x, y);
+      const dock = this.toolsEl.getBoundingClientRect();
+      const insideDock = x >= dock.left && x <= dock.right && y >= dock.top && y <= dock.bottom;
+      // whatever the preview was showing is exactly what commits
+      const order = previewed();
+      const reordered = toIdx !== fromIdx;
+      teardownDrag(); // the measurements above are taken first — this removes the drop zone
+      if (onZone) {
+        dropZone?.drop();
+        return;
+      }
+      if (!insideDock || !reordered) return; // off the toolbar, or never left its slot: the gap just closes again
+      commit(order);
+    };
+    const releaseCapture = (): void => {
+      clearHold();
+      if (pointerId != null) {
+        try {
+          item.releasePointerCapture(pointerId);
+        } catch {
+          /* already released */
+        }
+      }
+      pointerId = null;
+    };
+
+    item.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      downX = e.clientX;
+      downY = e.clientY;
+      pointerId = e.pointerId;
+      item.setPointerCapture(pointerId);
+      clearHold();
+      holdTimer = setTimeout(startDrag, HOLD_MS);
+    });
+    item.addEventListener('pointermove', (e) => {
+      if (holdTimer != null) {
+        if (Math.abs(e.clientX - downX) > SLOP || Math.abs(e.clientY - downY) > SLOP) clearHold();
+        return;
+      }
+      if (ghost) {
+        e.preventDefault();
+        positionGhost(e.clientX, e.clientY);
+        const onZone = overDropZone(e.clientX, e.clientY);
+        dropZone?.el()?.classList.toggle('is-over', onZone);
+        if (!onZone) previewDropAt(e.clientX); // aiming at the drop zone isn't aiming at a slot
+      }
+    });
+    item.addEventListener('pointerup', (e) => {
+      releaseCapture();
+      if (ghost) endDrag(e.clientX, e.clientY);
+    });
+    // the browser took the gesture over (a scroll/zoom pan, a system gesture):
+    // its coordinates are zeroed, so it can never be read as a drop — close
+    // the gap and leave the order alone
+    item.addEventListener('pointercancel', () => {
+      releaseCapture();
+      if (ghost) teardownDrag();
+    });
+
+    return {
+      tookClick: () => {
+        if (!suppressClick) return false;
+        suppressClick = false;
+        return true;
+      },
+    };
   }
 
   // ------------------------------------------------------------ selection
@@ -3162,6 +3272,7 @@ class NotebookView {
           onEmptyLassoSelection: (s, frame) => this.showEmptyLassoCallout(s, frame),
           onTapeTap: (s, tapeId, frame) => this.showTapePopover(s, tapeId, frame),
           isAiActive: () => this.aiMode.isActive(),
+          onPendingLine: () => this.syncHistory(),
           showSelection: (s, frame, opts) => {
             this.overlayPc = s;
             // board items are already in world coordinates, so the overlay's
@@ -3443,24 +3554,24 @@ class NotebookView {
 
   /**
    * While AI mode is on, every toolbar/app-bar button is genuinely disabled
-   * (not just dimmed) except the pen, Undo/Redo, the AI toggle and the Send
-   * button — AI mode is meant to be a focused "just draw, undo/redo, and
-   * send" surface, not a place to also switch tools, insert images, manage
-   * pages, etc. `button:disabled` already renders greyed-out and inert (see
-   * styles.css), so this only needs to set the attribute on the right
-   * elements. Undo/redo are left alone here and handled by syncHistory
-   * instead (it already owns their disabled state the rest of the time), so
-   * they keep reflecting AiMode's own per-page canUndo/canRedo rather than
-   * being force-disabled like everything else. Reapplied on every dock
-   * rebuild too (renderTools), since that discards and recreates all of
-   * these as fresh elements.
+   * (not just dimmed) except the pen, Eraser, Undo/Redo, the AI toggle and
+   * the Send button — AI mode is meant to be a focused "just draw, erase,
+   * undo/redo, and send" surface, not a place to also switch tools, insert
+   * images, manage pages, etc. `button:disabled` already renders greyed-out
+   * and inert (see styles.css), so this only needs to set the attribute on
+   * the right elements. Undo/redo are left alone here and handled by
+   * syncHistory instead (it already owns their disabled state the rest of
+   * the time), so they keep reflecting AiMode's own per-page canUndo/canRedo
+   * rather than being force-disabled like everything else. Reapplied on
+   * every dock rebuild too (renderTools), since that discards and recreates
+   * all of these as fresh elements.
    */
   private applyAiToolbarLockdown(): void {
     const active = this.aiMode.isActive();
     if (active) this.sizePopover?.close(); // its trigger is about to be disabled too
     this.penToolBtn?.classList.toggle('tool--ai', active);
     for (const b of this.toolsTopEl.querySelectorAll('button')) {
-      if (b === this.penToolBtn || b === this.undoBtn || b === this.redoBtn) continue;
+      if (b === this.penToolBtn || b === this.eraserToolBtn || b === this.undoBtn || b === this.redoBtn) continue;
       (b as HTMLButtonElement).disabled = active;
     }
     for (const b of this.toolsOptionsEl.querySelectorAll('button')) {
@@ -3777,13 +3888,15 @@ class NotebookView {
     this.enforceAndMaybeRerender();
   }
 
-  /** Discards an adjustable line on whichever page still holds one; true if there was one. */
+  /** Discards an adjustable line on whichever surface still holds one; true if there was one. */
   private cancelPendingLine(): boolean {
+    if (this.board?.cancelLine()) return true;
     for (const pc of this.pcByPage.values()) if (pc.cancelLine()) return true;
     return false;
   }
 
   private hasPendingLine(): boolean {
+    if (this.board?.hasPendingLine) return true;
     for (const pc of this.pcByPage.values()) if (pc.hasPendingLine) return true;
     return false;
   }

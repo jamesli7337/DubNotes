@@ -55,6 +55,17 @@ import type { OverlayOptions } from './selection';
 import {
   cloneItem,
   IMAGE_FIT,
+  LineSnapHold,
+  LINE_HANDLE_HIT,
+  LINE_HANDLE_R,
+  lineEndAt,
+  paintLaserTrail,
+  paintLineHandles,
+  SHAPE_CUE_OPACITY,
+  STILL_TRAIL,
+  trailMoved,
+  type LaserTrail,
+  type LineEdit,
   marqueePolygon,
   sameText,
   selectionView,
@@ -88,8 +99,6 @@ export type Op =
  * canvas, neither of which a single-surface board has any use for.
  */
 export interface PageHooks extends SurfaceHooks {
-  /** A line entered or left its adjustable phase. Undo can drop such a line even with nothing on the history stack, so the button's enabled state has to track this as well as the stack. */
-  onPendingLine: () => void;
   /** A cross-page drag (see endTransform) just changed another page's items directly in the store — repaint that page's own PageCanvas if it's mounted (a no-op otherwise; it'll read the fresh store on its next mount). */
   refreshPage: (pageId: string) => void;
   /**
@@ -122,13 +131,6 @@ type CoalescingEvent = PointerEvent & { getCoalescedEvents?: () => PointerEvent[
 
 /** Opacity for strokes the eraser is currently hovering, before they're actually removed. */
 const PENDING_OPACITY = 0.25;
-/** Opacity of the ghosted line cue shown partway through a line-snap hold, before it snaps. */
-const SHAPE_CUE_OPACITY = 0.35;
-/** How many trailing live points the line-snap hold-still check averages over, instead of comparing only against the single previous sample — see its use in onMove. */
-const STILL_TRAIL = 5;
-/** Radius of a pending line's endpoint handles (screen px, counter-scaled for zoom). Drawn smaller than LINE_HANDLE_HIT (how close a press must be to grab one) on purpose — the grab target stays generous even though the dot itself reads small. */
-const LINE_HANDLE_R = 5;
-const LINE_HANDLE_HIT = 14;
 /** Max gap between two taps (ms) and how far apart they may land (page units) to still count as one double-tap — see isDoubleTap. */
 const DOUBLE_TAP_MS = 350;
 const DOUBLE_TAP_SLOP = 24;
@@ -146,13 +148,6 @@ interface TextEditor {
 }
 
 /** A line the pen snapped to, still adjustable by its endpoints and not in the store yet. */
-interface LineEdit {
-  a: number[];
-  b: number[];
-  color: string;
-  size: number;
-}
-
 /**
  * One page = two canvases plus a DOM overlay:
  *  - `cache` holds the template + every committed item (repainted rarely)
@@ -222,7 +217,7 @@ export class PageCanvas implements ItemSurface {
    * Kept as separate strokes (rather than one flat list) so consecutive
    * presses never draw a connecting segment between them.
    */
-  private laser: number[][][] = [];
+  private laser: LaserTrail = [];
   /** tapes currently peeled back — view state, never stored */
   private readonly peeled = new Set<string>();
   /** tape under a press that may turn into a peel/cover tap */
@@ -259,8 +254,7 @@ export class PageCanvas implements ItemSurface {
 
   /** line-snap (pen tool only): the stroke snaps to a line once the pen has held still */
   private shapeMode = false;
-  private cueTimer: ReturnType<typeof setTimeout> | null = null;
-  private holdTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly hold = new LineSnapHold();
   /** ghosted preview shown partway through the hold, alongside the still-visible ink — not yet snapped */
   private pendingFit: ShapeFit | null = null;
   /**
@@ -591,43 +585,10 @@ export class PageCanvas implements ItemSurface {
     if (!this.raf) this.raf = requestAnimationFrame(this.frame);
   }
 
-  /**
-   * Draws the laser trail: each segment fades with its age over LASER_FADE_MS,
-   * with a soft glow under a bright core. Keeps animating until it is gone.
-   */
+  /** Draws and prunes the laser trail (shared with the board — see paintLaserTrail), and keeps animating while anything is still fading. */
   private paintLaser(v: CanvasRenderingContext2D): void {
-    const now = performance.now();
-    this.laser = this.laser
-      .map((pts) => pts.filter((p) => now - p[2] < LASER_FADE_MS))
-      .filter((pts) => pts.length > 0);
-    if (this.laser.length) {
-      v.save();
-      v.lineCap = 'round';
-      v.lineJoin = 'round';
-      for (const pts of this.laser) {
-        for (let i = 1; i < pts.length; i++) {
-          const alpha = 1 - (now - pts[i][2]) / LASER_FADE_MS;
-          v.globalAlpha = alpha * 0.35;
-          v.strokeStyle = LASER_COLOR;
-          v.lineWidth = 14;
-          v.beginPath();
-          v.moveTo(pts[i - 1][0], pts[i - 1][1]);
-          v.lineTo(pts[i][0], pts[i][1]);
-          v.stroke();
-          v.globalAlpha = alpha;
-          v.lineWidth = 4;
-          v.stroke();
-        }
-        const head = pts[pts.length - 1];
-        v.globalAlpha = 1 - (now - head[2]) / LASER_FADE_MS;
-        v.fillStyle = LASER_COLOR;
-        v.beginPath();
-        v.arc(head[0], head[1], 5, 0, Math.PI * 2);
-        v.fill();
-      }
-      v.restore();
-    }
-    if (this.laser.length) this.schedule(); // keep fading
+    this.laser = paintLaserTrail(v, this.laser);
+    if (this.laser.length) this.schedule();
   }
 
   private toLocal(e: PointerEvent): number[] {
@@ -890,10 +851,7 @@ export class PageCanvas implements ItemSurface {
           // immediately previous sample, so one noisy sample (ordinary
           // input jitter during an otherwise-still hold) can't by itself
           // read as real movement and restart the whole hold-still timer
-          const trail = this.live.slice(-STILL_TRAIL);
-          const ax = trail.reduce((s, p) => s + p[0], 0) / trail.length;
-          const ay = trail.reduce((s, p) => s + p[1], 0) / trail.length;
-          const moved = Math.hypot(pt[0] - ax, pt[1] - ay) > 1.5;
+          const moved = trailMoved(this.live, pt);
           this.live.push(this.snapped(pt));
           if (this.shapeMode && moved) {
             if (this.pendingFit) {
@@ -1236,39 +1194,32 @@ export class PageCanvas implements ItemSurface {
    */
   private armHold(): void {
     this.disarmHold();
-    this.cueTimer = setTimeout(() => {
-      this.cueTimer = null;
-      if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;
-      const fit = recognizeLine(this.live, this.liveTool.size, this.zoom());
-      if (fit) {
-        this.pendingFit = fit;
-        this.schedule();
+    this.hold.arm(
+      () => {
+        if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;
+        const fit = recognizeLine(this.live, this.liveTool.size, this.zoom());
+        if (fit) {
+          this.pendingFit = fit;
+          this.schedule();
+        }
+      },
+      () => {
+        if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;
+        const fit = recognizeLine(this.live, this.liveTool.size, this.zoom());
+        if (fit) {
+          const [a, b] = lineEnds(fit);
+          this.lineEdit = { a, b, color: this.liveTool.color, size: this.liveTool.size };
+          this.adjustEnd = 'b';
+          this.pendingFit = null;
+          this.hooks.onPendingLine();
+          this.schedule();
+        }
       }
-    }, SHAPE_CUE_MS);
-    this.holdTimer = setTimeout(() => {
-      this.holdTimer = null;
-      if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;
-      const fit = recognizeLine(this.live, this.liveTool.size, this.zoom());
-      if (fit) {
-        const [a, b] = lineEnds(fit);
-        this.lineEdit = { a, b, color: this.liveTool.color, size: this.liveTool.size };
-        this.adjustEnd = 'b';
-        this.pendingFit = null;
-        this.hooks.onPendingLine();
-        this.schedule();
-      }
-    }, SHAPE_HOLD_MS);
+    );
   }
 
   private disarmHold(): void {
-    if (this.cueTimer != null) {
-      clearTimeout(this.cueTimer);
-      this.cueTimer = null;
-    }
-    if (this.holdTimer != null) {
-      clearTimeout(this.holdTimer);
-      this.holdTimer = null;
-    }
+    this.hold.disarm();
   }
 
   private shapeFromFit(fit: ShapeFit, color = this.liveTool.color, size = this.liveTool.size): ShapeElement {
@@ -1310,28 +1261,12 @@ export class PageCanvas implements ItemSurface {
     const le = this.lineEdit;
     if (!le) return;
     drawElement(v, this.lineElement(le), this.page.paper);
-    const z = this.zoom();
-    v.save();
-    v.lineWidth = 2 / z;
-    v.strokeStyle = '#2563eb';
-    v.fillStyle = '#fff';
-    for (const p of [le.a, le.b]) {
-      v.beginPath();
-      v.arc(p[0], p[1], LINE_HANDLE_R / z, 0, Math.PI * 2);
-      v.fill();
-      v.stroke();
-    }
-    v.restore();
+    paintLineHandles(v, le, this.zoom());
   }
 
   /** Which endpoint handle of the pending line a press lands on, if any (the nearer wins). */
   private lineEndAt(pt: number[]): 'a' | 'b' | null {
-    const le = this.lineEdit;
-    if (!le) return null;
-    const da = Math.hypot(pt[0] - le.a[0], pt[1] - le.a[1]);
-    const db = Math.hypot(pt[0] - le.b[0], pt[1] - le.b[1]);
-    if (Math.min(da, db) > LINE_HANDLE_HIT / this.zoom()) return null;
-    return da <= db ? 'a' : 'b';
+    return this.lineEdit ? lineEndAt(this.lineEdit, pt, this.zoom()) : null;
   }
 
   /** The view zoom changed: the pending line's handles and the lasso outline's dashes are both sized for the screen, so repaint them. */

@@ -1,3 +1,4 @@
+import { LASER_COLOR, LASER_FADE_MS, SHAPE_CUE_MS, SHAPE_HOLD_MS } from '../tools';
 import type { PageItem, PageElement, ShapeElement, TapeElement, TextElement } from '../types';
 import { isStroke, nearPolyline, uid } from '../util';
 import { aabb, itemsFrame, pointInElement, type Frame } from './geom';
@@ -90,6 +91,8 @@ export interface SurfaceHooks {
   /** a tap on an existing tape strip while the tape tool is active — opens its resize/delete popover */
   onTapeTap: (s: ItemSurface, tapeId: string, frame: Frame) => void;
   isAiActive: () => boolean;
+  /** A line entered or left its adjustable phase. Undo can drop such a line even with nothing on the history stack, so the button's enabled state has to track this as well as the stack. */
+  onPendingLine: () => void;
   showSelection: (s: ItemSurface, frame: Frame, opts: OverlayOptions) => void;
   updateSelection: (s: ItemSurface, frame: Frame) => void;
   hideSelection: (s: ItemSurface) => void;
@@ -261,4 +264,146 @@ export function strokeLassoPath(v: CanvasRenderingContext2D, path: number[][], c
   v.strokeStyle = 'rgba(37, 99, 235, 0.9)';
   v.stroke();
   v.restore();
+}
+
+
+// ------------------------------------------------------------------- laser
+/** One pointer-down-to-up trail; each point is [x, y, timestamp]. */
+export type LaserTrail = number[][][];
+
+/**
+ * Draws the laser trail — each segment fading with its age over
+ * LASER_FADE_MS, a soft glow under a bright core, and a dot at the head —
+ * and returns the trail with fully-faded points pruned out. The caller stores
+ * that back and schedules another frame while it is non-empty, which is what
+ * keeps the fade animating.
+ *
+ * Shared verbatim between a page and a board: the geometry is in the
+ * surface's own units either way, and the widths are deliberately *not*
+ * counter-scaled by zoom (a laser trail is drawn content, not screen-sized
+ * chrome), so there is nothing surface-specific left in it.
+ */
+export function paintLaserTrail(v: CanvasRenderingContext2D, trail: LaserTrail): LaserTrail {
+  const now = performance.now();
+  const alive = trail
+    .map((pts) => pts.filter((p) => now - p[2] < LASER_FADE_MS))
+    .filter((pts) => pts.length > 0);
+  if (!alive.length) return alive;
+  v.save();
+  v.lineCap = 'round';
+  v.lineJoin = 'round';
+  for (const pts of alive) {
+    for (let i = 1; i < pts.length; i++) {
+      const alpha = 1 - (now - pts[i][2]) / LASER_FADE_MS;
+      v.globalAlpha = alpha * 0.35;
+      v.strokeStyle = LASER_COLOR;
+      v.lineWidth = 14;
+      v.beginPath();
+      v.moveTo(pts[i - 1][0], pts[i - 1][1]);
+      v.lineTo(pts[i][0], pts[i][1]);
+      v.stroke();
+      v.globalAlpha = alpha;
+      v.lineWidth = 4;
+      v.stroke();
+    }
+    const head = pts[pts.length - 1];
+    v.globalAlpha = 1 - (now - head[2]) / LASER_FADE_MS;
+    v.fillStyle = LASER_COLOR;
+    v.beginPath();
+    v.arc(head[0], head[1], 5, 0, Math.PI * 2);
+    v.fill();
+  }
+  v.restore();
+  return alive;
+}
+
+// --------------------------------------------------------------- line snap
+/** A stroke that has snapped into its adjustable straight-line phase. */
+export interface LineEdit {
+  a: number[];
+  b: number[];
+  color: string;
+  size: number;
+}
+
+/** Opacity of the ghosted line cue shown partway through a hold, before it snaps. */
+export const SHAPE_CUE_OPACITY = 0.35;
+/** How many trailing live points the hold-still check averages over, instead of comparing only against the single previous sample. */
+export const STILL_TRAIL = 5;
+/** Radius of a pending line's endpoint handles (screen px, counter-scaled for zoom). Drawn smaller than LINE_HANDLE_HIT on purpose — the grab target stays generous even though the dot itself reads small. */
+export const LINE_HANDLE_R = 5;
+export const LINE_HANDLE_HIT = 14;
+
+/**
+ * Whether the pen has actually moved, judged against a short trailing average
+ * of the live points rather than the single previous sample — so one noisy
+ * sample during an otherwise-still hold cannot by itself restart the timer.
+ */
+export function trailMoved(live: number[][], pt: number[]): boolean {
+  const trail = live.slice(-STILL_TRAIL);
+  if (!trail.length) return true;
+  const ax = trail.reduce((sum, p) => sum + p[0], 0) / trail.length;
+  const ay = trail.reduce((sum, p) => sum + p[1], 0) / trail.length;
+  return Math.hypot(pt[0] - ax, pt[1] - ay) > 1.5;
+}
+
+/** The pending line's two endpoint handles, drawn at a constant on-screen size. */
+export function paintLineHandles(v: CanvasRenderingContext2D, le: LineEdit, zoom: number): void {
+  const z = zoom > 0 ? zoom : 1;
+  v.save();
+  v.lineWidth = 2 / z;
+  v.strokeStyle = '#2563eb';
+  v.fillStyle = '#fff';
+  for (const p of [le.a, le.b]) {
+    v.beginPath();
+    v.arc(p[0], p[1], LINE_HANDLE_R / z, 0, Math.PI * 2);
+    v.fill();
+    v.stroke();
+  }
+  v.restore();
+}
+
+/** Which endpoint handle a press lands on, if any — the nearer wins. */
+export function lineEndAt(le: LineEdit, pt: number[], zoom: number): 'a' | 'b' | null {
+  const z = zoom > 0 ? zoom : 1;
+  const da = Math.hypot(pt[0] - le.a[0], pt[1] - le.a[1]);
+  const db = Math.hypot(pt[0] - le.b[0], pt[1] - le.b[1]);
+  if (Math.min(da, db) > LINE_HANDLE_HIT / z) return null;
+  return da <= db ? 'a' : 'b';
+}
+
+/**
+ * The two timers behind hold-to-straighten: a ghosted cue at SHAPE_CUE_MS, the
+ * snap itself at SHAPE_HOLD_MS. Pure timer bookkeeping with no surface
+ * knowledge — what happens when they fire is the caller's business — so a page
+ * and a board share the durations and the re-arm semantics rather than each
+ * keeping its own pair.
+ */
+export class LineSnapHold {
+  private cueTimer: ReturnType<typeof setTimeout> | null = null;
+  private holdTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** (Re)starts both timers, dropping any already running — called on every real movement. */
+  arm(onCue: () => void, onHold: () => void): void {
+    this.disarm();
+    this.cueTimer = setTimeout(() => {
+      this.cueTimer = null;
+      onCue();
+    }, SHAPE_CUE_MS);
+    this.holdTimer = setTimeout(() => {
+      this.holdTimer = null;
+      onHold();
+    }, SHAPE_HOLD_MS);
+  }
+
+  disarm(): void {
+    if (this.cueTimer != null) {
+      clearTimeout(this.cueTimer);
+      this.cueTimer = null;
+    }
+    if (this.holdTimer != null) {
+      clearTimeout(this.holdTimer);
+      this.holdTimer = null;
+    }
+  }
 }

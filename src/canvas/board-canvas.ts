@@ -45,10 +45,18 @@ import {
   TEXT_LINE_HEIGHT,
   textHeight,
 } from './elements';
-import { lineFit, type ShapeFit } from './recognize';
+import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
 import {
   cloneItem,
   IMAGE_FIT,
+  LineSnapHold,
+  lineEndAt,
+  paintLaserTrail,
+  paintLineHandles,
+  SHAPE_CUE_OPACITY,
+  trailMoved,
+  type LaserTrail,
+  type LineEdit,
   marqueePolygon,
   sameText,
   selectionView,
@@ -154,6 +162,9 @@ export class BoardCanvas implements ItemSurface {
     | 'tape'
     | 'tape-tap'
     | 'text-press'
+    | 'laser'
+    | 'line-adjust'
+    | 'dismiss'
     | null = null;
   private pointerId = -1;
   private live: number[][] = [];
@@ -173,6 +184,23 @@ export class BoardCanvas implements ItemSurface {
   private shapeHit: string | null = null;
   private lastTapAt = 0;
   private lastTapPt: number[] = [0, 0];
+
+  /**
+   * Laser-pointer trail: each entry is one pointer-down-to-up stroke. Never
+   * stored, and drawn by this canvas's own existing frame loop rather than a
+   * second one — `paintLaserTrail` reschedules while anything is still fading,
+   * exactly as it does for a page.
+   */
+  private laser: LaserTrail = [];
+
+  /** line snap: the ghosted cue partway through a hold, then the adjustable line itself */
+  private shapeMode = false;
+  private pendingFit: ShapeFit | null = null;
+  private lineEdit: LineEdit | null = null;
+  private adjustEnd: 'a' | 'b' | null = null;
+  private readonly hold = new LineSnapHold();
+  /** this press is spent settling a pending line / selection elsewhere, so it must not also draw */
+  private dismissingPress = false;
 
   /** view-only: which tape strips are peeled back. Never stored, same as a page. */
   private readonly peeled = new Set<string>();
@@ -195,6 +223,11 @@ export class BoardCanvas implements ItemSurface {
 
   get busy(): boolean {
     return this.mode != null || this.xfOrig != null || this.editor != null;
+  }
+
+  /** Whether a line is in its adjustable phase — see the onPendingLine hook. */
+  get hasPendingLine(): boolean {
+    return this.lineEdit !== null;
   }
 
   get mounted(): boolean {
@@ -256,7 +289,9 @@ export class BoardCanvas implements ItemSurface {
       v.removeEventListener('pointercancel', this.onUp);
       v.remove();
     }
+    this.commitLine();
     this.commitEdit();
+    this.disarmHold();
     this.editorLayer?.remove();
     this.editorLayer = this.editorCam = null;
     if (this.raf) cancelAnimationFrame(this.raf);
@@ -420,8 +455,17 @@ export class BoardCanvas implements ItemSurface {
     const s = z * DPR;
     v.setTransform(s, 0, 0, s, -vis.x * s, -vis.y * s);
     const paper = this.paper();
-    if (this.mode === 'draw' && this.live.length) {
+    // the ink in flight — unless it has already snapped to a line, drawn below in its place
+    if (this.mode === 'draw' && this.live.length && !this.lineEdit) {
       drawStroke(v, { tool: this.liveTool.kind, color: this.liveTool.color, size: this.liveTool.size, points: this.live }, paper);
+      if (this.pendingFit) {
+        // ghost cue partway through the hold: over the still-visible ink, not yet snapped
+        drawElement(v, this.shapeFromFit(this.pendingFit, this.liveTool.color, this.liveTool.size), paper, SHAPE_CUE_OPACITY);
+      }
+    }
+    if (this.lineEdit) {
+      drawElement(v, this.lineElement(this.lineEdit), paper);
+      paintLineHandles(v, this.lineEdit, this.zoom());
     }
     for (const [id, gone] of this.partial) {
       const st = this.strokeById(id);
@@ -440,6 +484,10 @@ export class BoardCanvas implements ItemSurface {
     if (this.mode === 'shapes' && this.live.length > 1) {
       const sh = this.shapeFromDrag();
       if (sh) drawElement(v, sh, paper, 0.7); // preview of the shape being sized
+    }
+    if (this.laser.length) {
+      this.laser = paintLaserTrail(v, this.laser);
+      if (this.laser.length) this.schedule(); // keep fading
     }
     if (this.mode === 'lasso' && this.lasso.length > 1) {
       strokeLassoPath(v, this.lasso, toolState.lassoShape !== 'free', this.zoom());
@@ -473,6 +521,37 @@ export class BoardCanvas implements ItemSurface {
     this.capture(e);
     const pt = this.toBoard(e);
     this.pressPt = pt;
+
+    // a snapped line waiting to be adjusted: a press on one of its endpoint
+    // handles drags that end; a press anywhere else commits it, and is a
+    // dismissing press from here on
+    if (this.lineEdit) {
+      const end = lineEndAt(this.lineEdit, pt, this.zoom());
+      if (end) {
+        this.mode = 'line-adjust';
+        this.adjustEnd = end;
+        this.schedule();
+        return;
+      }
+      this.commitLine();
+      this.dismissingPress = true;
+    }
+
+    // Everything below produces output, so a dismissing press stops here. It
+    // still holds the pointer, so the contact cannot fall through to a pan for
+    // the rest of its life; onUp resets the mode and repaints.
+    if (this.dismissingPress) {
+      this.mode = 'dismiss';
+      this.commitEdit(); // an open text editor is state this press dismisses too
+      return;
+    }
+
+    if (kind === 'laser') {
+      this.mode = 'laser';
+      this.laser.push([[pt[0], pt[1], performance.now()]]); // a fresh, disconnected stroke
+      this.schedule();
+      return;
+    }
 
     // a press on a tape strip is a peel / cover tap unless it turns into a drag
     const tape = kind === 'lasso' ? null : this.topTapeAt(pt[0], pt[1]);
@@ -550,6 +629,9 @@ export class BoardCanvas implements ItemSurface {
     this.mode = 'draw';
     this.liveTool = { kind: t.kind, color: this.aiInkColor(t.color), size: t.size };
     this.live = [pt];
+    this.shapeMode = kind === 'pen'; // line-snap is only ever on the pen, not the highlighter
+    this.pendingFit = null;
+    if (this.shapeMode) this.armHold();
     this.schedule();
   };
 
@@ -571,8 +653,28 @@ export class BoardCanvas implements ItemSurface {
     for (const ev of list) {
       const pt = this.toBoard(ev);
       switch (this.mode) {
-        case 'draw':
+        case 'draw': {
+          if (this.lineEdit) {
+            this.lineEdit.b = [pt[0], pt[1]]; // already snapped: the pen drags the far end
+            break;
+          }
+          const moved = trailMoved(this.live, pt);
           this.live.push(pt);
+          if (this.shapeMode && moved) {
+            if (this.pendingFit) {
+              // keep tracking the pen so the ghost's length and direction adjust
+              // live as the stroke is refined, rather than freezing or vanishing
+              this.pendingFit = recognizeLine(this.live, this.liveTool.size, this.zoom());
+            }
+            this.armHold();
+          }
+          break;
+        }
+        case 'line-adjust':
+          if (this.lineEdit && this.adjustEnd) this.lineEdit[this.adjustEnd] = [pt[0], pt[1]];
+          break;
+        case 'laser':
+          this.laser[this.laser.length - 1].push([pt[0], pt[1], performance.now()]);
           break;
         case 'erase':
           this.eraseAt(pt);
@@ -614,6 +716,13 @@ export class BoardCanvas implements ItemSurface {
             this.live.push(pt);
           } else if (kind === 'text') {
             this.mode = null; // the text tool has nothing to drag here
+          } else if (kind === 'laser') {
+            this.mode = 'laser';
+            // a fresh, disconnected stroke — not appended to any prior one
+            this.laser.push([
+              [this.pressPt[0], this.pressPt[1], performance.now()],
+              [pt[0], pt[1], performance.now()],
+            ]);
           } else {
             const t = resolveDrawTool();
             if (!t) {
@@ -623,6 +732,8 @@ export class BoardCanvas implements ItemSurface {
             this.mode = 'draw';
             this.liveTool = { kind: t.kind, color: this.aiInkColor(t.color), size: t.size };
             this.live = [this.pressPt, pt];
+            this.shapeMode = kind === 'pen';
+            if (this.shapeMode) this.armHold();
           }
           break;
         }
@@ -652,10 +763,27 @@ export class BoardCanvas implements ItemSurface {
     }
 
     switch (mode) {
+      case 'line-adjust':
+        this.reset();
+        if (!cancelled) this.commitLine(); // a handle drag ends with the line committed
+        break;
       case 'draw':
+        this.disarmHold();
+        if (this.lineEdit) {
+          if (!cancelled) {
+            // the stroke snapped: lifting leaves the line adjustable, handles and all
+            this.live = [];
+            this.reset();
+            break;
+          }
+          this.dropLineEdit(); // the pointer was lost mid-snap — keep the ink it started as
+        }
         this.reset();
         if (!cancelled) this.commitStroke();
         else this.live = [];
+        break;
+      case 'laser':
+        this.reset(); // the trail keeps fading on its own; nothing to store
         break;
       case 'erase':
         if (cancelled) {
@@ -725,6 +853,91 @@ export class BoardCanvas implements ItemSurface {
     this.lasso = [];
     this.tapeHit = null;
     this.shapeHit = null;
+    this.pendingFit = null;
+    this.shapeMode = false;
+    this.adjustEnd = null; // lineEdit itself outlives the press: it stays until something commits it
+    this.dismissingPress = false;
+    this.disarmHold();
+  }
+
+  // --------------------------------------------------------------- line snap
+  /**
+   * Starts (or restarts) the hold-still timers. Identical durations and
+   * thresholds to a page — both go through LineSnapHold and recognizeLine, so
+   * there is nothing here for the two to drift apart on.
+   */
+  private armHold(): void {
+    this.hold.arm(
+      () => {
+        if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;
+        const fit = recognizeLine(this.live, this.liveTool.size, this.zoom());
+        if (fit) {
+          this.pendingFit = fit;
+          this.schedule();
+        }
+      },
+      () => {
+        if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;
+        const fit = recognizeLine(this.live, this.liveTool.size, this.zoom());
+        if (fit) {
+          const [a, b] = lineEnds(fit);
+          this.lineEdit = { a, b, color: this.liveTool.color, size: this.liveTool.size };
+          this.adjustEnd = 'b';
+          this.pendingFit = null;
+          this.hooks.onPendingLine();
+          this.schedule();
+        }
+      }
+    );
+  }
+
+  private disarmHold(): void {
+    this.hold.disarm();
+  }
+
+  /** The pending line as an element (fresh id each call — only commitLine keeps one). */
+  private lineElement(le: LineEdit): ShapeElement {
+    return this.shapeFromFit(lineFit('line', le.a, le.b, le.size), le.color, le.size);
+  }
+
+  /** The single way out of the adjustable phase, so the notebook hears about every one of them. */
+  private dropLineEdit(): void {
+    this.lineEdit = null;
+    this.adjustEnd = null;
+    this.hooks.onPendingLine();
+  }
+
+  /** Throws the pending line away instead of committing it — Undo's counterpart to commitLine. It was never added to the store, so dropping it here is the whole undo. */
+  cancelLine(): boolean {
+    if (!this.lineEdit) return false;
+    this.dropLineEdit();
+    this.invalidate();
+    return true;
+  }
+
+  /** Adds the pending line to the board as one undo step; returns whether there was one. */
+  commitLine(): boolean {
+    const le = this.lineEdit;
+    if (!le) return false;
+    this.dropLineEdit();
+    const shape = this.lineElement(le);
+    store.addItems([shape]);
+    this.invalidate();
+    // le.color was set from aiInkColor() when the stroke that became this line
+    // started — the same violet-means-ephemeral-turn-ink signal add-stroke ops
+    // carry, so AiMode can discard a snapped line the way it discards freehand
+    this.hooks.onOp({ kind: 'add-items', pageId: shape.pageId, items: [shape], aiInk: le.color === AI_COLOR });
+    return true;
+  }
+
+  /** Tells the board that the press about to land already dismissed something elsewhere, so it must not also draw. Mirrors PageCanvas's own flag. */
+  markDismissingPress(): void {
+    this.dismissingPress = true;
+  }
+
+  /** Drops the flag if still set — a flagged press that never reached the canvas has no onUp of its own to clear it, and a leftover would swallow the next press. */
+  clearDismissingPress(): void {
+    this.dismissingPress = false;
   }
 
   /** While AI mode is on a fresh mark inks in the AI accent colour, matching the page path. */
@@ -1148,6 +1361,7 @@ export class BoardCanvas implements ItemSurface {
 
   /** Called by the notebook when the active tool changes. */
   deactivate(): void {
+    this.commitLine();
     this.clearSelection();
   }
 
@@ -1230,8 +1444,9 @@ export class BoardCanvas implements ItemSurface {
     this.setSelection(toAdd.map((it) => it.id));
   }
 
-  /** The store changed under us (undo/redo): drop any selection and repaint. */
+  /** The store changed under us (undo/redo): settle any pending line, drop any selection and repaint. */
   refresh(): void {
+    this.commitLine();
     this.clearSelection();
     this.invalidate();
   }
