@@ -55,6 +55,7 @@ import hand from 'lucide-static/icons/hand.svg?raw';
 import layoutGrid from 'lucide-static/icons/layout-grid.svg?raw';
 import list from 'lucide-static/icons/list.svg?raw';
 import columns2 from 'lucide-static/icons/columns-2.svg?raw';
+import network from 'lucide-static/icons/network.svg?raw';
 import pictureInPicture2 from 'lucide-static/icons/picture-in-picture-2.svg?raw';
 import minimize2 from 'lucide-static/icons/minimize-2.svg?raw';
 import fileText from 'lucide-static/icons/file-text.svg?raw';
@@ -123,7 +124,9 @@ export type IconName =
   /** collapse the PDF overlay to its edge tab */
   | 'minimize'
   /** a PDF document — the split dropdown's PDF option and the minimised tab */
-  | 'pdf';
+  | 'pdf'
+  /** linked nodes — the board app bar's mind-map toggle */
+  | 'mindmap';
 
 const ICONS: Record<IconName, string> = {
   'arrow-left': arrowLeft,
@@ -179,6 +182,7 @@ const ICONS: Record<IconName, string> = {
   'split-float': pictureInPicture2,
   minimize: minimize2,
   pdf: fileText,
+  mindmap: network,
 };
 
 /** Returns a <span class="icon"> wrapping the raw SVG; `currentColor` inherits text colour. */

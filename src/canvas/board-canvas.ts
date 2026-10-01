@@ -10,6 +10,7 @@ import {
   toolState,
 } from '../tools';
 import type {
+  BubbleElement,
   ImageElement,
   Notebook,
   Paper,
@@ -23,8 +24,10 @@ import type {
 import { isStroke, nearPolyline, uid } from '../util';
 import {
   aabb,
+  bubblePolygon,
   elementInPolygon,
   itemBounds,
+  itemFullyInPolygon,
   itemsFrame,
   mapPoint,
   pointInElement,
@@ -45,7 +48,7 @@ import {
   TEXT_LINE_HEIGHT,
   textHeight,
 } from './elements';
-import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
+import { lineEnds, lineFit, recognizeLine, recognizeLoop, type LoopFit, type ShapeFit } from './recognize';
 import {
   cloneItem,
   IMAGE_FIT,
@@ -113,6 +116,38 @@ export type BoardHooks = SurfaceHooks;
 const DOUBLE_TAP_MS = 350;
 const DOUBLE_TAP_SLOP = 24;
 
+/**
+ * Mind-map mode is one on/off switch *per board*, kept in `localStorage`
+ * alongside the split pane's own per-notebook state (`noteapp.split.<id>`,
+ * secondary-pane.ts) rather than in the notebook record — it is view state,
+ * not content: turning it off leaves every bubble exactly where it was, and
+ * it has no business in a backup.
+ *
+ * Read through these two helpers rather than the key, because the app bar's
+ * toggle is built before the BoardCanvas that owns the live flag exists.
+ */
+const MIND_MAP_PREFIX = 'noteapp.mindmap.';
+
+export function mindMapEnabled(notebookId: string): boolean {
+  try {
+    return localStorage.getItem(MIND_MAP_PREFIX + notebookId) === '1';
+  } catch {
+    return false; // private mode / blocked storage: the mode is simply off
+  }
+}
+
+export function setMindMapEnabled(notebookId: string, on: boolean): void {
+  try {
+    if (on) localStorage.setItem(MIND_MAP_PREFIX + notebookId, '1');
+    else localStorage.removeItem(MIND_MAP_PREFIX + notebookId);
+  } catch {
+    /* ignore — a forgotten mode is not worth failing an edit over */
+  }
+}
+
+/** Extra radius (screen px, counter-scaled for zoom) around a bubble's outline that still counts as a press on it. */
+const BUBBLE_GRAB_TOL = 10;
+
 interface BoardTextEditor {
   /** the element being edited — for a new box this is not in the store yet */
   el: TextElement;
@@ -164,6 +199,10 @@ export class BoardCanvas implements ItemSurface {
     | 'text-press'
     | 'laser'
     | 'line-adjust'
+    /** mind map: a press on a bubble that may yet become a hold-to-move, a mark, or nothing */
+    | 'bubble-press'
+    /** mind map: the hold fired — the bubble and everything it owns move with the pen */
+    | 'bubble-move'
     | 'dismiss'
     | null = null;
   private pointerId = -1;
@@ -202,6 +241,30 @@ export class BoardCanvas implements ItemSurface {
   /** this press is spent settling a pending line / selection elsewhere, so it must not also draw */
   private dismissingPress = false;
 
+  /**
+   * Mind-map mode (this board only — see mindMapEnabled). While on, the pen's
+   * hold-to-snap fits a *loop* instead of a line (`loopMode` below replaces
+   * `shapeMode` for the press), a stationary press on a bubble grabs it, and
+   * the eraser takes bubbles by their outline.
+   */
+  private mindMapOn: boolean;
+  /** this press is eligible for loop-snap — the mind-map counterpart of `shapeMode`, and never set at the same time */
+  private loopMode = false;
+  /** the ghosted cue partway through a loop hold, then the snapped-but-uncommitted bubble */
+  private pendingLoop: LoopFit | null = null;
+  /**
+   * A bubble that has snapped but is not in the store yet — the exact shape
+   * `lineEdit` has, for the same reason: it is the newest thing the user did,
+   * so Undo has to be able to drop it before it consults any stack, and any
+   * press that lands afterwards settles it. `members` is recomputed at commit
+   * time against the live store, so this holds nothing but the outline.
+   */
+  private pendingBubble: BubbleElement | null = null;
+  /** mind map: which bubble the current 'bubble-press' / 'bubble-move' is about */
+  private bubbleHit: string | null = null;
+  /** mind map: the hold's first stage fired — the bubble is drawn emphasised, about to be grabbable */
+  private bubbleCue = false;
+
   /** view-only: which tape strips are peeled back. Never stored, same as a page. */
   private readonly peeled = new Set<string>();
   private tapeResizeOrig: TapeElement | null = null;
@@ -219,15 +282,42 @@ export class BoardCanvas implements ItemSurface {
     this.nb = nb;
     this.camera = camera;
     this.hooks = hooks;
+    this.mindMapOn = mindMapEnabled(nb.id);
   }
 
   get busy(): boolean {
-    return this.mode != null || this.xfOrig != null || this.editor != null;
+    return this.mode != null || this.xfOrig != null || this.editor != null || this.pendingBubble != null;
   }
 
   /** Whether a line is in its adjustable phase — see the onPendingLine hook. */
   get hasPendingLine(): boolean {
     return this.lineEdit !== null;
+  }
+
+  /** Whether mind-map mode is on for this board. */
+  get mindMap(): boolean {
+    return this.mindMapOn;
+  }
+
+  /**
+   * Turns mind-map mode on or off and remembers it for this board. Any
+   * snapped-but-uncommitted bubble is settled first — leaving one pending
+   * across the switch would strand a shape the mode can no longer finish.
+   */
+  setMindMap(on: boolean): void {
+    if (on === this.mindMapOn) return;
+    this.commitPendingBubble();
+    this.mindMapOn = on;
+    setMindMapEnabled(this.nb.id, on);
+    this.disarmHold();
+    this.pendingLoop = null;
+    this.bubbleCue = false;
+    this.schedule();
+  }
+
+  /** Whether a bubble has snapped but is not committed — Undo can drop it, so the button's state tracks this (see the onPendingLine hook, which both share). */
+  get hasPendingBubble(): boolean {
+    return this.pendingBubble !== null;
   }
 
   get mounted(): boolean {
@@ -455,13 +545,23 @@ export class BoardCanvas implements ItemSurface {
     const s = z * DPR;
     v.setTransform(s, 0, 0, s, -vis.x * s, -vis.y * s);
     const paper = this.paper();
-    // the ink in flight — unless it has already snapped to a line, drawn below in its place
-    if (this.mode === 'draw' && this.live.length && !this.lineEdit) {
+    // the ink in flight — unless it has already snapped to a line or a bubble, drawn below in its place
+    if (this.mode === 'draw' && this.live.length && !this.lineEdit && !this.pendingBubble) {
       drawStroke(v, { tool: this.liveTool.kind, color: this.liveTool.color, size: this.liveTool.size, points: this.live }, paper);
       if (this.pendingFit) {
         // ghost cue partway through the hold: over the still-visible ink, not yet snapped
         drawElement(v, this.shapeFromFit(this.pendingFit, this.liveTool.color, this.liveTool.size), paper, SHAPE_CUE_OPACITY);
       }
+      if (this.pendingLoop) {
+        drawElement(v, this.bubbleFromLoop(this.pendingLoop), paper, SHAPE_CUE_OPACITY); // same cue, for a loop
+      }
+    }
+    if (this.pendingBubble) drawElement(v, this.pendingBubble, paper);
+    if (this.bubbleCue) {
+      // the first stage of a hold *on* a bubble: ghost its outline over itself
+      // so it reads as "keep holding and this is what you'll move"
+      const b = this.heldBubble();
+      if (b) drawElement(v, { ...b, size: b.size * 2 }, paper, SHAPE_CUE_OPACITY);
     }
     if (this.lineEdit) {
       drawElement(v, this.lineElement(this.lineEdit), paper);
@@ -536,6 +636,11 @@ export class BoardCanvas implements ItemSurface {
       this.commitLine();
       this.dismissingPress = true;
     }
+
+    // A snapped bubble waiting to be settled has no handles to grab, so any
+    // press at all commits it — and is spent doing so, exactly like the press
+    // that settles a pending line.
+    if (this.commitPendingBubble()) this.dismissingPress = true;
 
     // Everything below produces output, so a dismissing press stops here. It
     // still holds the pointer, so the contact cannot fall through to a pan for
@@ -620,6 +725,25 @@ export class BoardCanvas implements ItemSurface {
       return;
     }
 
+    // Mind map: a press that lands on a bubble may be a hold-to-move rather
+    // than a mark. Which it is gets decided on move/up, exactly as for
+    // 'shape-press' and 'tape-tap' — moving before the hold fires falls
+    // straight through to the real tool, so writing inside a bubble is
+    // unaffected. Only the drawing tools go through here: the eraser has to
+    // reach a bubble's outline to delete it, and lasso/text/tape/shapes/laser
+    // all have their own meaning for a press and were handled above.
+    if (this.mindMapOn) {
+      const grab = this.bubbleGrabAt(pt);
+      if (grab) {
+        this.commitEdit();
+        this.mode = 'bubble-press';
+        this.bubbleHit = grab.id;
+        this.bubbleCue = false;
+        this.armBubbleHold();
+        return;
+      }
+    }
+
     const t = resolveDrawTool();
     if (!t) {
       this.mode = null;
@@ -629,9 +753,13 @@ export class BoardCanvas implements ItemSurface {
     this.mode = 'draw';
     this.liveTool = { kind: t.kind, color: this.aiInkColor(t.color), size: t.size };
     this.live = [pt];
-    this.shapeMode = kind === 'pen'; // line-snap is only ever on the pen, not the highlighter
+    // line-snap is only ever on the pen, not the highlighter — and in mind-map
+    // mode the pen's hold fits a loop instead, so the two never contend
+    this.loopMode = this.mindMapOn && kind === 'pen';
+    this.shapeMode = kind === 'pen' && !this.mindMapOn;
     this.pendingFit = null;
-    if (this.shapeMode) this.armHold();
+    this.pendingLoop = null;
+    this.armSnapHold();
     this.schedule();
   };
 
@@ -654,20 +782,43 @@ export class BoardCanvas implements ItemSurface {
       const pt = this.toBoard(ev);
       switch (this.mode) {
         case 'draw': {
+          // already snapped to a bubble: the outline is fixed, so the rest of
+          // this contact does nothing (a line, by contrast, drags its far end)
+          if (this.pendingBubble) break;
           if (this.lineEdit) {
             this.lineEdit.b = [pt[0], pt[1]]; // already snapped: the pen drags the far end
             break;
           }
           const moved = trailMoved(this.live, pt);
           this.live.push(pt);
-          if (this.shapeMode && moved) {
+          if ((this.shapeMode || this.loopMode) && moved) {
             if (this.pendingFit) {
               // keep tracking the pen so the ghost's length and direction adjust
               // live as the stroke is refined, rather than freezing or vanishing
               this.pendingFit = recognizeLine(this.live, this.liveTool.size, this.zoom());
             }
-            this.armHold();
+            if (this.pendingLoop) this.pendingLoop = recognizeLoop(this.live, this.liveTool.size, this.zoom());
+            this.armSnapHold();
           }
+          break;
+        }
+        case 'bubble-press': {
+          // moved before the hold fired: this was never a grab — carry on with
+          // whatever the real tool is, from the original press point
+          if (Math.hypot(pt[0] - this.pressPt[0], pt[1] - this.pressPt[1]) < slop) break;
+          this.bubbleHit = null;
+          this.bubbleCue = false;
+          this.disarmHold();
+          this.switchToToolDrag(pt);
+          break;
+        }
+        case 'bubble-move': {
+          if (!this.xfOrig || !this.xfFrame) break;
+          this.updateTransform({
+            ...this.xfFrame,
+            x: this.xfFrame.x + (pt[0] - this.pressPt[0]),
+            y: this.xfFrame.y + (pt[1] - this.pressPt[1]),
+          });
           break;
         }
         case 'line-adjust':
@@ -700,41 +851,7 @@ export class BoardCanvas implements ItemSurface {
           // moved off the strip: it wasn't a tap after all — carry on with the real tool
           if (Math.hypot(pt[0] - this.pressPt[0], pt[1] - this.pressPt[1]) < slop) break;
           this.tapeHit = null;
-          const kind = toolState.kind;
-          if (kind === 'eraser') {
-            this.mode = 'erase';
-            this.erased.clear();
-            this.partial.clear();
-            this.eraseAt(this.pressPt);
-            this.eraseAt(pt);
-          } else if (kind === 'tape') {
-            this.mode = 'tape';
-            this.live = [this.pressPt, pt];
-          } else if (kind === 'shapes') {
-            this.clearSelection();
-            this.beginShapeDrag(this.pressPt);
-            this.live.push(pt);
-          } else if (kind === 'text') {
-            this.mode = null; // the text tool has nothing to drag here
-          } else if (kind === 'laser') {
-            this.mode = 'laser';
-            // a fresh, disconnected stroke — not appended to any prior one
-            this.laser.push([
-              [this.pressPt[0], this.pressPt[1], performance.now()],
-              [pt[0], pt[1], performance.now()],
-            ]);
-          } else {
-            const t = resolveDrawTool();
-            if (!t) {
-              this.mode = null;
-              break;
-            }
-            this.mode = 'draw';
-            this.liveTool = { kind: t.kind, color: this.aiInkColor(t.color), size: t.size };
-            this.live = [this.pressPt, pt];
-            this.shapeMode = kind === 'pen';
-            if (this.shapeMode) this.armHold();
-          }
+          this.switchToToolDrag(pt);
           break;
         }
         case 'text-press': {
@@ -767,8 +884,28 @@ export class BoardCanvas implements ItemSurface {
         this.reset();
         if (!cancelled) this.commitLine(); // a handle drag ends with the line committed
         break;
+      case 'bubble-press':
+        // a plain tap on a bubble: the hold never fired, so nothing happened
+        this.reset();
+        break;
+      case 'bubble-move': {
+        const frame = this.xfCur;
+        this.reset();
+        this.endTransform(cancelled ? null : frame);
+        return;
+      }
       case 'draw':
         this.disarmHold();
+        if (this.pendingBubble) {
+          if (!cancelled) {
+            // the loop snapped: lifting leaves the bubble waiting to be settled,
+            // and the ink it was drawn as is discarded in its favour
+            this.live = [];
+            this.reset();
+            break;
+          }
+          this.dropPendingBubble(); // the pointer was lost mid-snap — keep the ink it started as
+        }
         if (this.lineEdit) {
           if (!cancelled) {
             // the stroke snapped: lifting leaves the line adjustable, handles and all
@@ -854,10 +991,58 @@ export class BoardCanvas implements ItemSurface {
     this.tapeHit = null;
     this.shapeHit = null;
     this.pendingFit = null;
+    this.pendingLoop = null;
     this.shapeMode = false;
+    this.loopMode = false;
+    this.bubbleHit = null;
+    this.bubbleCue = false;
     this.adjustEnd = null; // lineEdit itself outlives the press: it stays until something commits it
     this.dismissingPress = false;
     this.disarmHold();
+  }
+
+  /**
+   * Hands the rest of this contact to whatever tool is actually selected,
+   * starting from the original press point — what a press that turned out not
+   * to be a tap on something (a tape strip, a mind-map bubble) falls back to.
+   */
+  private switchToToolDrag(pt: number[]): void {
+    const kind = toolState.kind;
+    if (kind === 'eraser') {
+      this.mode = 'erase';
+      this.erased.clear();
+      this.partial.clear();
+      this.eraseAt(this.pressPt);
+      this.eraseAt(pt);
+    } else if (kind === 'tape') {
+      this.mode = 'tape';
+      this.live = [this.pressPt, pt];
+    } else if (kind === 'shapes') {
+      this.clearSelection();
+      this.beginShapeDrag(this.pressPt);
+      this.live.push(pt);
+    } else if (kind === 'text') {
+      this.mode = null; // the text tool has nothing to drag here
+    } else if (kind === 'laser') {
+      this.mode = 'laser';
+      // a fresh, disconnected stroke — not appended to any prior one
+      this.laser.push([
+        [this.pressPt[0], this.pressPt[1], performance.now()],
+        [pt[0], pt[1], performance.now()],
+      ]);
+    } else {
+      const t = resolveDrawTool();
+      if (!t) {
+        this.mode = null;
+        return;
+      }
+      this.mode = 'draw';
+      this.liveTool = { kind: t.kind, color: this.aiInkColor(t.color), size: t.size };
+      this.live = [this.pressPt, pt];
+      this.loopMode = this.mindMapOn && kind === 'pen';
+      this.shapeMode = kind === 'pen' && !this.mindMapOn;
+      this.armSnapHold();
+    }
   }
 
   // --------------------------------------------------------------- line snap
@@ -893,6 +1078,145 @@ export class BoardCanvas implements ItemSurface {
 
   private disarmHold(): void {
     this.hold.disarm();
+  }
+
+  /**
+   * Arms whichever hold-to-snap this press is eligible for — the loop fit in
+   * mind-map mode, the line fit otherwise. Both go through the same
+   * `LineSnapHold` (so they share the cue/commit durations exactly) and the two
+   * flags are mutually exclusive, so there is never a race between them.
+   */
+  private armSnapHold(): void {
+    if (this.loopMode) this.armLoopHold();
+    else if (this.shapeMode) this.armHold();
+  }
+
+  /** The loop counterpart of `armHold`: same timings, `recognizeLoop` in place of `recognizeLine`. */
+  private armLoopHold(): void {
+    this.hold.arm(
+      () => {
+        if (this.mode !== 'draw' || !this.loopMode || this.pendingBubble) return;
+        const fit = recognizeLoop(this.live, this.liveTool.size, this.zoom());
+        if (fit) {
+          this.pendingLoop = fit;
+          this.schedule();
+        }
+      },
+      () => {
+        if (this.mode !== 'draw' || !this.loopMode || this.pendingBubble) return;
+        const fit = recognizeLoop(this.live, this.liveTool.size, this.zoom());
+        if (!fit) return;
+        this.pendingBubble = this.bubbleFromLoop(fit);
+        this.pendingLoop = null;
+        this.hooks.onPendingLine(); // "a pending thing changed" — Undo can drop this too
+        this.schedule();
+      }
+    );
+  }
+
+  /**
+   * The two-stage hold on an existing bubble: the first stage only cues (the
+   * outline thickens under the pen), the second hands the bubble and
+   * everything it owns to the ordinary transform path as a live move.
+   */
+  private armBubbleHold(): void {
+    this.hold.arm(
+      () => {
+        if (this.mode !== 'bubble-press') return;
+        this.bubbleCue = true;
+        this.schedule();
+      },
+      () => {
+        if (this.mode !== 'bubble-press') return;
+        const b = this.heldBubble();
+        if (!b) {
+          this.reset();
+          return;
+        }
+        this.bubbleCue = false;
+        this.mode = 'bubble-move';
+        this.beginTransform(this.bubbleMoveSet(b));
+        this.schedule();
+      }
+    );
+  }
+
+  /** The bubble the current press is on, re-read from the store (it may have gone). */
+  private heldBubble(): BubbleElement | null {
+    const id = this.bubbleHit;
+    if (!id) return null;
+    const it = store.boardItem(this.nb.id, id);
+    return it && !isStroke(it) && it.kind === 'bubble' ? it : null;
+  }
+
+  /** The bubble a fitted loop becomes — not in the store, and with no members resolved yet (see commitPendingBubble). */
+  private bubbleFromLoop(fit: LoopFit): BubbleElement {
+    return {
+      id: uid(),
+      kind: 'bubble',
+      pageId: this.chunkFor(fit),
+      notebookId: this.nb.id,
+      outline: fit.outline,
+      x: fit.x,
+      y: fit.y,
+      w: fit.w,
+      h: fit.h,
+      rotation: 0, // always: see BubbleElement
+      color: this.liveTool.color,
+      size: this.liveTool.size,
+      members: [],
+      createdAt: Date.now(),
+    };
+  }
+
+  /** Throws a snapped bubble away instead of committing it — Undo's counterpart to commitPendingBubble, and the whole undo, since it was never in the store. */
+  cancelPendingBubble(): boolean {
+    if (!this.pendingBubble) return false;
+    this.dropPendingBubble();
+    this.invalidate();
+    return true;
+  }
+
+  /** The single way out of the pending phase, so the notebook hears about every one of them. */
+  private dropPendingBubble(): void {
+    this.pendingBubble = null;
+    this.hooks.onPendingLine();
+  }
+
+  /**
+   * Settles a snapped bubble into the board as one undo step, membership and
+   * all; returns whether there was one.
+   *
+   * Membership is resolved *here*, against the live store, rather than when the
+   * loop snapped — the pen may have travelled, and in any case what the board
+   * holds is only knowable now. Ownership is exclusive and innermost-wins (see
+   * `resolveOwnership`), so committing can also have to rewrite the bubbles
+   * this one has taken items from, and that has to land in the same undo step:
+   * hence the 'edit' op, whose `removed`/`added` express "these items went
+   * away and these took their place" and whose inverse restores both sides at
+   * once. With nothing to take, it is a plain 'add-items'.
+   */
+  commitPendingBubble(): boolean {
+    const bubble = this.pendingBubble;
+    if (!bubble) return false;
+    this.dropPendingBubble();
+
+    const { members, before, after } = this.resolveOwnership(bubble);
+    // under its own members in z-order, so the outline never paints over the
+    // handwriting it was drawn around (the store orders by createdAt)
+    let createdAt = bubble.createdAt;
+    for (const m of members) if (m.createdAt <= createdAt) createdAt = m.createdAt - 1;
+    const committed: BubbleElement = { ...bubble, createdAt, members: members.map((m) => m.id) };
+
+    store.addItems([committed]);
+    if (after.length) {
+      store.replaceItems(after[0].pageId, after);
+      this.hooks.onOp({ kind: 'edit', pageId: committed.pageId, removed: before, added: [committed, ...after] });
+    } else {
+      this.hooks.onOp({ kind: 'add-items', pageId: committed.pageId, items: [committed] });
+    }
+    this.invalidate();
+    return true;
   }
 
   /** The pending line as an element (fresh id each call — only commitLine keeps one). */
@@ -1020,6 +1344,12 @@ export class BoardCanvas implements ItemSurface {
       points: pts,
       createdAt: Date.now(),
     };
+    // Mind map: ink written strictly inside a bubble joins it, so the bubble
+    // keeps owning everything it visibly contains. The stroke and the changed
+    // membership have to be one undo step, which is what the 'edit' op already
+    // expresses — its inverse removes what was added and restores what was
+    // removed, and the bubble appears on both sides under the same id.
+    const join = this.mindMapOn ? this.innermostBubbleContaining(stroke) : null;
     store.addStroke(stroke);
     // paint it straight into the settled copy rather than invalidating: a
     // finished stroke should never cost a full repaint
@@ -1029,6 +1359,16 @@ export class BoardCanvas implements ItemSurface {
       const s = this.settledZoom * DPR;
       ctx.setTransform(s, 0, 0, s, -rect.x * s, -rect.y * s);
       drawStroke(ctx, stroke, this.paper());
+    }
+    if (join) {
+      // the membership change is invisible, so the fast repaint above still stands
+      const after: BubbleElement = {
+        ...join,
+        members: [...join.members.filter((id) => store.boardItem(this.nb.id, id) != null), stroke.id],
+      };
+      store.replaceItems(after.pageId, [after]);
+      this.hooks.onOp({ kind: 'edit', pageId: stroke.pageId, removed: [join], added: [stroke, after] });
+      return;
     }
     this.hooks.onOp({ kind: 'add-stroke', pageId: stroke.pageId, stroke });
   }
@@ -1040,7 +1380,16 @@ export class BoardCanvas implements ItemSurface {
     const hit: Rect = { x: pt[0] - r, y: pt[1] - r, w: r * 2, h: r * 2 };
     const whole = toolState.eraserMode !== 'partial';
     for (const it of store.boardItemsIn(this.nb.id, hit)) {
-      if (!isStroke(it)) continue;
+      if (!isStroke(it)) {
+        // Mind map: the eraser takes a bubble by its *outline* — its contents
+        // are not touched, so rubbing out a bubble leaves the handwriting it
+        // held exactly where it was. Whole or partial mode alike: an outline
+        // has no parts to rub away. Every other element kind is left alone
+        // here, exactly as before.
+        if (!this.mindMapOn || it.kind !== 'bubble' || this.erased.has(it.id)) continue;
+        if (nearPolyline(pt[0], pt[1], bubblePolygon(it), it.size / 2 + r)) this.erased.add(it.id);
+        continue;
+      }
       if (whole) {
         if (nearPolyline(pt[0], pt[1], it.points, r + it.size / 2)) this.erased.add(it.id);
         continue;
@@ -1066,6 +1415,13 @@ export class BoardCanvas implements ItemSurface {
       const removed = collectByPage(this.nb.id, ids);
       for (const [pageId, items] of removed) {
         const gone = store.removeItems(pageId, new Set(items.map((i) => i.id)));
+        if (gone.some((g) => !isStroke(g))) {
+          // a mind-map bubble came off too (nothing else here is erasable), so
+          // the whole batch goes as one generic 'remove-items' op rather than a
+          // stroke-only 'erase' — one gesture stays one undo step
+          this.hooks.onOp({ kind: 'remove-items', pageId, items: gone });
+          continue;
+        }
         const strokes = gone.filter(isStroke);
         if (strokes.length) this.hooks.onOp({ kind: 'erase', pageId, strokes });
       }
@@ -1130,6 +1486,139 @@ export class BoardCanvas implements ItemSurface {
 
   private topTapeAt(x: number, y: number): TapeElement | null {
     return topElementAt(this.elementsNear(x, y), 'tape', x, y);
+  }
+
+  // --------------------------------------------------------------- mind map
+  /**
+   * The bubble a press at `pt` grabs, or null. Innermost first (the smallest
+   * bubble whose outline encloses the point), then either:
+   *  - the press is *on* that outline, which is unambiguous, or
+   *  - it is inside it with nothing else under the pen, so there is nothing
+   *    else the press could sensibly be about.
+   *
+   * A press inside a bubble that lands on its contents is therefore never a
+   * grab — writing over your own handwriting has to keep working — and nor is
+   * one that moves before the hold fires (see the 'bubble-press' mode).
+   */
+  private bubbleGrabAt(pt: number[]): BubbleElement | null {
+    const near = this.itemsNear(pt[0], pt[1], TAP_RADIUS);
+    let inner: BubbleElement | null = null;
+    for (const it of near) {
+      if (isStroke(it) || it.kind !== 'bubble') continue;
+      if (!pointInPolygon(pt[0], pt[1], bubblePolygon(it))) continue;
+      if (!inner || it.w * it.h < inner.w * inner.h) inner = it;
+    }
+    if (!inner) return null;
+    const tol = inner.size / 2 + BUBBLE_GRAB_TOL / this.zoom();
+    if (nearPolyline(pt[0], pt[1], bubblePolygon(inner), tol)) return inner;
+    const others = near.filter((it) => isStroke(it) || it.kind !== 'bubble');
+    return topItemAt(others, pt[0], pt[1]) ? null : inner;
+  }
+
+  /**
+   * The tightest bubble that strictly contains `item` — the one that owns it
+   * under the innermost-wins rule. `exclude` keeps a bubble from being
+   * considered its own container.
+   */
+  private innermostBubbleContaining(item: PageItem, exclude?: string): BubbleElement | null {
+    let best: BubbleElement | null = null;
+    for (const it of store.boardItemsIn(this.nb.id, itemBounds(item))) {
+      if (it.id === item.id || it.id === exclude) continue;
+      if (isStroke(it) || it.kind !== 'bubble') continue;
+      if (!itemFullyInPolygon(item, bubblePolygon(it))) continue;
+      if (!best || it.w * it.h < best.w * best.h) best = it;
+    }
+    return best;
+  }
+
+  /**
+   * Who a freshly committed bubble owns, and which existing bubbles have to be
+   * rewritten for it.
+   *
+   * Membership is **exclusive** and **innermost wins**: an item strictly inside
+   * this bubble joins it unless some tighter bubble also contains it — in which
+   * case that one keeps it, and if that bubble is itself inside this one, the
+   * item still travels with this one, transitively through it. A looser bubble
+   * that held the item loses it, which is the rewrite this returns.
+   */
+  private resolveOwnership(bubble: BubbleElement): {
+    members: PageItem[];
+    before: BubbleElement[];
+    after: BubbleElement[];
+  } {
+    const poly = bubblePolygon(bubble);
+    const area = bubble.w * bubble.h;
+    const members: PageItem[] = [];
+    const edits = new Map<string, BubbleElement>();
+
+    for (const it of store.boardItemsIn(this.nb.id, itemBounds(bubble))) {
+      if (it.id === bubble.id || !itemFullyInPolygon(it, poly)) continue;
+      const owner = this.innermostBubbleContaining(it, bubble.id);
+      if (owner && owner.w * owner.h <= area) continue; // a tighter bubble keeps it
+      members.push(it);
+      if (owner?.members.includes(it.id)) {
+        const cur = edits.get(owner.id) ?? owner;
+        edits.set(owner.id, { ...cur, members: cur.members.filter((id) => id !== it.id) });
+      }
+    }
+
+    // a bubble drawn *around* an existing one joins that one's own container,
+    // so a parent's move keeps carrying everything nested below it
+    const parent = this.innermostBubbleContaining(bubble, bubble.id);
+    if (parent) {
+      const cur = edits.get(parent.id) ?? parent;
+      if (!cur.members.includes(bubble.id)) {
+        edits.set(parent.id, { ...cur, members: [...cur.members, bubble.id] });
+      }
+    }
+
+    const before: BubbleElement[] = [];
+    const after: BubbleElement[] = [];
+    for (const [id, next] of edits) {
+      const cur = store.boardItem(this.nb.id, id);
+      if (!cur || isStroke(cur) || cur.kind !== 'bubble') continue;
+      before.push(cur);
+      // this bubble is being written for a real reason, so take the chance to
+      // drop any member ids that no longer resolve (see BubbleElement.members).
+      // `bubble` itself is not in the store until commitPendingBubble adds it.
+      after.push({
+        ...next,
+        members: next.members.filter((m) => m === bubble.id || store.boardItem(this.nb.id, m) != null),
+      });
+    }
+    return { members, before, after };
+  }
+
+  /**
+   * A bubble plus everything that has to move with it: its live members,
+   * resolved transitively through nested bubbles, with a visited set so a
+   * cycle in corrupt data can't spin. Dead member ids are simply skipped —
+   * `members` is advisory (see BubbleElement).
+   *
+   * Sorted in z-order, because this list is what the view paints during the
+   * move in place of the settled copy.
+   */
+  private bubbleMoveSet(bubble: BubbleElement): PageItem[] {
+    const out: PageItem[] = [];
+    const seen = new Set<string>();
+    const walk = (b: BubbleElement): void => {
+      if (seen.has(b.id)) return;
+      seen.add(b.id);
+      out.push(b);
+      for (const id of b.members) {
+        if (seen.has(id)) continue;
+        const it = store.boardItem(this.nb.id, id);
+        if (!it) continue;
+        if (!isStroke(it) && it.kind === 'bubble') {
+          walk(it);
+          continue;
+        }
+        seen.add(id);
+        out.push(it);
+      }
+    };
+    walk(bubble);
+    return out.sort((a, b) => a.createdAt - b.createdAt || (a.id < b.id ? -1 : 1));
   }
 
   // ----------------------------------------------------------- new elements
@@ -1348,6 +1837,7 @@ export class BoardCanvas implements ItemSurface {
   clearSelection(): boolean {
     const had = this.editor !== null || this.selected.size > 0 || this.lastLassoPath !== null;
     this.commitEdit();
+    this.commitPendingBubble(); // pending state this also settles, like a pending line
     if (this.selected.size) {
       this.setSelection([]);
     } else {
@@ -1362,6 +1852,7 @@ export class BoardCanvas implements ItemSurface {
   /** Called by the notebook when the active tool changes. */
   deactivate(): void {
     this.commitLine();
+    this.commitPendingBubble();
     this.clearSelection();
   }
 
@@ -1444,25 +1935,35 @@ export class BoardCanvas implements ItemSurface {
     this.setSelection(toAdd.map((it) => it.id));
   }
 
-  /** The store changed under us (undo/redo): settle any pending line, drop any selection and repaint. */
+  /** The store changed under us (undo/redo): settle any pending line or bubble, drop any selection and repaint. */
   refresh(): void {
     this.commitLine();
+    this.commitPendingBubble();
     this.clearSelection();
     this.invalidate();
   }
 
   // -------------------------------------------------------------- transform
-  beginTransform(): void {
-    const items = this.selectedItems();
+  /**
+   * `given` is for a drag that is not about the selection at all — a mind-map
+   * bubble held under the pen, moving with everything it owns. Everything
+   * downstream (`updateTransform`, `endTransform`, the one `replace-items` op
+   * they produce, the spatial-index re-filing inside `store.replaceItems`) is
+   * then shared with a selection drag, which is the point: a bubble move is an
+   * ordinary multi-item move with a different way of choosing the items.
+   */
+  beginTransform(given?: PageItem[]): void {
+    const items = given ?? this.selectedItems();
+    const lasso = given ? null : this.lastLassoPath;
     // must match showSelection()'s frame exactly, or the overlay's drag math
     // and ours disagree about what "from" means on the very first tick
-    const frame = this.lastLassoPath ? { ...aabb(this.lastLassoPath), rot: 0 } : itemsFrame(items);
+    const frame = lasso ? { ...aabb(lasso), rot: 0 } : itemsFrame(items);
     if (!items.length || !frame) return;
     this.xfOrig = items;
     this.xfFrame = frame;
     this.xfCur = frame;
     this.xfLive = items;
-    this.xfLassoOrig = this.lastLassoPath;
+    this.xfLassoOrig = lasso;
     this.hooks.onSelectionFrame(this, null); // a drag must never keep the callout open
     this.invalidate(); // hides the originals; the view paints the live copies
   }

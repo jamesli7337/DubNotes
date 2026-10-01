@@ -1,6 +1,16 @@
 import { getPdfPage, isPdfPageFailed } from '../pdf-render';
-import type { ImageElement, PageBackground, PageElement, Paper, ShapeElement, TapeElement, TextElement } from '../types';
+import type {
+  BubbleElement,
+  ImageElement,
+  PageBackground,
+  PageElement,
+  Paper,
+  ShapeElement,
+  TapeElement,
+  TextElement,
+} from '../types';
 import { resolveInkColor } from './freehand';
+import { bubbleRadius } from './geom';
 
 /** Default strip colour for a new tape element. */
 export const TAPE_COLOR = '#fbbf24';
@@ -215,6 +225,9 @@ export function drawElement(
     case 'tape':
       drawTape(ctx, el, peeled?.has(el.id) ?? false);
       break;
+    case 'bubble':
+      drawBubble(ctx, el, paper);
+      break;
   }
   ctx.restore();
 }
@@ -277,6 +290,38 @@ function drawImage(ctx: CanvasRenderingContext2D, el: ImageElement, onReady?: ()
     ctx.fillStyle = 'rgba(128, 128, 128, 0.15)';
     ctx.fillRect(el.x, el.y, el.w, el.h);
   }
+}
+
+/**
+ * A mind-map bubble: just its outline, in the ink it was drawn with. Outline
+ * only, never filled — a bubble sits *under* the handwriting it owns (its
+ * `createdAt` is set below its members'), and anything opaque there would hide
+ * exactly what the bubble was drawn around.
+ *
+ * The curve here has to match `bubblePolygon`, which is what hit-testing and
+ * containment use, so the rounded corners read their radius from the same
+ * `bubbleRadius`.
+ */
+function drawBubble(ctx: CanvasRenderingContext2D, el: BubbleElement, paper: Paper): void {
+  ctx.strokeStyle = resolveInkColor(el.color, paper);
+  ctx.lineWidth = el.size;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  if (el.outline === 'ellipse') {
+    ctx.ellipse(el.x + el.w / 2, el.y + el.h / 2, el.w / 2, el.h / 2, 0, 0, Math.PI * 2);
+  } else {
+    const r = bubbleRadius(el);
+    const x1 = el.x + el.w;
+    const y1 = el.y + el.h;
+    ctx.moveTo(el.x + r, el.y);
+    ctx.arcTo(x1, el.y, x1, y1, r);
+    ctx.arcTo(x1, y1, el.x, y1, r);
+    ctx.arcTo(el.x, y1, el.x, el.y, r);
+    ctx.arcTo(el.x, el.y, x1, el.y, r);
+    ctx.closePath();
+  }
+  ctx.stroke();
 }
 
 function drawShape(ctx: CanvasRenderingContext2D, el: ShapeElement, paper: Paper): void {

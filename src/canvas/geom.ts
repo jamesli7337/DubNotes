@@ -1,4 +1,4 @@
-import type { PageElement, PageItem, ShapeElement } from '../types';
+import type { BubbleElement, PageElement, PageItem, ShapeElement } from '../types';
 import { isStroke, nearPolyline } from '../util';
 
 export interface Rect {
@@ -83,6 +83,85 @@ export function pointInElement(el: PageElement, x: number, y: number): boolean {
   const [cx, cy] = elementCenter(el);
   const [lx, ly] = rotateAround(x, y, cx, cy, -el.rotation);
   return lx >= el.x && lx <= el.x + el.w && ly >= el.y && ly <= el.y + el.h;
+}
+
+/**
+ * Corner radius of a `roundrect` bubble, derived from its box rather than
+ * stored — so a resize can never leave a radius that no longer suits the box.
+ * Exported because the renderer has to draw the same curve this polygon
+ * describes (see drawBubble in elements.ts).
+ */
+export function bubbleRadius(el: BubbleElement): number {
+  return Math.min(el.w, el.h) * 0.22;
+}
+
+/**
+ * A bubble's outline as a closed ring of points — the single source of truth
+ * for "is this inside the bubble" and "did the eraser touch its edge". The
+ * bubble's box is the outline (see BubbleElement), so this is derived, never
+ * stored. Both rings come out convex, which is what lets the strict
+ * containment tests below sample points rather than clip segments.
+ *
+ * A bubble's `rotation` is always 0, so unlike `nearShapeOutline` there is no
+ * unrotating to do here.
+ */
+export function bubblePolygon(el: BubbleElement): number[][] {
+  const pts: number[][] = [];
+  if (el.outline === 'ellipse') {
+    const cx = el.x + el.w / 2;
+    const cy = el.y + el.h / 2;
+    const n = 48;
+    for (let i = 0; i < n; i++) {
+      const t = (i / n) * Math.PI * 2;
+      pts.push([cx + (el.w / 2) * Math.cos(t), cy + (el.h / 2) * Math.sin(t)]);
+    }
+    return pts;
+  }
+  const r = bubbleRadius(el);
+  const per = 8; // segments per rounded corner
+  // each corner's arc centre and the angle its quarter-turn starts at, walked
+  // clockwise from the top-right so the ring comes out as one simple polygon
+  const corners: number[][] = [
+    [el.x + el.w - r, el.y + r, -Math.PI / 2],
+    [el.x + el.w - r, el.y + el.h - r, 0],
+    [el.x + r, el.y + el.h - r, Math.PI / 2],
+    [el.x + r, el.y + r, Math.PI],
+  ];
+  for (const [cx, cy, a0] of corners) {
+    for (let i = 0; i <= per; i++) {
+      const a = a0 + (i / per) * (Math.PI / 2);
+      pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+    }
+  }
+  return pts;
+}
+
+/**
+ * Strict containment, as opposed to the any-overlap test `strokeInPolygon`
+ * does: every one of the stroke's own points has to be inside. That difference
+ * is the whole reason this exists — a lasso should catch what it brushes past,
+ * but a bubble that claimed every stroke it merely grazed would steal half of
+ * the word next to it.
+ *
+ * Sampling the points (rather than clipping each segment) is sound because the
+ * only polygons passed here are bubble rings, which are convex: a segment
+ * between two interior points of a convex ring cannot leave it.
+ */
+export function strokeFullyInPolygon(points: number[][], poly: number[][]): boolean {
+  if (!points.length) return false;
+  for (const p of points) if (!pointInPolygon(p[0], p[1], poly)) return false;
+  return true;
+}
+
+/** The same strict test for an element: all four of its (rotated) corners inside. */
+export function elementFullyInPolygon(el: PageElement, poly: number[][]): boolean {
+  for (const c of elementCorners(el)) if (!pointInPolygon(c[0], c[1], poly)) return false;
+  return true;
+}
+
+/** `strokeFullyInPolygon` / `elementFullyInPolygon` for whichever kind of item this is. */
+export function itemFullyInPolygon(it: PageItem, poly: number[][]): boolean {
+  return isStroke(it) ? strokeFullyInPolygon(it.points, poly) : elementFullyInPolygon(it, poly);
 }
 
 /**
@@ -312,6 +391,13 @@ export function transformItems(items: PageItem[], from: Frame, to: Frame): PageI
         return { ...item, ...box, fontSize: item.fontSize * sy };
       case 'shape':
         return { ...item, ...box };
+      case 'bubble':
+        // A bubble's outline, membership tests and move set all read its plain
+        // box, so rotation is pinned at 0 here rather than supported — this is
+        // the one chokepoint every resize/drag passes through, so there is
+        // nowhere else a rotated bubble could come from. (selectionView also
+        // hides the rotate grip, so it normally never even gets asked.)
+        return { ...item, ...box, rotation: 0 };
       case 'image':
       case 'tape':
         return { ...item, ...box };

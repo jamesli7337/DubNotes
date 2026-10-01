@@ -84,7 +84,45 @@ export interface TapeElement extends ElementBase {
   color: string;
 }
 
-export type PageElement = TextElement | ImageElement | ShapeElement | TapeElement;
+/**
+ * A mind-map bubble (v10): the clean outline a loop drawn around content snaps
+ * into, which then owns what the loop enclosed. Boards only — nothing in a
+ * paged notebook creates one.
+ *
+ * The element's own box **is** the outline: an ellipse inscribed in it, or a
+ * rounded rectangle filling it. That is deliberate — every existing box helper
+ * (`itemBounds`, `elementCorners`, `pointInElement`, the board's spatial index)
+ * applies unchanged, and there is no second polygon to keep in step with the
+ * box. `bubblePolygon` (canvas/geom.ts) is the one place that turns the box
+ * into a ring, for hit-testing and containment.
+ *
+ * `rotation` is always 0: membership, the outline and the move set all read the
+ * plain box, so rotating a bubble is forbidden rather than supported — see
+ * `transformItems` (which pins it) and `selectionView` (which hides the grip).
+ */
+export interface BubbleElement extends ElementBase {
+  kind: 'bubble';
+  /** which clean shape the drawn loop was fitted to */
+  outline: 'ellipse' | 'roundrect';
+  /** a CSS colour or the "auto" token, resolved like stroke ink */
+  color: string;
+  /** outline width in board units */
+  size: number;
+  /**
+   * What this bubble owns, by item id — **advisory**, never authoritative on
+   * its own. Erasing a member or undoing past its creation leaves ids here
+   * pointing at items that no longer exist, so every read resolves them
+   * through the store and silently drops what is gone (see
+   * `BoardCanvas.bubbleMoveSet`); stale ids are pruned the next time the
+   * bubble is written for a real reason.
+   *
+   * Direct members only. A nested bubble keeps its own list, and an outer
+   * bubble's move resolves them transitively.
+   */
+  members: string[];
+}
+
+export type PageElement = TextElement | ImageElement | ShapeElement | TapeElement | BubbleElement;
 
 /** Anything that lives on a page and can be selected: a stroke or an element. */
 export type PageItem = Stroke | PageElement;

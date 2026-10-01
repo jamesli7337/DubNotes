@@ -90,6 +90,96 @@ export function lineEnds(fit: ShapeFit): [number[], number[]] {
   ];
 }
 
+/** Geometry of a mind-map bubble fitted to a hand-drawn loop (board units). */
+export interface LoopFit {
+  outline: 'ellipse' | 'roundrect';
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Minimum total stroke length (screen px, counter-scaled for zoom) a loop must have. */
+const MIN_LOOP_LEN = 90;
+/** Minimum extent (screen px, counter-scaled) on the shorter axis — smaller than this is a scribble, not a loop around something. */
+const MIN_LOOP_SIZE = 24;
+/** How far the end may sit from the start and still count as closed: this many screen px (counter-scaled), or this fraction of the path, whichever is more forgiving. */
+const LOOP_CLOSE_PX = 36;
+const LOOP_CLOSE_RATIO = 0.16;
+/**
+ * How much of its own bounding box the loop must actually enclose, as
+ * |signed area| / box area. A circle inscribed in its box encloses π/4 ≈ 0.79
+ * and a rectangle 1.0, while ordinary writing, a zigzag or a there-and-back
+ * squiggle encloses almost nothing — so this is what separates "drew a ring
+ * around something" from "was still writing". Turn it down if deliberate loops
+ * fail to snap, up if writing starts snapping.
+ */
+const MIN_LOOP_FILL = 0.5;
+/**
+ * Above this fill ratio the loop reads as a box rather than an ellipse — an
+ * ellipse can't exceed π/4 ≈ 0.785 however neatly it's drawn, so the midpoint
+ * between that and 1.0 is a natural split.
+ */
+const ROUNDRECT_FILL = 0.88;
+
+/** Twice the enclosed area of the implicitly-closed polygon (shoelace), signed. */
+function shoelace2(pts: number[][]): number {
+  let sum = 0;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    sum += (pts[j][0] - pts[i][0]) * (pts[j][1] + pts[i][1]);
+  }
+  return sum;
+}
+
+/**
+ * Fits a mind-map bubble to a stroke that loops back on itself — or returns
+ * null when it doesn't look like one (a line, a corner, ordinary writing, a
+ * there-and-back squiggle). The test is: long enough, big enough, ends near
+ * where it started, and genuinely *encloses* most of its own bounding box;
+ * then how completely it fills that box decides ellipse vs rounded rectangle.
+ *
+ * `nib` is the stroke width (the fitted box is padded by it, so content sitting
+ * right against the drawn loop ends up inside the clean outline rather than
+ * straddling it) and `zoom` converts the screen-px constants above into the
+ * board units `pts` are measured in — the same reasoning as `isStraight`'s,
+ * so a loop that looks the same size snaps the same way at any zoom.
+ */
+export function recognizeLoop(pts: number[][], nib: number, zoom: number): LoopFit | null {
+  if (pts.length < 12) return null;
+  const total = pathLength(pts);
+  if (total < MIN_LOOP_LEN / zoom) return null;
+
+  const gap = dist(pts[0], pts[pts.length - 1]);
+  if (gap > Math.max(LOOP_CLOSE_PX / zoom, LOOP_CLOSE_RATIO * total)) return null;
+
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const p of pts) {
+    if (p[0] < x0) x0 = p[0];
+    if (p[0] > x1) x1 = p[0];
+    if (p[1] < y0) y0 = p[1];
+    if (p[1] > y1) y1 = p[1];
+  }
+  const bw = x1 - x0;
+  const bh = y1 - y0;
+  const min = MIN_LOOP_SIZE / zoom;
+  if (bw < min || bh < min) return null;
+
+  const fill = Math.abs(shoelace2(pts) / 2) / (bw * bh);
+  if (fill < MIN_LOOP_FILL) return null;
+
+  const pad = nib / 2 + 2 / zoom;
+  return {
+    outline: fill >= ROUNDRECT_FILL ? 'roundrect' : 'ellipse',
+    x: x0 - pad,
+    y: y0 - pad,
+    w: bw + pad * 2,
+    h: bh + pad * 2,
+  };
+}
+
 /**
  * Fits a straight line to a stroke — the farthest point from the start is the
  * tip, and the run up to it must be nearly straight — or returns null when the

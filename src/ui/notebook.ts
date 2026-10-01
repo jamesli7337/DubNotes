@@ -2,7 +2,7 @@ import { AiMode } from '../ai-mode';
 import { AUTO_COLOR, resolveInkColor } from '../canvas/freehand';
 import { itemBounds, rotateAround, unionRects, worldToScreen, type Camera, type Frame } from '../canvas/geom';
 import type { GuideKind } from '../canvas/guide';
-import { BoardCanvas } from '../canvas/board-canvas';
+import { BoardCanvas, mindMapEnabled } from '../canvas/board-canvas';
 import type { ItemSurface } from '../canvas/item-surface';
 import { PageCanvas, TAPE_MIN } from '../canvas/page-canvas';
 import type { Op } from '../canvas/page-canvas';
@@ -402,6 +402,8 @@ class NotebookView {
   private pane!: SecondaryPane;
   /** The app bar's split-screen button — exempt from applyAiToolbarLockdown, like the AI buttons themselves. */
   private splitBtn!: HTMLButtonElement;
+  /** The board app bar's mind-map toggle. Boards only — null in a paged notebook, which has no such mode. */
+  private mindMapBtn: HTMLButtonElement | null = null;
 
   constructor(root: HTMLElement, nb: Notebook) {
     this.root = root;
@@ -628,7 +630,23 @@ class NotebookView {
     // nothing. Split stays (a board can host a reference pane exactly like a
     // notebook can), and so does Import, whose menu drops its PDF-pages entry
     // on a board and keeps Insert image (see openInsertMenu).
-    if (this.isBoard) rightGroup.append(this.splitBtn, importBtn, paperBtn);
+    if (this.isBoard) {
+      // Mind-map mode: one switch for the whole board, remembered per board
+      // (see mindMapEnabled). Boards only — a paged notebook has no bubbles,
+      // so the button isn't built at all there rather than shown doing nothing.
+      this.mindMapBtn = el('button', {
+        class: 'iconbtn',
+        title: 'Mind map',
+        'aria-label': 'Mind map',
+      }) as HTMLButtonElement;
+      this.mindMapBtn.append(icon('mindmap'));
+      this.mindMapBtn.addEventListener('click', () => {
+        this.board?.setMindMap(!mindMapEnabled(this.nb.id));
+        this.refreshMindMapBtn();
+      });
+      this.refreshMindMapBtn();
+      rightGroup.append(this.mindMapBtn, this.splitBtn, importBtn, paperBtn);
+    }
     else rightGroup.append(this.aiToggleBtn, this.aiSendBtn, this.splitBtn, importBtn, exportBtn, pagesBtn, paperBtn);
     bar.append(back, this.titleEl, rightGroup);
     this.appBarRightGroup = rightGroup;
@@ -1188,6 +1206,11 @@ class NotebookView {
           // the board's own onDown handles its pending line directly. All this
           // has to do is stop the press that cleared a selection from also
           // drawing, which on a page is what markDismissingPress buys.
+          // A snapped mind-map bubble is settled here as well: the board's
+          // onDown would do it too (this runs first, so that call finds
+          // nothing), but a press that is spent on the bubble must be flagged
+          // either way so it never also leaves a mark.
+          if (this.board?.commitPendingBubble()) dismissed = true;
           if (dismissed) this.board?.markDismissingPress();
           return;
         }
@@ -3552,6 +3575,15 @@ class NotebookView {
     this.refreshAiControls();
   }
 
+  /** Reflects mind-map mode on its app-bar toggle. Boards only; a no-op when there is no such button. */
+  private refreshMindMapBtn(): void {
+    const btn = this.mindMapBtn;
+    if (!btn) return;
+    const on = this.board ? this.board.mindMap : mindMapEnabled(this.nb.id);
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', String(on));
+  }
+
   /** Reflects AI mode's global state on the single app-bar toggle + send buttons, and on undo/redo (which switch to AI-scoped history while active). */
   private refreshAiControls(): void {
     const active = this.aiMode.isActive();
@@ -3909,15 +3941,22 @@ class NotebookView {
     this.enforceAndMaybeRerender();
   }
 
-  /** Discards an adjustable line on whichever surface still holds one; true if there was one. */
+  /**
+   * Discards an adjustable line on whichever surface still holds one; true if
+   * there was one. A board's snapped-but-uncommitted mind-map bubble is the
+   * same kind of state — the newest thing the user did, not yet in the store
+   * or on either stack — so Undo drops it here too, before the stacks.
+   */
   private cancelPendingLine(): boolean {
     if (this.board?.cancelLine()) return true;
+    if (this.board?.cancelPendingBubble()) return true;
     for (const pc of this.pcByPage.values()) if (pc.cancelLine()) return true;
     return false;
   }
 
   private hasPendingLine(): boolean {
     if (this.board?.hasPendingLine) return true;
+    if (this.board?.hasPendingBubble) return true;
     for (const pc of this.pcByPage.values()) if (pc.hasPendingLine) return true;
     return false;
   }

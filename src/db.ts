@@ -53,11 +53,15 @@ const DB_VERSION = 6;
  *       migrate. Board items live in the same `strokes`/`elements` stores as
  *       any other item, keyed by their chunk's page id, so backup/restore and
  *       the cascade deletes need no board-specific handling.
+ *  10 — the "bubble" element kind (mind-map mode on a board): a fitted outline
+ *       plus the ids of the items it owns. Additive, like "tape" at v5 — it
+ *       rides in the same `elements` store and the same backup array as every
+ *       other element, so there is nothing to migrate.
  *
  * `aiConversations`'s own shape never bumps this: it's outside the backup
  * format entirely (see ALL_STORES), so nothing about it affects Backup's shape.
  */
-export const FORMAT_VERSION = 9;
+export const FORMAT_VERSION = 10;
 
 /** The hex value the pen's first swatch used before it became the "auto" token. */
 const OLD_BLACK_SWATCH = '#1f2530';

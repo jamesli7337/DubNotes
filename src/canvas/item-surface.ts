@@ -155,7 +155,10 @@ export function selectionView(
   return {
     frame,
     opts: {
-      rotate: single != null, // never for a lasso selection
+      // never for a lasso selection, and never for a bubble — its outline,
+      // membership tests and move set all read its plain box, so rotation is
+      // forbidden rather than supported (see transformItems, which pins it)
+      rotate: single != null && single.kind !== 'bubble',
       aspect: lassoPath != null || isText || single?.kind === 'image', // photos and lasso groups keep their proportions
       edges: lassoPath ? 'none' : isText ? 'horizontal' : 'all',
       passThrough: editing,
