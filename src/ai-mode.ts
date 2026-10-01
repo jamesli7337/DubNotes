@@ -263,14 +263,28 @@ export class AiMode {
   /** Feed every committed page op through here. */
   handleOp(op: Op): void {
     if (!this.active) return;
-    // only these two kinds carry this turn's ink; everything else (including
-    // a cross-page selection move, which has no single `pageId`) is a no-op
+    // only these kinds carry this turn's ink; everything else (including a
+    // cross-page selection move, which has no single `pageId`) is a no-op
     // here — narrowed first so the `pageId` access below is well-typed.
-    if (op.kind !== 'add-stroke' && op.kind !== 'add-items') return;
+    // 'remove-items'/'edit' are the eraser's two shapes (whole and partial),
+    // and while AI mode is on the eraser can only ever have reached this
+    // turn's own ink — PageCanvas refuses to hit anything else (see its
+    // `erasable`). So they belong on this stack for the same reason the
+    // creations do: Undo in AI mode must put back what Undo in AI mode took.
+    if (op.kind !== 'add-stroke' && op.kind !== 'add-items' && op.kind !== 'remove-items' && op.kind !== 'edit') return;
     if (op.kind === 'add-items' && !op.aiInk) return;
     const st = this.pages.get(op.pageId);
     if (!st) return;
-    if (op.kind === 'add-stroke') {
+    if (op.kind === 'remove-items') {
+      for (const it of op.items) st.inkIds.delete(it.id);
+    } else if (op.kind === 'edit') {
+      // a partial erase: the rubbed stroke is gone and its surviving segments
+      // are new items with new ids. They are still this turn's ink, so they
+      // have to be tracked as such — otherwise they would outlive the turn
+      // and strand permanent violet marks on the page.
+      for (const it of op.removed) st.inkIds.delete(it.id);
+      for (const it of op.added) st.inkIds.add(it.id);
+    } else if (op.kind === 'add-stroke') {
       // any stroke drawn while AI mode is active is ephemeral ink, regardless
       // of where on the page it lands — see PageCanvas's isAiActive hook, which
       // is what actually painted it violet instead of the user's pen colour.
@@ -333,6 +347,19 @@ export class AiMode {
     this.pages.delete(pageId);
   }
 
+  /**
+   * Whether this item is part of the current turn's ephemeral violet ink on
+   * this page — i.e. something AI mode put there and will take away again.
+   *
+   * This is what confines the eraser while AI mode is on (see PageCanvas's
+   * `erasable`). AI mode is meant to be a surface where you ask a question
+   * and the page itself is only context, so the eraser being enabled there
+   * must mean "rub out what I just asked", never "edit the note underneath".
+   */
+  isAiInk(pageId: string, itemId: string): boolean {
+    return this.pages.get(pageId)?.inkIds.has(itemId) ?? false;
+  }
+
   /** Whether this page has any AI-mode ink left to undo — only meaningful while AI mode is active. */
   canUndo(pageId: string): boolean {
     return (this.pages.get(pageId)?.aiUndo.length ?? 0) > 0;
@@ -363,7 +390,7 @@ export class AiMode {
     this.host.onAiHistoryChanged(pageId);
   }
 
-  /** Undoes one AI-ink creation op (only ever 'add-stroke' or 'add-items' — see handleOp). */
+  /** Undoes one AI-ink op — a creation ('add-stroke'/'add-items') or an erase of this turn's ink ('remove-items'/'edit'); see handleOp for why those are the only four. */
   private invertInk(pageId: string, st: AiPageState, op: Op): void {
     if (op.kind === 'add-stroke') {
       store.removeStrokes(pageId, new Set([op.stroke.id]));
@@ -372,11 +399,21 @@ export class AiMode {
       const ids = new Set(op.items.map((it) => it.id));
       store.removeItems(pageId, ids);
       for (const id of ids) st.inkIds.delete(id);
+    } else if (op.kind === 'remove-items') {
+      const items = op.items.map((it) => ({ ...it }));
+      store.addItems(items);
+      for (const it of items) st.inkIds.add(it.id);
+    } else if (op.kind === 'edit') {
+      store.removeItems(pageId, new Set(op.added.map((it) => it.id)));
+      for (const it of op.added) st.inkIds.delete(it.id);
+      const back = op.removed.map((it) => ({ ...it }));
+      store.addItems(back);
+      for (const it of back) st.inkIds.add(it.id);
     }
     this.host.refreshPage(pageId);
   }
 
-  /** Redoes one previously-undone AI-ink creation op, restoring the same ids. */
+  /** Redoes one previously-undone AI-ink op, restoring the same ids. */
   private forwardInk(pageId: string, st: AiPageState, op: Op): void {
     if (op.kind === 'add-stroke') {
       store.addStroke({ ...op.stroke });
@@ -385,6 +422,15 @@ export class AiMode {
       const items = op.items.map((it) => ({ ...it }));
       store.addItems(items);
       for (const it of items) st.inkIds.add(it.id);
+    } else if (op.kind === 'remove-items') {
+      store.removeItems(pageId, new Set(op.items.map((it) => it.id)));
+      for (const it of op.items) st.inkIds.delete(it.id);
+    } else if (op.kind === 'edit') {
+      store.removeItems(pageId, new Set(op.removed.map((it) => it.id)));
+      for (const it of op.removed) st.inkIds.delete(it.id);
+      const again = op.added.map((it) => ({ ...it }));
+      store.addItems(again);
+      for (const it of again) st.inkIds.add(it.id);
     }
     this.host.refreshPage(pageId);
   }

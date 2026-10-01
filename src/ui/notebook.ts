@@ -3366,7 +3366,19 @@ class NotebookView {
           // stack sees it (see AiMode.handleOp). A snapped line lands as an
           // 'add-items' op like any other insertion, so it's only excluded
           // here when PageCanvas itself flagged it as AI ink (aiInk).
-          const isAiInk = this.aiMode.isActive() && (op.kind === 'add-stroke' || (op.kind === 'add-items' && op.aiInk));
+          // An erase raised while AI mode is on ('remove-items' whole, 'edit'
+          // partial) can only have reached this turn's own ink — PageCanvas
+          // refuses to hit anything else (see its `erasable`) — so it is AI
+          // ink too, and belongs on AiMode's turn stack rather than the main
+          // one. Keeping it off the main stack is also what stops Undo, after
+          // AI mode has been switched off and the turn discarded, from
+          // resurrecting a piece of violet ink as permanent page content.
+          const isAiInk =
+            this.aiMode.isActive() &&
+            (op.kind === 'add-stroke' ||
+              (op.kind === 'add-items' && op.aiInk) ||
+              op.kind === 'remove-items' ||
+              op.kind === 'edit');
           if (!isAiInk) this.pushOp(op);
           this.aiMode.handleOp(op);
         },
@@ -3375,6 +3387,7 @@ class NotebookView {
         onEmptyLassoSelection: (s, frame) => this.showEmptyLassoCallout(s, frame),
         onTapeTap: (s, tapeId, frame) => this.showTapePopover(s, tapeId, frame),
         isAiActive: () => this.aiMode.isActive(),
+        isAiInk: (itemId) => this.aiMode.isAiInk(page.id, itemId),
         onPendingLine: () => this.syncHistory(),
         refreshPage: (pageId) => this.rebuildIfMounted(pageId),
         adoptCrossPageLasso: (pageId, ids, lassoPath) => {

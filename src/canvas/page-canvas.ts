@@ -99,6 +99,8 @@ export type Op =
  * canvas, neither of which a single-surface board has any use for.
  */
 export interface PageHooks extends SurfaceHooks {
+  /** Whether this item is part of the current AI turn's ephemeral ink on this page — only consulted while AI mode is active, to confine the eraser to it (see `erasable`). */
+  isAiInk: (itemId: string) => boolean;
   /** A cross-page drag (see endTransform) just changed another page's items directly in the store — repaint that page's own PageCanvas if it's mounted (a no-op otherwise; it'll read the fresh store on its next mount). */
   refreshPage: (pageId: string) => void;
   /**
@@ -1386,6 +1388,24 @@ export class PageCanvas implements ItemSurface {
     this.guide = null;
   }
 
+  /**
+   * Whether the eraser is allowed to touch this item at all.
+   *
+   * With AI mode off, everything on the page. With AI mode on, *only* this
+   * turn's own violet ink: the page underneath is context for the question
+   * being asked, not something AI mode's stripped-down toolbar should be able
+   * to edit. The eraser is one of the two tools applyAiToolbarLockdown leaves
+   * enabled, and without this gate it could rub out committed strokes and
+   * shapes — which, since Undo is routed to AI mode's own turn stack while
+   * active, could not then be undone without first leaving AI mode.
+   *
+   * Checked at hit-test time rather than at commit time so a protected item
+   * never even dims under the eraser: it simply isn't a candidate.
+   */
+  private erasable(id: string): boolean {
+    return !this.hooks.isAiActive() || this.hooks.isAiInk(id);
+  }
+
   private eraseAt(pt: number[]): void {
     if (toolState.eraserMode === 'partial') {
       this.partialEraseAt(pt);
@@ -1394,7 +1414,7 @@ export class PageCanvas implements ItemSurface {
     let hit = false;
     const eraserTol = ERASER_RADIUS / this.zoom();
     for (const s of store.strokesOf(this.page.id)) {
-      if (this.erased.has(s.id)) continue;
+      if (this.erased.has(s.id) || !this.erasable(s.id)) continue;
       const tol = s.size / 2 + eraserTol;
       if (nearPolyline(pt[0], pt[1], s.points, tol)) {
         this.erased.add(s.id);
@@ -1414,7 +1434,7 @@ export class PageCanvas implements ItemSurface {
     let hit = false;
     const eraserTol = ERASER_RADIUS / this.zoom();
     for (const e of store.elementsOf(this.page.id)) {
-      if (e.kind !== 'shape' || this.erased.has(e.id)) continue;
+      if (e.kind !== 'shape' || this.erased.has(e.id) || !this.erasable(e.id)) continue;
       if (nearShapeOutline(e, pt[0], pt[1], e.size / 2 + eraserTol)) {
         this.erased.add(e.id);
         hit = true;
@@ -1434,6 +1454,7 @@ export class PageCanvas implements ItemSurface {
     let changed = false;
     const eraserTol = ERASER_RADIUS / this.zoom();
     for (const s of store.strokesOf(this.page.id)) {
+      if (!this.erasable(s.id)) continue;
       const tol = s.size / 2 + eraserTol;
       const t2 = tol * tol;
       let gone = this.partial.get(s.id);
