@@ -1,6 +1,7 @@
 import { getPdfPage, isPdfPageFailed } from '../pdf-render';
 import type {
   BubbleElement,
+  ConnectorElement,
   ImageElement,
   PageBackground,
   PageElement,
@@ -228,6 +229,9 @@ export function drawElement(
     case 'bubble':
       drawBubble(ctx, el, paper);
       break;
+    case 'connector':
+      drawConnector(ctx, el, paper);
+      break;
   }
   ctx.restore();
 }
@@ -321,6 +325,21 @@ function drawBubble(ctx: CanvasRenderingContext2D, el: BubbleElement, paper: Pap
     ctx.arcTo(el.x, el.y, x1, el.y, r);
     ctx.closePath();
   }
+  ctx.stroke();
+}
+
+/**
+ * A connector between two bubbles: a straight line between its cached
+ * endpoints. They are a cache of where its anchors resolve to, so nothing is
+ * looked up here — see ConnectorElement and restitchConnectors.
+ */
+function drawConnector(ctx: CanvasRenderingContext2D, el: ConnectorElement, paper: Paper): void {
+  ctx.strokeStyle = resolveInkColor(el.color, paper);
+  ctx.lineWidth = el.size;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(el.ax, el.ay);
+  ctx.lineTo(el.bx, el.by);
   ctx.stroke();
 }
 

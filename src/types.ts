@@ -122,7 +122,45 @@ export interface BubbleElement extends ElementBase {
   members: string[];
 }
 
-export type PageElement = TextElement | ImageElement | ShapeElement | TapeElement | BubbleElement;
+/** Which side of a bubble a connector is anchored to — the four revealed nodes. */
+export type BubbleNode = 'n' | 'e' | 's' | 'w';
+
+/**
+ * A line joining two mind-map bubbles (v11). Boards only.
+ *
+ * What is *authoritative* is the two anchors: a bubble id and which of its
+ * nodes. `ax`/`ay`/`bx`/`by` are a cache of where those anchors currently
+ * resolve to, and `x`/`y`/`w`/`h` the bounding box of that pair — both derived,
+ * both stored anyway, because the board's spatial index and its viewport
+ * culling work on an item's bounds and a connector with no bounds of its own
+ * would be invisible to them (and so would never repaint, or would be found
+ * nowhere near where it is drawn). `restitchConnectors` is the one place that
+ * recomputes them, and it runs inside the same transform — and the same
+ * `replace-items` op — as the move that invalidated them.
+ *
+ * `rotation` is always 0: the box is a bounding box, not an oriented frame.
+ */
+export interface ConnectorElement extends ElementBase {
+  kind: 'connector';
+  a: { bubbleId: string; node: BubbleNode };
+  b: { bubbleId: string; node: BubbleNode };
+  /** a CSS colour or the "auto" token, resolved like stroke ink */
+  color: string;
+  /** line width in board units */
+  size: number;
+  ax: number;
+  ay: number;
+  bx: number;
+  by: number;
+}
+
+export type PageElement =
+  | TextElement
+  | ImageElement
+  | ShapeElement
+  | TapeElement
+  | BubbleElement
+  | ConnectorElement;
 
 /** Anything that lives on a page and can be selected: a stroke or an element. */
 export type PageItem = Stroke | PageElement;

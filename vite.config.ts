@@ -9,10 +9,12 @@ import { defineConfig, type Plugin } from 'vite';
  * absence from the cache used to break "Import PDF pages" offline.
  *
  * It rewrites the two `__SW_*__` tokens in public/sw.js (see that file):
- *  - __SW_PRECACHE__: index.html, every emitted .js/.css (Vite's fingerprinted
- *    chunks and the pdf.js worker .mjs), and the un-hashed pdfjs-wasm/*.wasm copies
- *    that scripts/copy-pdfjs-wasm.mjs puts in public/.
- *  - __SW_BUILD__: a digest of that list plus the WASM bytes, which names the
+ *  - __SW_PRECACHE__: index.html, manifest.webmanifest, every emitted .js/.css
+ *    (Vite's fingerprinted chunks and the pdf.js worker .mjs), the un-hashed
+ *    pdfjs-wasm/*.wasm copies that scripts/copy-pdfjs-wasm.mjs puts in public/,
+ *    and the app icons in public/icons/.
+ *  - __SW_BUILD__: a digest of that list plus the bytes of every un-fingerprinted
+ *    entry (WASM, icons, manifest), which names the
  *    cache. Because it lands in sw.js itself, the file's bytes change on every
  *    deploy that changes an asset — that byte diff is what makes the browser
  *    pick up the new worker at all.
@@ -32,13 +34,22 @@ function swPrecache(): Plugin {
       const wasm = readdirSync(join(dist, 'pdfjs-wasm'))
         .filter((f) => f.endsWith('.wasm'))
         .map((f) => `pdfjs-wasm/${f}`);
-      const list = ['index.html', ...emitted.sort(), ...wasm.sort()];
+      const icons = readdirSync(join(dist, 'icons'))
+        .filter((f) => f.endsWith('.png'))
+        .map((f) => `icons/${f}`);
+      // The app icons and the manifest are precached for the same reason
+      // index.html is: they're served from fixed, un-fingerprinted URLs, so the
+      // install-time `cache: 'reload'` fetch is the only thing that reliably
+      // replaces them (and the icons specifically) on a deploy.
+      const list = ['index.html', 'manifest.webmanifest', ...emitted.sort(), ...wasm.sort(), ...icons.sort()];
 
       const digest = createHash('sha256');
       digest.update(list.join('\n'));
-      // hashed names cover the chunks; the WASM paths never change, so hash
-      // their contents too or a pdfjs upgrade could reuse the old cache name
-      for (const w of wasm) digest.update(readFileSync(join(dist, w)));
+      // hashed names cover the chunks; the WASM, icon and manifest paths never
+      // change, so hash their contents too — otherwise a pdfjs upgrade, or a
+      // new app icon, would reuse the old cache name and every already-installed
+      // client would keep serving the previous file out of cache forever.
+      for (const f of [...wasm, ...icons, 'manifest.webmanifest']) digest.update(readFileSync(join(dist, f)));
       const build = digest.digest('hex').slice(0, 12);
 
       const swPath = join(dist, 'sw.js');

@@ -1216,6 +1216,9 @@ class NotebookView {
           // nothing), but a press that is spent on the bubble must be flagged
           // either way so it never also leaves a mark.
           if (this.board?.commitPendingBubble()) dismissed = true;
+          // revealed connection nodes are view state, so putting them away is
+          // not itself worth spending the press on — the board's own onDown
+          // decides whether this press grabs a node or dismisses them
           if (dismissed) this.board?.markDismissingPress();
           return;
         }

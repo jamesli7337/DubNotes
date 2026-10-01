@@ -1,4 +1,4 @@
-import type { BubbleElement, PageElement, PageItem, ShapeElement } from '../types';
+import type { BubbleElement, BubbleNode, ConnectorElement, PageElement, PageItem, ShapeElement } from '../types';
 import { isStroke, nearPolyline } from '../util';
 
 export interface Rect {
@@ -134,6 +134,75 @@ export function bubblePolygon(el: BubbleElement): number[][] {
     }
   }
   return pts;
+}
+
+/**
+ * Where a bubble's connection node sits, in board units: the midpoint of that
+ * side of its box. One formula serves both outlines — an inscribed ellipse
+ * touches its box exactly at the side midpoints, so the node lands on the drawn
+ * curve either way.
+ */
+export function bubbleNodePoint(el: BubbleElement, node: BubbleNode): [number, number] {
+  const cx = el.x + el.w / 2;
+  const cy = el.y + el.h / 2;
+  switch (node) {
+    case 'n':
+      return [cx, el.y];
+    case 's':
+      return [cx, el.y + el.h];
+    case 'w':
+      return [el.x, cy];
+    case 'e':
+      return [el.x + el.w, cy];
+  }
+}
+
+/** All four nodes of a bubble, for drawing the revealed handles and for hit-testing them. */
+export function bubbleNodes(el: BubbleElement): { node: BubbleNode; pt: [number, number] }[] {
+  return (['n', 'e', 's', 'w'] as BubbleNode[]).map((node) => ({ node, pt: bubbleNodePoint(el, node) }));
+}
+
+/** The node of `el` whose point is closest to (x, y) — where a connector dropped on a bubble attaches. */
+export function nearestBubbleNode(el: BubbleElement, x: number, y: number): BubbleNode {
+  let best: BubbleNode = 'n';
+  let bestD = Infinity;
+  for (const { node, pt } of bubbleNodes(el)) {
+    const d = (pt[0] - x) ** 2 + (pt[1] - y) ** 2;
+    if (d < bestD) {
+      bestD = d;
+      best = node;
+    }
+  }
+  return best;
+}
+
+/**
+ * The bounding box a connector carries for the spatial index: the two endpoints'
+ * aabb, never thinner than the line itself, so a perfectly horizontal or
+ * vertical connector still has a box the index and the viewport cull can see.
+ */
+export function connectorBox(ax: number, ay: number, bx: number, by: number, size: number): Rect {
+  const pad = Math.max(size / 2, 1);
+  return aabb(
+    [
+      [ax, ay],
+      [bx, by],
+    ],
+    pad
+  );
+}
+
+/** True when (x, y) is within `tol` of a connector's drawn line. */
+export function nearConnector(el: ConnectorElement, x: number, y: number, tol: number): boolean {
+  return nearPolyline(
+    x,
+    y,
+    [
+      [el.ax, el.ay],
+      [el.bx, el.by],
+    ],
+    tol
+  );
 }
 
 /**
@@ -391,6 +460,14 @@ export function transformItems(items: PageItem[], from: Frame, to: Frame): PageI
         return { ...item, ...box, fontSize: item.fontSize * sy };
       case 'shape':
         return { ...item, ...box };
+      case 'connector': {
+        // endpoints ride along so a whole-group drag looks right on the very
+        // first tick; restitchConnectors then re-derives them from the bubbles,
+        // which is what they actually mean (see ConnectorElement)
+        const [nax, nay] = mapPoint(item.ax, item.ay, from, to);
+        const [nbx, nby] = mapPoint(item.bx, item.by, from, to);
+        return { ...item, ...box, rotation: 0, ax: nax, ay: nay, bx: nbx, by: nby };
+      }
       case 'bubble':
         // A bubble's outline, membership tests and move set all read its plain
         // box, so rotation is pinned at 0 here rather than supported — this is
@@ -409,6 +486,18 @@ export function transformItems(items: PageItem[], from: Frame, to: Frame): PageI
 export function translateItems(items: PageItem[], dx: number, dy: number): PageItem[] {
   return items.map((item): PageItem => {
     if (isStroke(item)) return { ...item, points: item.points.map((p) => [p[0] + dx, p[1] + dy, p[2]]) };
+    // a connector's cached endpoints are part of its geometry, so they move too
+    if (item.kind === 'connector') {
+      return {
+        ...item,
+        x: item.x + dx,
+        y: item.y + dy,
+        ax: item.ax + dx,
+        ay: item.ay + dy,
+        bx: item.bx + dx,
+        by: item.by + dy,
+      };
+    }
     return { ...item, x: item.x + dx, y: item.y + dy };
   });
 }

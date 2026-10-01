@@ -57,11 +57,14 @@ const DB_VERSION = 6;
  *       plus the ids of the items it owns. Additive, like "tape" at v5 — it
  *       rides in the same `elements` store and the same backup array as every
  *       other element, so there is nothing to migrate.
+ *  11 — the "connector" element kind (mind-map links): two bubble ids with an
+ *       anchor node each, plus cached endpoints and the bounding box the board's
+ *       spatial index needs. Additive, same as 10.
  *
  * `aiConversations`'s own shape never bumps this: it's outside the backup
  * format entirely (see ALL_STORES), so nothing about it affects Backup's shape.
  */
-export const FORMAT_VERSION = 10;
+export const FORMAT_VERSION = 11;
 
 /** The hex value the pen's first swatch used before it became the "auto" token. */
 const OLD_BLACK_SWATCH = '#1f2530';

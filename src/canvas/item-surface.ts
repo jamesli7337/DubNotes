@@ -333,9 +333,16 @@ export interface LineEdit {
 export const SHAPE_CUE_OPACITY = 0.35;
 /** How many trailing live points the hold-still check averages over, instead of comparing only against the single previous sample. */
 export const STILL_TRAIL = 5;
-/** Radius of a pending line's endpoint handles (screen px, counter-scaled for zoom). Drawn smaller than LINE_HANDLE_HIT on purpose — the grab target stays generous even though the dot itself reads small. */
+/** Radius of a pending line's endpoint handles (screen px, counter-scaled for zoom). */
 export const LINE_HANDLE_R = 5;
-export const LINE_HANDLE_HIT = 14;
+/**
+ * How close a press must land to an endpoint to grab it instead of committing
+ * the line (screen px, counter-scaled for zoom). Still a little wider than the
+ * dot that's drawn, so the handle doesn't demand pixel accuracy — but only a
+ * little: every px of slop here is page you can't tap to dismiss the line, and
+ * too much slop means a press meant to commit grabs an endpoint instead.
+ */
+export const LINE_HANDLE_HIT = 7;
 
 /**
  * Whether the pen has actually moved, judged against a short trailing average
@@ -386,17 +393,24 @@ export class LineSnapHold {
   private cueTimer: ReturnType<typeof setTimeout> | null = null;
   private holdTimer: ReturnType<typeof setTimeout> | null = null;
 
-  /** (Re)starts both timers, dropping any already running — called on every real movement. */
-  arm(onCue: () => void, onHold: () => void): void {
+  /**
+   * (Re)starts both timers, dropping any already running — called on every real
+   * movement. `cueMs`/`holdMs` override the straighten durations for a hold
+   * that isn't a mid-stroke one: those are long on purpose, so an ordinary
+   * pause while writing never reads as intent, but a deliberate press-and-hold
+   * on something (a mind-map bubble) has no such ambiguity to guard against and
+   * would feel broken at the same timings.
+   */
+  arm(onCue: () => void, onHold: () => void, cueMs = SHAPE_CUE_MS, holdMs = SHAPE_HOLD_MS): void {
     this.disarm();
     this.cueTimer = setTimeout(() => {
       this.cueTimer = null;
       onCue();
-    }, SHAPE_CUE_MS);
+    }, cueMs);
     this.holdTimer = setTimeout(() => {
       this.holdTimer = null;
       onHold();
-    }, SHAPE_HOLD_MS);
+    }, holdMs);
   }
 
   disarm(): void {
