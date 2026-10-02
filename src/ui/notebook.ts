@@ -3,7 +3,7 @@ import { AUTO_COLOR, resolveInkColor } from '../canvas/freehand';
 import { itemBounds, rotateAround, unionRects, worldToScreen, type Camera, type Frame } from '../canvas/geom';
 import type { GuideKind } from '../canvas/guide';
 import { BoardCanvas, mindMapEnabled } from '../canvas/board-canvas';
-import type { ItemSurface } from '../canvas/item-surface';
+import { cloneItems, type ItemSurface } from '../canvas/item-surface';
 import { PageCanvas, TAPE_MIN } from '../canvas/page-canvas';
 import type { Op } from '../canvas/page-canvas';
 import { SelectionOverlay } from '../canvas/selection';
@@ -3174,7 +3174,7 @@ class NotebookView {
     } else {
       dx = dy = target.page.id === this.clipboardPage ? PASTE_OFFSET : 0;
     }
-    const items = this.clipboard.map((it) => PageCanvas.cloneItem(it, target.page.id, this.nb.id, dx, dy));
+    const items = cloneItems(this.clipboard, target.page.id, this.nb.id, dx, dy);
     // pasting again (without an explicit target) lands the next copy one step further along
     if (!at && dx) this.clipboard = items.map((it) => JSON.parse(JSON.stringify(it)) as PageItem);
     target.pasteItems(items);
@@ -3185,7 +3185,7 @@ class NotebookView {
     const pc = this.selPc;
     const items = pc?.selectedItems() ?? [];
     if (!pc || !items.length) return false;
-    pc.pasteItems(items.map((it) => PageCanvas.cloneItem(it, pc.page.id, this.nb.id, PASTE_OFFSET, PASTE_OFFSET)));
+    pc.pasteItems(cloneItems(items, pc.page.id, this.nb.id, PASTE_OFFSET, PASTE_OFFSET));
     return true;
   }
 

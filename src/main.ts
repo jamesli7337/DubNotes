@@ -46,13 +46,6 @@ async function boot(): Promise<void> {
 function route(): void {
   const app = document.getElementById('app');
   if (!app) return;
-  // Throwaway board phase-0 spike (src/ui/board-spike.ts) — hidden, nothing in
-  // the UI links here, and dynamically imported so it stays out of the app
-  // bundle. Delete this branch and the file together.
-  if (location.hash === '#board-spike') {
-    void import('./ui/board-spike').then((m) => m.mountBoardSpike(app));
-    return;
-  }
   const m = location.hash.match(/^#\/nb\/([^/]+)/);
   const f = location.hash.match(/^#\/f\/([^/]+)/);
   if (m && store.notebooks.has(m[1])) {

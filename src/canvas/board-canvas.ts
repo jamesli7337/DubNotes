@@ -31,7 +31,9 @@ import {
   bubblePolygon,
   connectorBox,
   nearConnector,
+  nearElementOutline,
   nearestBubbleNode,
+  nearShapeOutline,
   elementInPolygon,
   itemBounds,
   itemFullyInPolygon,
@@ -85,9 +87,9 @@ import { TAPE_MIN } from './page-canvas';
 /**
  * A board's whole visible surface: one canvas the size of the viewport,
  * redrawn from `store.boardItemsIn` culled to the visible world rect. There
- * are no pages and no tiles — the spike (src/ui/board-spike.ts) measured 9.9ms
- * for a worst case of 1861 visible items at zoom 0.2 on an iPad, so a single
- * culled repaint fits the frame budget and tiling can wait.
+ * are no pages and no tiles — a throwaway spike measured 9.9ms for a worst case
+ * of 1861 visible items at zoom 0.2 on an iPad, so a single culled repaint fits
+ * the frame budget and tiling can wait.
  *
  * Two canvases, for the same reason PageCanvas has two:
  *  - `settled` holds the paper plus every committed item, rendered for a world
@@ -163,18 +165,41 @@ const BUBBLE_GRAB_TOL = 14;
  *    not misread an ordinary pause while writing; a press that lands on a
  *    bubble and stays there has no such ambiguity, so this sits near the
  *    platform's own long-press feel instead.
- *  - The slop is far wider, and — crucially — measured in **screen** px against
- *    the press's own client coordinates rather than in board units against a
- *    board-space press point. A resting hand wanders a few px (diagonally,
- *    which is what made a 4-unit board-space threshold cancel on ~3px of
- *    genuine jitter), and a board-space threshold also counts *camera*
+ *  - The slop is wider than a tap's, and — crucially — measured in **screen**
+ *    px against the press's own client coordinates rather than in board units
+ *    against a board-space press point. A resting hand wanders a few px
+ *    (diagonally, which is what made a 4-unit board-space threshold cancel on
+ *    ~3px of genuine jitter), and a board-space threshold also counts *camera*
  *    movement as pen travel — so a one-finger pan or the palm-rejection camera
  *    rewind under a resting pen would cancel a grab that the pen never moved
- *    for.
+ *    for. It sits between the few px a resting hand covers and the ~15px of
+ *    extent even the smallest letter has, so it is what catches writing that
+ *    is too slow and too local to trip BUBBLE_HOLD_PATH quickly.
  */
 const BUBBLE_CUE_MS = 220;
-const BUBBLE_HOLD_MS = 550;
-const BUBBLE_HOLD_SLOP = 20;
+const BUBBLE_HOLD_MS = 700;
+const BUBBLE_HOLD_SLOP = 12;
+/**
+ * Cumulative travel (screen px) that cancels the hold, counting only movement
+ * that `trailMoved` judges real.
+ *
+ * Displacement alone is not enough to tell writing from resting: small, slow
+ * handwriting wanders back and forth and can stay within BUBBLE_HOLD_SLOP of
+ * where it started for the whole hold window, so the grab would fire in the
+ * middle of a letter. Path length sees that immediately — a letter is tens of
+ * px of travel whatever its extent.
+ *
+ * Counting only `trailMoved` steps helps — a hand whose tremor oscillates
+ * about a point stays within 1.5 units of the trailing mean and contributes
+ * nothing — but a hand that *drifts* or circles slowly while resting does
+ * accumulate real path, so this is set well above what such a hand manages
+ * inside one hold (a 4px-radius wander is under 60px over BUBBLE_HOLD_MS)
+ * rather than as tight as writing alone would allow. Writing is caught twice
+ * over anyway: handwriting runs an order of magnitude faster than that (~0.4
+ * px/ms even when slow, so ~200ms to get here), and anything with more than
+ * BUBBLE_HOLD_SLOP of extent trips the displacement check first.
+ */
+const BUBBLE_HOLD_PATH = 72;
 
 /** Revealed connection nodes: drawn radius and press target (screen px, counter-scaled for zoom). */
 const NODE_R = 5;
@@ -313,6 +338,17 @@ export class BoardCanvas implements ItemSurface {
    */
   private grabClient: number[] | null = null;
   /**
+   * Every board point this press has visited while it might still become a
+   * grab. Two jobs: `trailMoved` reads it to tell real movement from a resting
+   * hand's wobble, and if the hold is cancelled it seeds the stroke that takes
+   * over — so a mark that began as a possible grab keeps the ink it already
+   * laid down instead of restarting from a straight line to wherever the pen
+   * had got to.
+   */
+  private pressTrail: number[][] = [];
+  /** Cumulative screen-px travel of this press, real movement only — see BUBBLE_HOLD_PATH. */
+  private pressPath = 0;
+  /**
    * Mind map: the bubble whose connection nodes are currently revealed. Like
    * `lineEdit` this outlives the press that created it — the nodes stay up so
    * a connector can be dragged out of one, and the next press elsewhere puts
@@ -336,6 +372,19 @@ export class BoardCanvas implements ItemSurface {
   private xfCur: Frame | null = null;
   private xfLive: PageItem[] | null = null;
   private xfLassoOrig: number[][] | null = null;
+  /**
+   * Items that ride along with a *pure move* of the selection without being
+   * part of it: a selected bubble's transitive members and the connectors
+   * hanging off them.
+   *
+   * Kept apart from `xfOrig` rather than folded into it, because they must only
+   * follow a translation. A resize is the selection's own business — scaling a
+   * bubble's box deliberately leaves its contents alone, which is what makes
+   * re-resolving membership after a resize meaningful (see `reresolveResized`)
+   * — so on any gesture that changes size or rotation these stay exactly where
+   * they are, and are left out of the op entirely.
+   */
+  private xfExtra: PageItem[] | null = null;
   private editor: BoardTextEditor | null = null;
 
   constructor(nb: Notebook, camera: Camera, hooks: BoardHooks) {
@@ -562,6 +611,7 @@ export class BoardCanvas implements ItemSurface {
     if (!this.xfOrig && !this.editor && !this.partial.size) return null;
     const ids = new Set<string>();
     if (this.xfOrig) for (const it of this.xfOrig) ids.add(it.id);
+    if (this.xfExtra) for (const it of this.xfExtra) ids.add(it.id);
     if (this.editor) ids.add(this.editor.el.id);
     for (const id of this.partial.keys()) ids.add(id);
     return ids;
@@ -695,6 +745,8 @@ export class BoardCanvas implements ItemSurface {
     this.pressClient = [e.clientX, e.clientY];
     this.lastClient = [e.clientX, e.clientY];
     this.grabClient = null;
+    this.pressTrail = [pt];
+    this.pressPath = 0;
 
     // a snapped line waiting to be adjusted: a press on one of its endpoint
     // handles drags that end; a press anywhere else commits it, and is a
@@ -865,6 +917,7 @@ export class BoardCanvas implements ItemSurface {
     const slop = TAP_SLOP / this.zoom();
     for (const ev of list) {
       const pt = this.toBoard(ev);
+      const prevClient = this.lastClient;
       this.lastClient = [ev.clientX, ev.clientY];
       switch (this.mode) {
         case 'draw': {
@@ -889,12 +942,23 @@ export class BoardCanvas implements ItemSurface {
           break;
         }
         case 'bubble-press': {
-          // Travelled far enough that this was never a grab — carry on with
-          // whatever the real tool is, from the original press point. Measured
-          // in screen px against the press's own client position, so neither a
-          // resting hand's jitter nor a camera pan reads as travel (see
-          // BUBBLE_HOLD_SLOP).
-          if (Math.hypot(ev.clientX - this.pressClient[0], ev.clientY - this.pressClient[1]) < BUBBLE_HOLD_SLOP) break;
+          // Is this still a plausible hold, or is the pen writing? Two checks,
+          // both in screen px so that neither a camera pan nor the zoom level
+          // changes the feel:
+          //   - how far it has *travelled* in total, counting only movement
+          //     `trailMoved` calls real (BUBBLE_HOLD_PATH) — this is what
+          //     catches slow writing, which can keep its displacement small
+          //     for the whole hold window;
+          //   - how far it has got *from* the press (BUBBLE_HOLD_SLOP) — this
+          //     catches a quick decisive drag before enough samples have
+          //     arrived to accumulate much path.
+          const real = trailMoved(this.pressTrail, pt);
+          this.pressTrail.push(pt);
+          if (real) this.pressPath += Math.hypot(ev.clientX - prevClient[0], ev.clientY - prevClient[1]);
+          const far = Math.hypot(ev.clientX - this.pressClient[0], ev.clientY - this.pressClient[1]) >= BUBBLE_HOLD_SLOP;
+          if (this.pressPath < BUBBLE_HOLD_PATH && !far) break;
+          // never a grab after all — hand the contact to the real tool, which
+          // picks up the whole trail so nothing drawn so far is lost
           this.bubbleHit = null;
           this.bubbleCue = false;
           this.disarmHold();
@@ -1107,6 +1171,8 @@ export class BoardCanvas implements ItemSurface {
     this.bubbleHit = null;
     this.bubbleCue = false;
     this.grabClient = null;
+    this.pressTrail = [];
+    this.pressPath = 0;
     this.connect = null;
     // nodeEdit, like lineEdit, deliberately outlives the press that revealed it
     this.adjustEnd = null; // lineEdit itself outlives the press: it stays until something commits it
@@ -1151,7 +1217,9 @@ export class BoardCanvas implements ItemSurface {
       }
       this.mode = 'draw';
       this.liveTool = { kind: t.kind, color: this.aiInkColor(t.color), size: t.size };
-      this.live = [this.pressPt, pt];
+      // the points this press already visited, when it was recorded (a
+      // cancelled bubble hold) — otherwise just the two ends, as before
+      this.live = this.pressTrail.length > 1 ? [...this.pressTrail] : [this.pressPt, pt];
       this.loopMode = this.mindMapOn && kind === 'pen';
       this.shapeMode = kind === 'pen' && !this.mindMapOn;
       this.armSnapHold();
@@ -1526,22 +1594,37 @@ export class BoardCanvas implements ItemSurface {
     const whole = toolState.eraserMode !== 'partial';
     for (const it of store.boardItemsIn(this.nb.id, hit)) {
       if (!isStroke(it)) {
-        // Mind map: the eraser takes a bubble by its *outline* — its contents
-        // are not touched, so rubbing out a bubble leaves the handwriting it
-        // held exactly where it was. Whole or partial mode alike: an outline
-        // has no parts to rub away. Every other element kind is left alone
-        // here, exactly as before.
-        if (!this.mindMapOn || this.erased.has(it.id)) continue;
-        if (it.kind === 'connector') {
-          if (nearConnector(it, pt[0], pt[1], it.size / 2 + r)) this.erased.add(it.id);
-          continue;
-        }
-        if (it.kind !== 'bubble') continue;
-        if (nearPolyline(pt[0], pt[1], bubblePolygon(it), it.size / 2 + r)) {
-          this.erased.add(it.id);
-          // a bubble's connectors go with it, in the same batch — so they dim
-          // together under the eraser and come back together on undo
-          for (const c of this.attachedConnectors([it])) this.erased.add(c.id);
+        // An element is taken whole — it has no parts to rub out, in either
+        // eraser mode — and always by its *outline* rather than its interior,
+        // so rubbing ink out inside a box leaves the box standing. That is the
+        // rule a page's own eraser states for shapes (eraseShapesAt); text and
+        // tape have no drawn outline of their own, so their box perimeter
+        // stands in for one (nearElementOutline).
+        if (this.erased.has(it.id)) continue;
+        switch (it.kind) {
+          case 'bubble':
+            // mind-map kinds only answer to the eraser while the mode is on
+            if (!this.mindMapOn) break;
+            if (nearPolyline(pt[0], pt[1], bubblePolygon(it), it.size / 2 + r)) {
+              this.erased.add(it.id);
+              // a bubble's connectors go with it, in the same batch — so they
+              // dim together under the eraser and come back together on undo
+              for (const c of this.attachedConnectors([it])) this.erased.add(c.id);
+            }
+            break;
+          case 'connector':
+            if (!this.mindMapOn) break;
+            if (nearConnector(it, pt[0], pt[1], it.size / 2 + r)) this.erased.add(it.id);
+            break;
+          case 'shape':
+            if (nearShapeOutline(it, pt[0], pt[1], it.size / 2 + r)) this.erased.add(it.id);
+            break;
+          case 'text':
+          case 'tape':
+            if (nearElementOutline(it, pt[0], pt[1], r)) this.erased.add(it.id);
+            break;
+          case 'image':
+            break; // an inserted photo is not erasable, on a page or a board
         }
         continue;
       }
@@ -1855,6 +1938,12 @@ export class BoardCanvas implements ItemSurface {
     const to = store.boardItem(this.nb.id, toId);
     if (!from || isStroke(from) || from.kind !== 'bubble') return;
     if (!to || isStroke(to) || to.kind !== 'bubble') return;
+    // already linked? One connector per pair of bubbles, whichever nodes it
+    // happens to join and whichever end it was drawn from — a second line
+    // between the same two bubbles says nothing the first one doesn't.
+    for (const c of this.attachedConnectors([from])) {
+      if (c.a.bubbleId === toId || c.b.bubbleId === toId) return;
+    }
     const toNode = nearestBubbleNode(to, dropAt[0], dropAt[1]);
     const [ax, ay] = bubbleNodePoint(from, fromNode);
     const [bx, by] = bubbleNodePoint(to, toNode);
@@ -1960,6 +2049,80 @@ export class BoardCanvas implements ItemSurface {
       });
     }
     return { members, before, after };
+  }
+
+  /**
+   * What has to travel with a selection that contains bubbles, beyond the
+   * selection itself: each bubble's transitive members and every connector
+   * attached to any bubble that is about to move — the same set a hold-move is
+   * given (`bubbleMoveSet`), minus whatever is already selected.
+   *
+   * Deduplicated by id, so a selection that already holds some of a bubble's
+   * contents (or two nested bubbles whose sets overlap) carries each item once,
+   * and the selection's own copy always wins.
+   */
+  private tagAlongs(selected: PageItem[]): PageItem[] | null {
+    const have = new Set(selected.map((it) => it.id));
+    const out: PageItem[] = [];
+    for (const it of selected) {
+      if (isStroke(it) || it.kind !== 'bubble') continue;
+      for (const m of this.bubbleMoveSet(it)) {
+        if (have.has(m.id)) continue;
+        have.add(m.id);
+        out.push(m);
+      }
+    }
+    return out.length ? out : null;
+  }
+
+  /**
+   * Re-resolves membership for any bubble this transform *resized*, against
+   * the new box and by the same strict containment rule creation uses
+   * (`resolveOwnership`) — a shrink leaves content outside the outline, a grow
+   * takes in whatever it now encloses.
+   *
+   * Only a genuine size change counts. A pure move carries the members along
+   * with it (see `bubbleMoveSet`), so what it owns cannot have changed, and
+   * re-resolving there would quietly re-own whatever the bubble was dropped on.
+   *
+   * Because ownership is exclusive, a growing bubble can also take items off a
+   * looser one; those other bubbles come back as `extraBefore`/`extraAfter` so
+   * the caller can put both sides in the one op. `changed` is just what needs
+   * writing to the store. Called *after* the transform has landed, so every
+   * query here reads final geometry.
+   */
+  private reresolveResized(
+    orig: PageItem[],
+    after: PageItem[]
+  ): { after: PageItem[]; changed: PageItem[]; extraBefore: PageItem[]; extraAfter: PageItem[] } {
+    const sizeBefore = new Map<string, { w: number; h: number }>();
+    for (const it of orig) if (!isStroke(it)) sizeBefore.set(it.id, { w: it.w, h: it.h });
+
+    const inSet = new Set(after.map((it) => it.id));
+    const changed: PageItem[] = [];
+    const extraBefore: PageItem[] = [];
+    const extraAfter: PageItem[] = [];
+    const edited = new Set<string>();
+
+    const next = after.map((it): PageItem => {
+      if (isStroke(it) || it.kind !== 'bubble') return it;
+      const was = sizeBefore.get(it.id);
+      if (!was || (Math.abs(was.w - it.w) < 0.01 && Math.abs(was.h - it.h) < 0.01)) return it;
+      const res = this.resolveOwnership(it);
+      for (let i = 0; i < res.after.length; i++) {
+        const b = res.after[i];
+        // a bubble this transform is already rewriting keeps the version above
+        if (inSet.has(b.id) || edited.has(b.id)) continue;
+        edited.add(b.id);
+        extraBefore.push(res.before[i]);
+        extraAfter.push(b);
+        changed.push(b);
+      }
+      const withMembers: PageItem = { ...it, members: res.members.map((m) => m.id) };
+      changed.push(withMembers);
+      return withMembers;
+    });
+    return { after: next, changed, extraBefore, extraAfter };
   }
 
   /**
@@ -2347,6 +2510,12 @@ export class BoardCanvas implements ItemSurface {
     this.xfCur = frame;
     this.xfLive = items;
     this.xfLassoOrig = lasso;
+    // A hold-move is handed its whole set up front (`given` already holds the
+    // bubble, its members and their connectors). A selection drag is handed
+    // only what the user selected, so a selected bubble's contents are
+    // collected here instead — otherwise dragging a lasso'd bubble would slide
+    // the outline off the handwriting it owns.
+    this.xfExtra = given ? null : this.tagAlongs(items);
     this.hooks.onSelectionFrame(this, null); // a drag must never keep the callout open
     this.invalidate(); // hides the originals; the view paints the live copies
   }
@@ -2354,11 +2523,17 @@ export class BoardCanvas implements ItemSurface {
   updateTransform(frame: Frame): void {
     if (!this.xfOrig || !this.xfFrame) return;
     const same = frame.w === this.xfFrame.w && frame.h === this.xfFrame.h && frame.rot === this.xfFrame.rot;
-    this.xfLive = this.restitchConnectors(
-      same
-        ? translateItems(this.xfOrig, frame.x - this.xfFrame.x, frame.y - this.xfFrame.y)
-        : transformItems(this.xfOrig, this.xfFrame, frame)
-    );
+    const dx = frame.x - this.xfFrame.x;
+    const dy = frame.y - this.xfFrame.y;
+    const base = same
+      ? translateItems(this.xfOrig, dx, dy)
+      : transformItems(this.xfOrig, this.xfFrame, frame);
+    // the tag-alongs translate with a move and sit still for a resize; either
+    // way they are painted by the view, since the settled copy leaves them out
+    const extra = this.xfExtra ? (same ? translateItems(this.xfExtra, dx, dy) : this.xfExtra) : [];
+    // one restitch over the lot, so a connector between a moving bubble and a
+    // standing one resolves against both in their current positions
+    this.xfLive = this.restitchConnectors([...base, ...extra]);
     // remapped fresh from the frozen pre-drag snapshot each tick, never from
     // the previous tick's result, so repeated remaps do not compound
     if (this.xfLassoOrig) {
@@ -2382,15 +2557,20 @@ export class BoardCanvas implements ItemSurface {
     const orig = this.xfOrig;
     const from = this.xfFrame;
     const lassoOrig = this.xfLassoOrig;
+    const extra = this.xfExtra ?? [];
     this.xfOrig = this.xfFrame = this.xfCur = this.xfLive = null;
     this.xfLassoOrig = null;
+    this.xfExtra = null;
     if (!orig || !from) return;
 
     if (frame) {
       const same = frame.w === from.w && frame.h === from.h && frame.rot === from.rot;
+      // a pure move takes the tag-alongs with it, into the same op — so one
+      // undo puts the bubble, its contents and its links all back
+      const moved = same && extra.length ? [...orig, ...extra] : orig;
       const after = this.restitchConnectors(
         same
-          ? translateItems(orig, frame.x - from.x, frame.y - from.y)
+          ? translateItems(moved, frame.x - from.x, frame.y - from.y)
           : transformItems(orig, from, frame).map((it) =>
               !isStroke(it) && it.kind === 'text' ? { ...it, h: textHeight(it) } : it
             )
@@ -2403,7 +2583,17 @@ export class BoardCanvas implements ItemSurface {
         ed.el = after[0] as TextElement;
       } else {
         store.replaceItems(orig[0].pageId, after);
-        this.hooks.onOp({ kind: 'replace-items', pageId: orig[0].pageId, before: orig, after });
+        // a resized bubble encloses something different than it did, so what it
+        // owns is re-resolved against the new box — inside the same op, so one
+        // undo takes the geometry and the membership back together
+        const rr = this.reresolveResized(moved, after);
+        if (rr.changed.length) store.replaceItems(orig[0].pageId, rr.changed);
+        this.hooks.onOp({
+          kind: 'replace-items',
+          pageId: orig[0].pageId,
+          before: [...moved, ...rr.extraBefore],
+          after: [...rr.after, ...rr.extraAfter],
+        });
       }
       // commit the outline's new shape permanently, so it does not snap back on
       // the next showSelection() and a second drag starts where this one ended

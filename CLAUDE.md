@@ -26,7 +26,7 @@ Screens are mounted by calling a `mount*` function with a container element (`mo
 
 ### Routing
 
-`src/main.ts` is the entire router: a hash switch in `route()` matching `#/nb/<id>` (notebook), `#/f/<id>` (folder), else the library root. `hashchange` re-runs `route()`. It also carries `#board-spike` — a **throwaway** infinite-canvas spike (`src/ui/board-spike.ts`, dynamically imported, nothing in the UI links to it); delete that branch and the file together when it's served its purpose. `base: '/DubNotes/'` in `vite.config.ts` is baked in for GitHub Pages' sub-path hosting.
+`src/main.ts` is the entire router: a hash switch in `route()` matching `#/nb/<id>` (notebook), `#/f/<id>` (folder), else the library root. `hashchange` re-runs `route()`. `base: '/DubNotes/'` in `vite.config.ts` is baked in for GitHub Pages' sub-path hosting.
 
 ### State: one in-memory Store, debounced IndexedDB flush
 

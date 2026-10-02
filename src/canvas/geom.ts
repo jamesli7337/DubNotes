@@ -192,6 +192,23 @@ export function connectorBox(ax: number, ay: number, bx: number, by: number, siz
   );
 }
 
+/**
+ * True when (x, y) is within `tol` of an element's box *perimeter* — the
+ * counterpart of `nearShapeOutline` for the kinds that have no drawn outline of
+ * their own (a text box, a tape strip). Rotation is included, since it works
+ * off `elementCorners`.
+ *
+ * Perimeter rather than interior on purpose: it keeps the eraser's rule the
+ * same for every boxed element — rubbing *inside* a box takes what is inside
+ * it, not the box (see PageCanvas.eraseShapesAt, which says the same of a
+ * shape's interior).
+ */
+export function nearElementOutline(el: PageElement, x: number, y: number, tol: number): boolean {
+  const ring = elementCorners(el);
+  ring.push(ring[0]);
+  return nearPolyline(x, y, ring, tol);
+}
+
 /** True when (x, y) is within `tol` of a connector's drawn line. */
 export function nearConnector(el: ConnectorElement, x: number, y: number, tol: number): boolean {
   return nearPolyline(

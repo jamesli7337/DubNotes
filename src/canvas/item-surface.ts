@@ -1,7 +1,7 @@
 import { LASER_COLOR, LASER_FADE_MS, SHAPE_CUE_MS, SHAPE_HOLD_MS } from '../tools';
 import type { PageItem, PageElement, ShapeElement, TapeElement, TextElement } from '../types';
 import { isStroke, nearPolyline, uid } from '../util';
-import { aabb, itemsFrame, pointInElement, type Frame } from './geom';
+import { aabb, itemsFrame, nearConnector, pointInElement, type Frame } from './geom';
 import type { Op } from './page-canvas';
 import type { OverlayOptions } from './selection';
 
@@ -114,7 +114,14 @@ export const IMAGE_FIT = 0.6;
 export function topItemAt(items: PageItem[], x: number, y: number): PageItem | null {
   for (let i = items.length - 1; i >= 0; i--) {
     const it = items[i];
-    const hit = isStroke(it) ? nearPolyline(x, y, it.points, it.size / 2 + TAP_RADIUS) : pointInElement(it, x, y);
+    const hit = isStroke(it)
+      ? nearPolyline(x, y, it.points, it.size / 2 + TAP_RADIUS)
+      : // a connector is a line, not a box: its `x`/`y`/`w`/`h` are only the
+        // bounding box the spatial index needs, so hit-testing it like an
+        // element would claim the whole empty area beside a diagonal one
+        it.kind === 'connector'
+        ? nearConnector(it, x, y, it.size / 2 + TAP_RADIUS)
+        : pointInElement(it, x, y);
     if (hit) return it;
   }
   return null;
@@ -174,6 +181,72 @@ export function cloneItem(it: PageItem, pageId: string, notebookId: string, dx: 
   }
   const el: PageElement = { ...it, ...base, x: it.x + dx, y: it.y + dy };
   return el;
+}
+
+/**
+ * Clones a whole set together, so that references *within* the set point at the
+ * copies rather than back at the originals — which is what `cloneItem` on its
+ * own cannot know about.
+ *
+ * Mind-map links are the reason this exists. A connector names two bubbles and
+ * a bubble names the items it owns; copied verbatim, a duplicated bubble would
+ * own the originals (so dragging the copy would drag them) and a duplicated
+ * connector would still be tied to the originals. So:
+ *  - a connector is kept only when *both* of its bubbles were cloned too, and
+ *    is re-anchored to those copies; one copied without its bubbles is dropped,
+ *    since a link to half a pair has no meaning;
+ *  - a bubble's membership is remapped to the copies, dropping anything that
+ *    wasn't part of the set;
+ *  - a connector's cached endpoints are translated like any other geometry, so
+ *    the copy draws in the right place without waiting for a restitch.
+ *
+ * Nothing here can fire in a paged notebook — neither kind exists there — so
+ * this is `cloneItem` per item for every other caller.
+ */
+export function cloneItems(
+  items: PageItem[],
+  pageId: string,
+  notebookId: string,
+  dx: number,
+  dy: number
+): PageItem[] {
+  const idMap = new Map<string, string>();
+  const clones = items.map((it) => {
+    const c = cloneItem(it, pageId, notebookId, dx, dy);
+    idMap.set(it.id, c.id);
+    return c;
+  });
+  const out: PageItem[] = [];
+  for (const c of clones) {
+    if (isStroke(c)) {
+      out.push(c);
+      continue;
+    }
+    if (c.kind === 'connector') {
+      const a = idMap.get(c.a.bubbleId);
+      const b = idMap.get(c.b.bubbleId);
+      if (!a || !b) continue;
+      out.push({
+        ...c,
+        a: { ...c.a, bubbleId: a },
+        b: { ...c.b, bubbleId: b },
+        ax: c.ax + dx,
+        ay: c.ay + dy,
+        bx: c.bx + dx,
+        by: c.by + dy,
+      });
+      continue;
+    }
+    if (c.kind === 'bubble') {
+      out.push({
+        ...c,
+        members: c.members.map((m) => idMap.get(m)).filter((m): m is string => m !== undefined),
+      });
+      continue;
+    }
+    out.push(c);
+  }
+  return out;
 }
 
 /** The box or ellipse spanning two corners, as a polygon the lasso hit-tests can use as-is. */
