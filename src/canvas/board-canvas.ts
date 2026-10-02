@@ -786,16 +786,35 @@ export class BoardCanvas implements ItemSurface {
     // Everything below produces output, so a dismissing press stops here. It
     // still holds the pointer, so the contact cannot fall through to a pan for
     // the rest of its life; onUp resets the mode and repaints.
+    //
+    // Four exceptions, none of which are output. Taking hold of a bubble
+    // *produces* nothing, so a dismissing press has nothing to suppress there
+    // — without this the press right after a loop snaps — far and away the
+    // likeliest moment to want to move the new bubble — could never grab it,
+    // and neither could the press that happened to clear a selection or put a
+    // set of nodes away. The lasso tool's own tap-to-select is the same kind
+    // of non-output: selecting a different element dismisses the old
+    // selection by replacing it rather than leaving a mark. The shapes tool
+    // landing on an EXISTING shape picks it up to readjust, same reasoning.
+    // The text tool landing on an EXISTING text box opens it for editing,
+    // same again. A tap on empty space with the shapes or text tool is not
+    // exempt — that's exactly where a dismissing tap would otherwise place a
+    // new shape or open a new box, which is the output this gate exists to
+    // prevent. Stopping all of these here left a tap on any unselected
+    // element select nothing, or an existing shape/text box fail to pick
+    // up/open, whenever something else already was selected — which is most
+    // of the time in real use.
     if (this.dismissingPress) {
-      this.commitEdit(); // an open text editor is state this press dismisses too
-      // ...with one exception: taking hold of a bubble *produces* nothing, so a
-      // dismissing press has nothing to suppress there. Without this the press
-      // right after a loop snaps — far and away the likeliest moment to want to
-      // move the new bubble — could never grab it, and neither could the press
-      // that happened to clear a selection or put a set of nodes away.
-      if (this.tryBubblePress(pt)) return;
-      this.mode = 'dismiss';
-      return;
+      const entersExisting =
+        kind === 'lasso' ||
+        (kind === 'shapes' && this.topShapeAt(pt[0], pt[1]) !== null) ||
+        (kind === 'text' && this.topTextAt(pt[0], pt[1]) !== null);
+      if (!entersExisting) {
+        this.commitEdit(); // an open text editor is state this press dismisses too
+        if (this.tryBubblePress(pt)) return;
+        this.mode = 'dismiss';
+        return;
+      }
     }
 
     if (kind === 'laser') {

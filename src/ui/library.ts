@@ -153,7 +153,7 @@ function buildHeader(folder: Folder | null): HTMLElement {
       const backup = JSON.parse(await file.text()) as Backup;
       const ok = await confirmDialog({
         title: 'Import backup?',
-        message: 'This replaces all current notebooks.',
+        message: 'This replaces everything currently in your library.',
         confirmText: 'Import',
         danger: true,
       });
@@ -238,7 +238,7 @@ function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
   const head = el('div', { class: 'section-head' });
   const titleGroup = el('div', { class: 'section-head__title' });
   titleGroup.append(
-    el('h2', { text: folder ? 'Notebooks' : 'All notebooks' }),
+    el('h2', { text: folder ? 'Items' : 'All items' }),
     el('span', { class: 'count', text: `${notebooks.length}` })
   );
   head.append(titleGroup);
@@ -254,7 +254,7 @@ function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
     grid.append(
       el('p', {
         class: 'lib-empty',
-        text: folder ? 'Nothing in this folder yet.' : 'No notebooks yet. Tap “New notebook” to start.',
+        text: folder ? 'Nothing in this folder yet.' : 'Nothing here yet. Tap “New” to start.',
       })
     );
   }
@@ -288,7 +288,7 @@ function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
  */
 function buildViewToggle(root: HTMLElement, folder: Folder | null): HTMLElement {
   const active = viewMode();
-  const seg = el('div', { class: 'view-seg', role: 'group', 'aria-label': 'Notebook layout' });
+  const seg = el('div', { class: 'view-seg', role: 'group', 'aria-label': 'Layout' });
   for (const [mode, label, name] of VIEW_OPTIONS) {
     const b = el('button', {
       class: 'view-seg__btn' + (mode === active ? ' active' : ''),
@@ -315,7 +315,7 @@ function buildViewToggle(root: HTMLElement, folder: Folder | null): HTMLElement 
  */
 function buildSortButton(root: HTMLElement, folder: Folder | null): HTMLElement {
   const active = sortKey();
-  const btn = el('button', { class: 'sort-btn', 'aria-label': 'Sort notebooks' });
+  const btn = el('button', { class: 'sort-btn', 'aria-label': 'Sort' });
   btn.append(
     el('span', { text: SORT_OPTIONS.find(([k]) => k === active)?.[1] ?? '' }),
     icon('chevron-down', 'sm')
@@ -395,7 +395,7 @@ function buildTree(root: HTMLElement, current: Folder | null): HTMLElement {
     const main = el('button', { class: 'tree__main' });
     main.append(
       icon(isOpen && children.length ? 'folder-open' : 'folder', 'sm'),
-      el('span', { class: 'tree__name', text: f ? f.name : 'All notebooks' }),
+      el('span', { class: 'tree__name', text: f ? f.name : 'All items' }),
       el('span', { class: 'tree__count', text: String(store.notebookCount(id)) })
     );
     main.addEventListener('click', () => {
@@ -456,13 +456,13 @@ function openFolderMenu(anchor: HTMLElement, f: Folder | null, root: HTMLElement
           const direct = store.folderItems(f.id).filter((it) => it.kind === 'notebook').length;
           const subs = store.folderList(f.id).length;
           const total = store.notebookCount(f.id);
-          const parentName = f.parentId ? store.folders.get(f.parentId)?.name ?? 'its parent' : 'All notebooks';
+          const parentName = f.parentId ? store.folders.get(f.parentId)?.name ?? 'its parent' : 'All items';
           const n = (k: number, one: string): string => `${k} ${one}${k === 1 ? '' : 's'}`;
           const contents =
             direct === 0 && subs === 0
               ? 'It is empty.'
-              : `It holds ${n(direct, 'notebook')} and ${n(subs, 'subfolder')}` +
-                (total > direct ? ` (${n(total - direct, 'more notebook')} inside them)` : '') +
+              : `It holds ${n(direct, 'item')} and ${n(subs, 'subfolder')}` +
+                (total > direct ? ` (${n(total - direct, 'more item')} inside them)` : '') +
                 `. Nothing will be deleted with it — everything moves up to “${parentName}”.`;
           const ok = await confirmDialog({
             title: `Delete folder “${f.name}”?`,
@@ -514,7 +514,7 @@ function buildFeatured(nb: Notebook): HTMLElement {
   const top = el('div', { class: 'nb-card__toprow' });
   top.append(
     el('span', { class: 'tag tag--tpl', text: firstTemplate(nb) }),
-    el('span', { class: 'nb-card__pages', text: pageLabel(nb) })
+    el('span', { class: 'nb-card__pages', text: sizeLabel(nb) })
   );
   inner.append(
     top,
@@ -552,7 +552,7 @@ function buildCard(nb: Notebook, root: HTMLElement, folder: Folder | null): HTML
   const top = el('div', { class: 'nb-card__toprow' });
   top.append(
     el('span', { class: 'tag', text: firstTemplate(nb) }),
-    el('span', { class: 'nb-card__pages', text: pageLabel(nb) })
+    el('span', { class: 'nb-card__pages', text: sizeLabel(nb) })
   );
 
   const foot = el('div', { class: 'nb-card__foot' });
@@ -564,20 +564,20 @@ function buildCard(nb: Notebook, root: HTMLElement, folder: Folder | null): HTML
   });
 
   const actions = el('div', { class: 'nb-card__actions' });
-  const rename = el('button', { class: 'iconbtn', title: 'Rename', 'aria-label': 'Rename notebook' });
+  const rename = el('button', { class: 'iconbtn', title: 'Rename', 'aria-label': `Rename ${typeName(nb).toLowerCase()}` });
   rename.append(icon('rename'));
   rename.addEventListener('click', async () => {
-    const name = await textPrompt({ title: 'Rename notebook', value: nb.name, confirmText: 'Rename' });
+    const name = await textPrompt({ title: `Rename ${typeName(nb).toLowerCase()}`, value: nb.name, confirmText: 'Rename' });
     if (name == null) return;
     store.renameNotebook(nb.id, name);
     rerender(root, folder);
   });
-  const del = el('button', { class: 'iconbtn', title: 'Delete', 'aria-label': 'Delete notebook' });
+  const del = el('button', { class: 'iconbtn', title: 'Delete', 'aria-label': `Delete ${typeName(nb).toLowerCase()}` });
   del.append(icon('delete'));
   del.addEventListener('click', async () => {
     const ok = await confirmDialog({
       title: `Delete “${nb.name}”?`,
-      message: 'All of its pages and drawings will be removed.',
+      message: nb.kind === 'board' ? 'Everything on it will be removed.' : 'All of its pages and drawings will be removed.',
       confirmText: 'Delete',
       danger: true,
     });
@@ -585,7 +585,7 @@ function buildCard(nb: Notebook, root: HTMLElement, folder: Folder | null): HTML
     store.deleteNotebook(nb.id);
     rerender(root, folder);
   });
-  const more = el('button', { class: 'iconbtn', title: 'More', 'aria-label': 'Notebook actions' });
+  const more = el('button', { class: 'iconbtn', title: 'More', 'aria-label': `${typeName(nb)} actions` });
   more.append(icon('more'));
   more.addEventListener('click', () =>
     openActionMenu(more, [
@@ -665,7 +665,7 @@ function openMoveTo(nb: Notebook, root: HTMLElement, folder: Folder | null): voi
       'aria-current': nb.folderId === id ? 'true' : undefined,
     });
     b.style.setProperty('--depth', String(depth));
-    b.append(icon('folder', 'sm'), el('span', { text: f ? f.name : 'All notebooks' }));
+    b.append(icon('folder', 'sm'), el('span', { text: f ? f.name : 'All items' }));
     b.addEventListener('click', () => {
       modal?.close();
       store.moveNotebook(nb.id, id);
@@ -682,7 +682,7 @@ function openMoveTo(nb: Notebook, root: HTMLElement, folder: Folder | null): voi
 /** Cover picker: palette colours × built-in patterns, applied immediately. */
 function openCoverPicker(nb: Notebook, root: HTMLElement, folder: Folder | null): void {
   const box = el('div', { class: 'dlg cover-picker' });
-  box.append(el('h2', { class: 'dlg__title', text: 'Notebook cover' }));
+  box.append(el('h2', { class: 'dlg__title', text: 'Cover' }));
   let cover: NotebookCover | undefined = nb.cover ? { ...nb.cover } : undefined;
 
   const preview = el('div', { class: 'cover-picker__preview' });
@@ -870,7 +870,7 @@ function newNotebookDialog(): Promise<{ name: string; paper: Paper; kind: 'pages
 // ---------------------------------------------------------------------- fab
 function buildFab(root: HTMLElement, folder: Folder | null): HTMLElement {
   const dock = el('div', { class: 'fab-dock' });
-  const newBtn = el('button', { class: 'primary', text: 'New notebook' });
+  const newBtn = el('button', { class: 'primary', text: 'New' });
   newBtn.prepend(icon('plus'));
   newBtn.addEventListener('click', async () => {
     const result = await newNotebookDialog();
@@ -900,6 +900,24 @@ function buildFab(root: HTMLElement, folder: Folder | null): HTMLElement {
 /** Paper template of the notebook's first page, for the card accent + tag. */
 function firstTemplate(nb: Notebook): PaperTemplate {
   return store.pagesOf(nb.id)[0]?.paper.template ?? 'blank';
+}
+
+/** What to call one item in UI text — a board is not a notebook. */
+function typeName(nb: Notebook): 'Board' | 'Notebook' {
+  return nb.kind === 'board' ? 'Board' : 'Notebook';
+}
+
+/**
+ * What the card's top-right slot says about a notebook's size. A board has no
+ * pages at all — `store.pagesOf` on one returns its persistence *chunks*, so
+ * the old page count read as a meaningless "3 pages" — and counts its items
+ * instead.
+ */
+function sizeLabel(nb: Notebook): string {
+  if (nb.kind !== 'board') return pageLabel(nb);
+  const n = store.boardItemCount(nb.id);
+  if (!n) return 'Empty';
+  return `${n} item${n === 1 ? '' : 's'}`;
 }
 
 /** Page count excluding the automatic trailing blank page (always at least 1). */

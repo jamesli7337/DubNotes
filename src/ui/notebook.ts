@@ -511,14 +511,15 @@ class NotebookView {
       location.hash = this.nb.folderId ? `#/f/${this.nb.folderId}` : '#/'; // back to the notebook's folder
     });
 
+    const typeWord = this.isBoard ? 'board' : 'notebook';
     this.titleEl = el('span', {
       class: 'nb-appbar__title',
       text: this.nb.name,
-      title: 'Rename notebook',
+      title: `Rename ${typeWord}`,
     });
     this.titleEl.addEventListener('click', async () => {
       const name = await textPrompt({
-        title: 'Rename notebook',
+        title: `Rename ${typeWord}`,
         value: this.nb.name,
         confirmText: 'Rename',
       });
@@ -1927,7 +1928,9 @@ class NotebookView {
       });
       menu.append(b);
     };
-    item('Split screen page', 'book', () => this.pane.startPagePick());
+    // "page" here means the *other* notebook's pages, which on a board would
+    // read as though the board had one of its own
+    item(this.isBoard ? 'Split screen notebook' : 'Split screen page', 'book', () => this.pane.startPagePick());
     item('Split screen image', 'image', () => this.pane.startImagePick());
     item('Split screen PDF', 'pdf', () => this.pane.startPdfPick());
     modal = openAnchoredModal(anchor, menu);
@@ -2150,7 +2153,12 @@ class NotebookView {
         opts.append(el('span', { class: 'hint', text: 'Point and drag: the trail fades and is never saved.' }));
         break;
       case 'hand':
-        opts.append(el('span', { class: 'hint', text: 'Drag anywhere — with the pen, a finger, or the mouse — to pan the page.' }));
+        opts.append(
+          el('span', {
+            class: 'hint',
+            text: `Drag anywhere — with the pen, a finger, or the mouse — to pan the ${this.isBoard ? 'board' : 'page'}.`,
+          })
+        );
         break;
       case 'text':
         opts.append(
@@ -3675,6 +3683,11 @@ class NotebookView {
 
     let scope: 'page' | 'all' = 'all';
     let draft: Paper = { ...page.paper };
+    // A board is one continuous sheet, so there is no page to name in the title
+    // and no this-page/all-pages choice to offer — the control was always
+    // ignored there (see the Confirm handler), so it is dropped rather than
+    // relabelled.
+    const isBoard = this.isBoard;
 
     // spacing only means something once there's ruling to space — dim it for
     // blank, but keep the stored value so it comes back for ruled/grid/dot
@@ -3698,7 +3711,7 @@ class NotebookView {
 
     const wrap = el('div', { class: 'dlg paper-menu' });
     wrap.append(
-      el('h2', { class: 'dlg__title', text: `Page ${page.index + 1} paper` }),
+      el('h2', { class: 'dlg__title', text: isBoard ? 'Board paper' : `Page ${page.index + 1} paper` }),
       field('Template', templateRow),
       field('Line spacing', spacingRow),
       field(
@@ -3706,14 +3719,18 @@ class NotebookView {
         segmented(['White', 'Cream', 'Dark'], COLORS.indexOf(draft.color), (i) => {
           draft = { ...draft, color: COLORS[i] };
         })
-      ),
-      field(
-        'Apply to',
-        segmented(['This page', 'All pages'], 1, (i) => {
-          scope = i === 0 ? 'page' : 'all';
-        })
       )
     );
+    if (!isBoard) {
+      wrap.append(
+        field(
+          'Apply to',
+          segmented(['This page', 'All pages'], 1, (i) => {
+            scope = i === 0 ? 'page' : 'all';
+          })
+        )
+      );
+    }
 
     const confirmBtn = el('button', { class: 'primary dlg__wide', text: 'Confirm' });
     wrap.append(confirmBtn);

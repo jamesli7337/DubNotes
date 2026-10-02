@@ -716,14 +716,32 @@ export class PageCanvas implements ItemSurface {
     }
 
     // Everything below this point is a tool producing output, so a dismissing
-    // press stops here — see dismissingPress. It still captures the pointer, so
-    // the contact can't fall through to a native pan for the rest of its life;
-    // onUp's tail resets the mode and repaints.
+    // press stops here — see dismissingPress. Three exceptions, none of which
+    // are output: the lasso tool's own tap-to-select (selecting a different
+    // element isn't a mark to withdraw, it *is* the dismissal — the press
+    // that lands on element B while A is selected dismisses A and selects B
+    // in the same motion); the shapes tool landing on an EXISTING shape
+    // (picks it up to readjust, same non-output reasoning); and the text tool
+    // landing on an EXISTING text box (opens it for editing). A tap on empty
+    // space with the shapes or text tool is not exempt — that's exactly where
+    // a dismissing tap would otherwise place a new shape or open a new box,
+    // which is the output this gate exists to prevent. Stopping all three
+    // here left a tap on any unselected element select nothing, or an
+    // existing shape/text box fail to pick up/open, whenever something else
+    // already was selected — which is most of the time in real use. It still
+    // captures the pointer, so the contact can't fall through to a native pan
+    // for the rest of its life; onUp's tail resets the mode and repaints.
     if (this.dismissingPress) {
-      this.mode = 'dismiss';
-      this.commitEdit(); // an open text editor is state this press dismisses too
-      this.capture(e);
-      return;
+      const entersExisting =
+        kind === 'lasso' ||
+        (kind === 'shapes' && this.topShapeAt(pt[0], pt[1]) !== null) ||
+        (kind === 'text' && this.topTextAt(pt[0], pt[1]) !== null);
+      if (!entersExisting) {
+        this.mode = 'dismiss';
+        this.commitEdit(); // an open text editor is state this press dismisses too
+        this.capture(e);
+        return;
+      }
     }
 
     // a press on a tape strip is a peel / cover tap unless it turns into a drag
