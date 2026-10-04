@@ -35,6 +35,7 @@ import {
   textHeight,
 } from './elements';
 import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
+import { InkSmoother, endAtPen, type ClientSample } from './ink-smoothing';
 import { Guide, projectOnEdge, type EdgeLine, type GuideKind } from './guide';
 import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
 import {
@@ -252,6 +253,8 @@ export class PageCanvas implements ItemSurface {
   private lastTapAt = 0;
   private lastTapPt: number[] = [0, 0];
   private pressPt: number[] = [0, 0];
+  /** Screen-space EMA on this contact's samples; only pen/highlighter ink reads its output. */
+  private inkSmoother = new InkSmoother();
   private isMounted = false;
 
   /** line-snap (pen tool only): the stroke snaps to a line once the pen has held still */
@@ -604,7 +607,7 @@ export class PageCanvas implements ItemSurface {
     if (this.laser.length) this.schedule();
   }
 
-  private toLocal(e: PointerEvent): number[] {
+  private toLocal(e: ClientSample): number[] {
     const r = this.view!.getBoundingClientRect();
     const x = (e.clientX - r.left) * (this.pw / r.width);
     const y = (e.clientY - r.top) * (this.ph / r.height);
@@ -696,6 +699,7 @@ export class PageCanvas implements ItemSurface {
     e.preventDefault();
     if (this.mode || this.xfOrig) return;
 
+    this.inkSmoother.reset(e);
     const pt = this.toLocal(e);
     const kind = toolState.kind;
 
@@ -871,6 +875,7 @@ export class PageCanvas implements ItemSurface {
     const events = coalesced.length ? coalesced : [e];
     for (const ev of events) {
       const pt = this.toLocal(ev);
+      const smoothed = this.inkSmoother.next(ev);
       switch (this.mode) {
         case 'draw': {
           if (this.lineEdit) {
@@ -882,8 +887,9 @@ export class PageCanvas implements ItemSurface {
           // immediately previous sample, so one noisy sample (ordinary
           // input jitter during an otherwise-still hold) can't by itself
           // read as real movement and restart the whole hold-still timer
-          const moved = trailMoved(this.live, pt);
-          const next = this.snapped(pt);
+          const ink = this.toLocal(smoothed);
+          const moved = trailMoved(this.live, ink);
+          const next = this.snapped(ink);
           // A pen held still still delivers events — at Pencil rate ~120 a
           // second, each coalescing several more. Appending every one of them
           // piled thousands of coincident points onto a stroke that had
@@ -1033,6 +1039,7 @@ export class PageCanvas implements ItemSurface {
         }
         this.dropLineEdit(); // the pointer was lost mid-snap — keep the ink it started as
       }
+      if (!cancelled) endAtPen(this.live, this.snapped(this.toLocal(this.inkSmoother.lastRaw)));
       this.commitDrawStroke();
       return;
     }

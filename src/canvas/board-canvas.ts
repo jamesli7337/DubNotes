@@ -49,6 +49,7 @@ import {
   type Rect,
 } from './geom';
 import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
+import { InkSmoother, endAtPen, type ClientSample } from './ink-smoothing';
 import {
   drawElement,
   layoutText,
@@ -330,6 +331,8 @@ export class BoardCanvas implements ItemSurface {
    */
   private pressClient: number[] = [0, 0];
   private lastClient: number[] = [0, 0];
+  /** Screen-space EMA on this contact's samples; only pen/highlighter ink reads its output. */
+  private inkSmoother = new InkSmoother();
   /**
    * Where the grab actually began, in client coordinates — set when the hold
    * fires, not when the press landed. The drag is measured from here so the
@@ -540,7 +543,7 @@ export class BoardCanvas implements ItemSurface {
   }
 
   /** Screen (client) point -> board coordinates. */
-  private toBoard(e: PointerEvent): number[] {
+  private toBoard(e: ClientSample): number[] {
     const r = this.view!.getBoundingClientRect();
     const z = this.camera.zoom || 1;
     let p = e.pressure;
@@ -739,6 +742,7 @@ export class BoardCanvas implements ItemSurface {
     if (kind === 'hand') return; // the notebook's own hand-drag pan handles this
     e.preventDefault();
     this.capture(e);
+    this.inkSmoother.reset(e);
     const pt = this.toBoard(e);
     this.pressPt = pt;
     this.pressClient = [e.clientX, e.clientY];
@@ -935,6 +939,7 @@ export class BoardCanvas implements ItemSurface {
     const slop = TAP_SLOP / this.zoom();
     for (const ev of list) {
       const pt = this.toBoard(ev);
+      const smoothed = this.inkSmoother.next(ev);
       const prevClient = this.lastClient;
       this.lastClient = [ev.clientX, ev.clientY];
       switch (this.mode) {
@@ -946,8 +951,9 @@ export class BoardCanvas implements ItemSurface {
             this.lineEdit.b = [pt[0], pt[1]]; // already snapped: the pen drags the far end
             break;
           }
-          const moved = trailMoved(this.live, pt);
-          this.live.push(pt);
+          const ink = this.toBoard(smoothed);
+          const moved = trailMoved(this.live, ink);
+          this.live.push(ink);
           if ((this.shapeMode || this.loopMode) && moved) {
             if (this.pendingFit) {
               // keep tracking the pen so the ghost's length and direction adjust
@@ -1107,6 +1113,7 @@ export class BoardCanvas implements ItemSurface {
           }
           this.dropLineEdit(); // the pointer was lost mid-snap — keep the ink it started as
         }
+        if (!cancelled) endAtPen(this.live, this.toBoard(this.inkSmoother.lastRaw));
         this.reset();
         if (!cancelled) this.commitStroke();
         else this.live = [];
