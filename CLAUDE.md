@@ -109,6 +109,8 @@ Two known blind spots of CDP-synthetic events, worth remembering when a report c
 - **`touch-action` gesture disambiguation** (tap vs. pan) is resolved by native gesture recognition before any pointer event fires; CDP's `Input.dispatch*` bypasses that, so a missing `touch-action: none` on a small interactive element inside a pannable ancestor can be a real device-only bug.
 - Bugs depending on scroll/camera position relative to `position: fixed` chrome need a scripted pan to a specific offset to reproduce.
 
+**Assert store contents by reading IndexedDB, not the `store` singleton.** Vite serves two instances of a module — the app imports `/src/store.ts?t=<hmr-stamp>` while a dynamic `import()` from evaluated script gets `/src/store.ts` — so an eval-side `store` is a *different object* with its own empty maps, and assertions against it pass or fail depending on HMR state. Open the `noteapp` database directly (`indexedDB.open('noteapp')`, then `getAll()` on `strokes`/`pages`/…) and wait out the ~0.7s flush debounce first. That is also the only way to check what was actually persisted rather than what is merely in memory. Store *logic* can still be tested eval-side as long as one `evalJs` call does the whole thing — one instance, self-contained.
+
 Keep throwaway CDP scripts and Chrome profile directories in the scratchpad directory, not the repo, and clean them up when done. Never kill Chrome by a blanket/name-based command (e.g. `taskkill /IM chrome.exe`) — only by the specific PID your own script spawned.
 
 ## Deployment

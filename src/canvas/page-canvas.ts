@@ -34,7 +34,7 @@ import {
   TEXT_LINE_HEIGHT,
   textHeight,
 } from './elements';
-import { drawStroke, resolveInkColor } from './freehand';
+import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
 import { Guide, projectOnEdge, type EdgeLine, type GuideKind } from './guide';
 import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
 import {
@@ -1204,7 +1204,11 @@ export class PageCanvas implements ItemSurface {
       tool: this.liveTool.kind,
       color: this.liveTool.color,
       size: this.liveTool.size,
-      points: this.live,
+      // filled in to a zoom-independent density: how far apart the samples
+      // landed depends on the zoom (and the hand speed) this was drawn at, and
+      // the outline is built from whatever it is given — see
+      // densifyStrokePoints. A no-op for anything drawn around 100%.
+      points: densifyStrokePoints(this.live, this.liveTool.size),
       createdAt: Date.now(),
     };
     store.addStroke(stroke);

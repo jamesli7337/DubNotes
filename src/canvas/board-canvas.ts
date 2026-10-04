@@ -48,7 +48,7 @@ import {
   type Frame,
   type Rect,
 } from './geom';
-import { drawStroke, resolveInkColor } from './freehand';
+import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
 import {
   drawElement,
   layoutText,
@@ -81,7 +81,7 @@ import {
   type ItemSurface,
   type SurfaceHooks,
 } from './item-surface';
-import { drawTemplate } from './templates';
+import { drawTemplate, SPACING_PX } from './templates';
 import { TAPE_MIN } from './page-canvas';
 
 /**
@@ -573,11 +573,10 @@ export class BoardCanvas implements ItemSurface {
     ctx.setTransform(s, 0, 0, s, -rect.x * s, -rect.y * s);
 
     const paper = this.paper();
-    // drawTemplate lays its ruling out from wherever the transform puts (0, 0)
-    // and snaps to device pixels itself, so translating to a whole multiple of
-    // the largest spacing keeps the ruling locked to the board as we pan
-    // instead of shifting phase with the margin box.
-    const PHASE = 54 * 4; // a multiple of every SPACING_PX value (26/38/54)
+    // drawTemplate lays its ruling out from wherever the transform puts (0, 0),
+    // so the translation must land on a whole multiple of the paper's own gap
+    // or the lattice shifts phase as the margin box moves with pan and zoom.
+    const PHASE = SPACING_PX[paper.spacing];
     const gx = Math.floor(rect.x / PHASE) * PHASE;
     const gy = Math.floor(rect.y / PHASE) * PHASE;
     ctx.save();
@@ -1556,13 +1555,17 @@ export class BoardCanvas implements ItemSurface {
 
   // --------------------------------------------------------------------- ink
   private commitStroke(): void {
-    const pts = this.live;
+    const raw = this.live;
     this.live = [];
-    if (!pts.length) return;
-    if (pts.length === 1) {
-      const [x, y, p] = pts[0];
-      pts.push([x + 0.1, y + 0.1, p]); // a tap becomes a dot
+    if (!raw.length) return;
+    if (raw.length === 1) {
+      const [x, y, p] = raw[0];
+      raw.push([x + 0.1, y + 0.1, p]); // a tap becomes a dot
     }
+    // filled in to a zoom-independent density before anything measures or
+    // stores it — a board is drawn on at zooms from 0.5 to 3 and read back at
+    // any of them, so this is where it matters most. See densifyStrokePoints.
+    const pts = densifyStrokePoints(raw, this.liveTool.size);
     const b = boundsOfPoints(pts);
     const stroke: Stroke = {
       id: uid(),

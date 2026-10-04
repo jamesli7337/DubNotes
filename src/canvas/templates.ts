@@ -13,7 +13,7 @@ const PAPER_INK: Record<PaperColor, PaperInk> = {
   dark: { bg: '#1e2330', rule: '#3f4759' },
 };
 
-const SPACING_PX: Record<PaperSpacing, number> = {
+export const SPACING_PX: Record<PaperSpacing, number> = {
   narrow: 26,
   medium: 38,
   wide: 54,
