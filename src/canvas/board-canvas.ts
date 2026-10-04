@@ -49,7 +49,7 @@ import {
   type Rect,
 } from './geom';
 import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
-import { InkSmoother, endAtPen, type ClientSample } from './ink-smoothing';
+import { INK_SETTLE_SIGMA_PX, InkSmoother, smoothInkStroke, type ClientSample } from './ink-smoothing';
 import {
   drawElement,
   layoutText,
@@ -1113,7 +1113,6 @@ export class BoardCanvas implements ItemSurface {
           }
           this.dropLineEdit(); // the pointer was lost mid-snap — keep the ink it started as
         }
-        if (!cancelled) endAtPen(this.live, this.toBoard(this.inkSmoother.lastRaw));
         this.reset();
         if (!cancelled) this.commitStroke();
         else this.live = [];
@@ -1569,10 +1568,12 @@ export class BoardCanvas implements ItemSurface {
       const [x, y, p] = raw[0];
       raw.push([x + 0.1, y + 0.1, p]); // a tap becomes a dot
     }
+    // settled once at pen-up, at a fixed screen size — see smoothInkStroke
+    const settled = smoothInkStroke(raw, INK_SETTLE_SIGMA_PX / this.zoom());
     // filled in to a zoom-independent density before anything measures or
     // stores it — a board is drawn on at zooms from 0.5 to 3 and read back at
     // any of them, so this is where it matters most. See densifyStrokePoints.
-    const pts = densifyStrokePoints(raw, this.liveTool.size);
+    const pts = densifyStrokePoints(settled, this.liveTool.size);
     const b = boundsOfPoints(pts);
     const stroke: Stroke = {
       id: uid(),

@@ -35,7 +35,7 @@ import {
   textHeight,
 } from './elements';
 import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
-import { InkSmoother, endAtPen, type ClientSample } from './ink-smoothing';
+import { INK_SETTLE_SIGMA_PX, InkSmoother, smoothInkStroke, type ClientSample } from './ink-smoothing';
 import { Guide, projectOnEdge, type EdgeLine, type GuideKind } from './guide';
 import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
 import {
@@ -1039,7 +1039,6 @@ export class PageCanvas implements ItemSurface {
         }
         this.dropLineEdit(); // the pointer was lost mid-snap — keep the ink it started as
       }
-      if (!cancelled) endAtPen(this.live, this.snapped(this.toLocal(this.inkSmoother.lastRaw)));
       this.commitDrawStroke();
       return;
     }
@@ -1204,6 +1203,9 @@ export class PageCanvas implements ItemSurface {
       const [x, y, p] = this.live[0];
       this.live.push([x + 0.1, y + 0.1, p]); // a tap becomes a dot
     }
+    // settled once at pen-up, at a fixed screen size — see smoothInkStroke. Not
+    // a stroke riding a ruler / protractor edge, which is already exact.
+    const settled = this.snapEdge ? this.live : smoothInkStroke(this.live, INK_SETTLE_SIGMA_PX / this.zoom());
     const stroke: Stroke = {
       id: uid(),
       pageId: this.page.id,
@@ -1215,7 +1217,7 @@ export class PageCanvas implements ItemSurface {
       // landed depends on the zoom (and the hand speed) this was drawn at, and
       // the outline is built from whatever it is given — see
       // densifyStrokePoints. A no-op for anything drawn around 100%.
-      points: densifyStrokePoints(this.live, this.liveTool.size),
+      points: densifyStrokePoints(settled, this.liveTool.size),
       createdAt: Date.now(),
     };
     store.addStroke(stroke);
