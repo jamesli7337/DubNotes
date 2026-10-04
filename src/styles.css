@@ -2690,6 +2690,12 @@ select {
   justify-content: space-between;
   flex: none;
 }
+.pagemgr__titles {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
 .pagemgr__title {
   font-family: var(--font-head);
   font-weight: 600;
@@ -2697,12 +2703,23 @@ select {
   color: var(--primary);
   margin: 0;
 }
+.pagemgr__hint {
+  font-size: 12px;
+  color: var(--on-surface-variant);
+}
+/* 200px minimum rather than the 150px this used to carry: at 150px an iPad
+   fitted 4–5 columns and a page thumbnail came out ~160px wide for an 820px
+   page, far too small to recognise what was on it. 200px gives 4 columns of
+   ~215px in landscape and 3 of ~250px in portrait, and `min(…, 100%)` keeps
+   it from overflowing a window narrower than one column. The arrow buttons
+   that used to sit under every thumbnail are gone too, which is the other
+   half of the crowding. */
 .pagemgr__grid {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(200px, 100%), 1fr));
   gap: 18px;
   padding: 4px 4px 8px;
   align-content: start;
@@ -2711,6 +2728,46 @@ select {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+/* The reorder preview, same mechanism as the dock's rows (see
+   enableReorderDrag): `--slide`/`--slide-y` are the offset a displaced card
+   animates to, and both the transform and its transition only exist while
+   `is-reordering` is on the grid, so a grid of cards isn't left holding a
+   transform — and a standing compositing layer — for the rest of the
+   session. Two axes here, unlike the dock's single row: a card displaced
+   past the end of a row travels down and back across to the next one. */
+.pagemgr__grid.is-reordering .pagemgr__card {
+  transform: translate(var(--slide, 0px), var(--slide-y, 0px));
+  transition: transform 160ms ease;
+}
+/* the card being held: the thumbnail hollows out to a dashed slot while the
+   .pagemgr__ghost copy of it tracks the finger, so it reads as the page
+   having been lifted out of the grid rather than simply dimmed */
+.pagemgr__card--lifted .pagemgr__thumb {
+  background: var(--surface-c);
+  border-style: dashed;
+  border-color: var(--primary);
+  box-shadow: none;
+}
+.pagemgr__card--lifted .pagemgr__thumb canvas,
+.pagemgr__card--lifted .pagemgr__num,
+.pagemgr__card--lifted .pagemgr__actions {
+  opacity: 0;
+}
+/* the lifted page itself, following the pointer — above .modal-backdrop's
+   z-index: 100, since it's appended to <body> and not inside the card */
+.pagemgr__ghost {
+  position: fixed;
+  border-radius: var(--r-lg);
+  overflow: hidden;
+  background: #fff;
+  /* deliberately heavier than --sh-3: this one has to read as held above the
+     modal card, not merely raised off the page */
+  box-shadow: 0 18px 40px -8px rgba(27, 42, 74, 0.45), 0 0 0 2px var(--primary);
+  pointer-events: none;
+  z-index: 120;
+  transform: scale(1.06) rotate(-1.5deg);
+  opacity: 0.94;
 }
 .pagemgr__thumbbtn {
   display: flex;
@@ -2730,14 +2787,21 @@ select {
      touch starting anywhere in the grid could ever scroll it. `pan-y` is the
      axis the grid actually needs (it never scrolls horizontally) — pinch
      and double-tap-zoom stay off, so the reorder timer isn't racing those,
-     only a real vertical pan. touch-action is still locked in at this
-     touch's own pointerdown the same as the swatch case, so a hold that
-     isn't perfectly still can in principle still get read as the start of a
-     scroll and fire pointercancel before the long-press timer elapses
-     (already handled below: that cancels the arm cleanly, same as any other
-     early release) — accepted deliberately here so scrolling works from
-     anywhere on the grid, including thumbnails, which matters far more than
-     it did for the swatch row. */
+     only a real vertical pan.
+
+     touch-action is latched for the whole gesture at this touch's own
+     pointerdown, so `pan-y` cannot be switched off once a hold has armed a
+     drag — and a reorder drag in a grid is mostly vertical movement, i.e.
+     exactly the pan this still permits, which is what made the drag die
+     (pointercancel) the moment it started moving. The drag now cancels that
+     pan itself, by preventDefault()ing touchmove while it is live (see
+     enableReorderDrag's `blockTouchScroll`); that works because arming
+     required the finger to be held still, so no pan has actually begun yet.
+     A hold that isn't perfectly still can still be read as the start of a
+     scroll and fire pointercancel before the hold timer elapses, which is
+     the right outcome — it was a scroll. Scrolling from anywhere on the
+     grid, thumbnails included, matters far more here than it did for the
+     swatch row. */
   touch-action: pan-y;
 }
 .pagemgr__thumb {

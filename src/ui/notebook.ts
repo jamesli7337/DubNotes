@@ -1725,8 +1725,8 @@ class NotebookView {
   }
 
   /**
-   * Generic hold-then-drag reorder, shared by the page manager's cards and
-   * the main view's pages: press `trigger` and hold it still (within
+   * Generic hold-then-drag reorder for the main view's pages: press
+   * `trigger` (a page's header label) and hold it still (within
    * LONG_PRESS_SLOP) for LONG_PRESS_MS to arm a drag of `item` among its
    * siblings inside `scroller` (direct children matching `itemSelector`).
    * Below the long-press threshold, or if the pointer moves first, nothing
@@ -1757,12 +1757,12 @@ class NotebookView {
     let autoscrollRaf = 0;
     const AUTOSCROLL_EDGE = 56;
     const AUTOSCROLL_SPEED = 12;
-    // `scroller` is either `this.scrollEl` (the main notebook view, which
-    // hasn't been a real scrolling element since the camera migration — see
-    // its own CSS comment) or the page manager's own `.pagemgr__grid` (a
-    // separate, still genuinely-scrollable surface the migration never
-    // touched). Writing scrollTop on the former is now a silent no-op, which
-    // is exactly what broke this for reordering pages in the main view.
+    // `scroller` is `this.scrollEl` (the main notebook view, which hasn't been
+    // a real scrolling element since the camera migration — see its own CSS
+    // comment), so writing scrollTop on it is a silent no-op and the camera
+    // has to be panned instead. Kept general because it used to also serve
+    // the page manager's genuinely-scrollable grid; that surface is on
+    // enableReorderDrag now (see openPageManager).
     const isCameraScroller = scroller === this.scrollEl;
 
     const autoscrollTick = (): void => {
@@ -2572,8 +2572,8 @@ class NotebookView {
   }
 
   /**
-   * Long-press-to-reorder for one item of a dock row, shared by the colour
-   * swatches and the tool buttons.
+   * Long-press-to-reorder for one item of a row — the colour swatches, the
+   * tool buttons, and (in `grid` mode) the page manager's thumbnail cards.
    *
    * Holding an item for HOLD_MS arms a drag: the item dims in place, a ghost
    * appended to `<body>` tracks the pointer (the row clips overflow — see
@@ -2599,6 +2599,8 @@ class NotebookView {
     container: HTMLElement;
     /** The one item these listeners are for. */
     item: HTMLElement;
+    /** The part of `item` a press has to start on to arm a drag; `item` itself by default. The page manager's cards carry their own action buttons, which must stay pressable. */
+    trigger?: HTMLElement;
     /** Every reorderable item in the row, in DOM order (must include `item`). */
     items: () => HTMLElement[];
     /** Put on `item` for the duration of the drag. */
@@ -2611,8 +2613,49 @@ class NotebookView {
     onPreviewOrder?: (order: HTMLElement[] | null) => void;
     /** An extra target that consumes the drop instead of reordering — the swatch row's trash. */
     dropZone?: { el: () => HTMLElement | null; place: () => void; drop: () => void };
+    /**
+     * Items wrap onto several rows (the page manager's grid) rather than
+     * sitting in one row (the dock). The slot under the pointer is then the
+     * nearest slot centre in both axes instead of a step along a single
+     * uniform pitch, and a displaced item slides to its neighbour's actual
+     * position — which is how a card at the end of a row slides down to the
+     * start of the next one.
+     */
+    grid?: boolean;
+    /** The element a drop has to finish inside to commit; the dock by default. */
+    bounds?: () => HTMLElement;
+    /** A natively-scrolling ancestor to auto-scroll while the pointer sits near its top/bottom edge. */
+    autoscroll?: () => HTMLElement | null;
+    /** Animate the ghost onto the slot it landed in instead of just vanishing. */
+    settleMs?: number;
+    /**
+     * Also `preventDefault()` the underlying `touchmove` while the drag is
+     * live. Needed wherever the item's `touch-action` deliberately still
+     * permits a pan (the page manager's grid must stay scrollable from a
+     * thumbnail) — `touch-action` is latched for the whole gesture at
+     * `pointerdown`, so without this the browser claims the first vertical
+     * move after the hold armed and cancels the pointer. Safe precisely
+     * because arming required the finger to be held still: no pan has begun
+     * yet, so cancelling the default still suppresses it.
+     */
+    blockTouchScroll?: boolean;
   }): { tookClick: () => boolean } {
-    const { container, item, items, liftedClass, ghost: makeGhost, commit, onPreviewOrder, dropZone } = opts;
+    const {
+      container,
+      item,
+      trigger = opts.item,
+      items,
+      liftedClass,
+      ghost: makeGhost,
+      commit,
+      onPreviewOrder,
+      dropZone,
+      grid = false,
+      bounds,
+      autoscroll,
+      settleMs = 0,
+      blockTouchScroll = false,
+    } = opts;
     const HOLD_MS = 350;
     const SLOP = 6;
     /** How long a displaced item takes to slide into its new slot. Short enough that the gap keeps up with a quick drag. */
@@ -2626,10 +2669,19 @@ class NotebookView {
     let ghost: HTMLElement | null = null;
     let suppressClick = false;
     /** Each item's layout centre, measured once when the drag arms (a scaled item still reports its own centre, since a scale is about the origin). */
-    let slots: { el: HTMLElement; center: number }[] = [];
+    let slots: { el: HTMLElement; center: number; cy: number }[] = [];
     let pitch = 0;
     let fromIdx = 0;
     let toIdx = 0;
+    let autoRaf = 0;
+    let lastX = 0;
+    let lastY = 0;
+    /** The auto-scroller's scrollTop when the slots above were measured — everything scrolled since has to come off their (viewport-relative) centres. */
+    let scrollTop0 = 0;
+    const scrollShift = (): number => {
+      const sc = autoscroll?.();
+      return sc ? sc.scrollTop - scrollTop0 : 0;
+    };
 
     const clearHold = (): void => {
       if (holdTimer != null) clearTimeout(holdTimer);
@@ -2653,20 +2705,75 @@ class NotebookView {
       rest.splice(toIdx, 0, item);
       return rest;
     };
+    /** The slot nearest the pointer, in both axes — the wrapped-grid counterpart of the single-pitch step below. */
+    const nearestSlot = (x: number, y: number): number => {
+      const shift = scrollShift();
+      let best = toIdx;
+      let bestD = Infinity;
+      slots.forEach((sl, i) => {
+        const d = Math.hypot(x - sl.center, y - (sl.cy - shift));
+        if (d < bestD) {
+          bestD = d;
+          best = i;
+        }
+      });
+      return best;
+    };
     /** Opens the gap at the slot the pointer is over: the dragged item slides to it, everything it displaces slides one slot the other way. */
-    const previewDropAt = (x: number): void => {
-      if (slots.length < 2 || !pitch) return;
-      const next = Math.max(0, Math.min(slots.length - 1, Math.round((x - slots[0].center) / pitch)));
+    const previewDropAt = (x: number, y: number): void => {
+      if (slots.length < 2) return;
+      let next: number;
+      if (grid) {
+        next = nearestSlot(x, y);
+      } else {
+        if (!pitch) return;
+        next = Math.max(0, Math.min(slots.length - 1, Math.round((x - slots[0].center) / pitch)));
+      }
       if (next === toIdx) return;
       toIdx = next;
       slots.forEach((sl, i) => {
         let dx = 0;
-        if (i === fromIdx) dx = slots[toIdx].center - slots[fromIdx].center;
-        else if (fromIdx < toIdx && i > fromIdx && i <= toIdx) dx = -pitch;
-        else if (toIdx < fromIdx && i >= toIdx && i < fromIdx) dx = pitch;
+        let dy = 0;
+        // Which slot item `i` has to appear in: the dragged one takes `toIdx`,
+        // and everything between the two ends shuffles one slot towards the
+        // slot that was vacated.
+        let land = i;
+        if (i === fromIdx) land = toIdx;
+        else if (fromIdx < toIdx && i > fromIdx && i <= toIdx) land = i - 1;
+        else if (toIdx < fromIdx && i >= toIdx && i < fromIdx) land = i + 1;
+        if (land !== i) {
+          if (grid) {
+            // the neighbour's real position, so a card at a row's end slides
+            // down and across to the start of the next one
+            dx = slots[land].center - sl.center;
+            dy = slots[land].cy - sl.cy;
+          } else {
+            dx = i === fromIdx ? slots[toIdx].center - slots[fromIdx].center : land < i ? -pitch : pitch;
+          }
+        }
         sl.el.style.setProperty('--slide', `${dx}px`);
+        if (grid) sl.el.style.setProperty('--slide-y', `${dy}px`);
       });
       onPreviewOrder?.(previewed());
+    };
+    /** While the pointer sits within EDGE of the scroller's top/bottom, keep scrolling it — otherwise a page can't be dropped anywhere that's off screen. */
+    const autoTick = (): void => {
+      autoRaf = 0;
+      const sc = autoscroll?.();
+      if (!ghost || !sc) return;
+      const EDGE = 64;
+      const SPEED = 14;
+      const r = sc.getBoundingClientRect();
+      const dir = lastY < r.top + EDGE ? -1 : lastY > r.bottom - EDGE ? 1 : 0;
+      if (dir !== 0) {
+        const before = sc.scrollTop;
+        // eased by how far into the edge band the pointer is, so the scroll
+        // creeps at the boundary and runs at the very edge
+        const depth = dir < 0 ? (r.top + EDGE - lastY) / EDGE : (lastY - (r.bottom - EDGE)) / EDGE;
+        sc.scrollTop = before + dir * SPEED * Math.min(1, Math.max(0.2, depth));
+        if (sc.scrollTop !== before) previewDropAt(lastX, lastY); // the slots just moved under the pointer
+      }
+      autoRaf = requestAnimationFrame(autoTick);
     };
     const startDrag = (): void => {
       holdTimer = null; // the timer that called this has already fired — clearHold's clearTimeout would be a harmless no-op, but leaving the id set would make pointermove's "still waiting to arm" check below misfire
@@ -2679,24 +2786,35 @@ class NotebookView {
       const els = items();
       slots = els.map((e) => {
         const r = e.getBoundingClientRect();
-        return { el: e, center: r.left + r.width / 2 };
+        return { el: e, center: r.left + r.width / 2, cy: r.top + r.height / 2 };
       });
       pitch = slots.length > 1 ? slots[1].center - slots[0].center : 0;
       fromIdx = els.indexOf(item);
       toIdx = fromIdx;
+      scrollTop0 = autoscroll?.()?.scrollTop ?? 0;
+      lastX = downX;
+      lastY = downY;
       ghost = makeGhost();
       document.body.append(ghost);
       positionGhost(downX, downY);
+      if (autoscroll && !autoRaf) autoRaf = requestAnimationFrame(autoTick);
     };
     /** Tears the drag down: the gap closes back up and the preview hooks are put back to the real order. */
     const teardownDrag = (): void => {
       item.classList.remove(liftedClass);
       ghost?.remove();
       ghost = null;
+      if (autoRaf) {
+        cancelAnimationFrame(autoRaf);
+        autoRaf = 0;
+      }
       const z = dropZone?.el();
       z?.classList.remove('is-over');
       z?.remove();
-      for (const sl of slots) sl.el.style.setProperty('--slide', '0px');
+      for (const sl of slots) {
+        sl.el.style.setProperty('--slide', '0px');
+        if (grid) sl.el.style.setProperty('--slide-y', '0px');
+      }
       onPreviewOrder?.(null);
       // the transition has to outlive the reset above so the gap closes
       // smoothly; a commit rebuilds the row before this lands, which is
@@ -2713,24 +2831,43 @@ class NotebookView {
     };
     const endDrag = (x: number, y: number): void => {
       const onZone = overDropZone(x, y);
-      const dock = this.toolsEl.getBoundingClientRect();
+      const dock = (bounds?.() ?? this.toolsEl).getBoundingClientRect();
       const insideDock = x >= dock.left && x <= dock.right && y >= dock.top && y <= dock.bottom;
       // whatever the preview was showing is exactly what commits
       const order = previewed();
       const reordered = toIdx !== fromIdx;
+      const landing = slots[toIdx];
+      const shift = scrollShift();
+      // a committing drop keeps the ghost so it can settle onto the slot it
+      // landed in rather than blinking out from under the finger
+      const settler = settleMs && reordered && !onZone ? ghost : null;
+      if (settler) ghost = null;
       teardownDrag(); // the measurements above are taken first — this removes the drop zone
       if (onZone) {
         dropZone?.drop();
         return;
       }
-      if (!insideDock || !reordered) return; // off the toolbar, or never left its slot: the gap just closes again
+      if (!insideDock || !reordered) {
+        settler?.remove();
+        return; // off the toolbar, or never left its slot: the gap just closes again
+      }
       commit(order);
+      if (settler && landing) {
+        settler.style.transition = `left ${settleMs}ms ease, top ${settleMs}ms ease, transform ${settleMs}ms ease, opacity ${settleMs}ms ease`;
+        requestAnimationFrame(() => {
+          settler.style.left = `${landing.center}px`;
+          settler.style.top = `${landing.cy - shift}px`;
+          settler.style.transform = 'none'; // unwinds the lift (scale + tilt) the ghost's own class applies
+          settler.style.opacity = '0';
+        });
+        setTimeout(() => settler.remove(), settleMs + 40);
+      }
     };
     const releaseCapture = (): void => {
       clearHold();
       if (pointerId != null) {
         try {
-          item.releasePointerCapture(pointerId);
+          trigger.releasePointerCapture(pointerId);
         } catch {
           /* already released */
         }
@@ -2738,36 +2875,47 @@ class NotebookView {
       pointerId = null;
     };
 
-    item.addEventListener('pointerdown', (e) => {
+    trigger.addEventListener('pointerdown', (e) => {
       if (e.button !== 0) return;
       downX = e.clientX;
       downY = e.clientY;
       pointerId = e.pointerId;
-      item.setPointerCapture(pointerId);
+      trigger.setPointerCapture(pointerId);
       clearHold();
       holdTimer = setTimeout(startDrag, HOLD_MS);
     });
-    item.addEventListener('pointermove', (e) => {
+    trigger.addEventListener('pointermove', (e) => {
       if (holdTimer != null) {
         if (Math.abs(e.clientX - downX) > SLOP || Math.abs(e.clientY - downY) > SLOP) clearHold();
         return;
       }
       if (ghost) {
         e.preventDefault();
+        lastX = e.clientX;
+        lastY = e.clientY;
         positionGhost(e.clientX, e.clientY);
         const onZone = overDropZone(e.clientX, e.clientY);
         dropZone?.el()?.classList.toggle('is-over', onZone);
-        if (!onZone) previewDropAt(e.clientX); // aiming at the drop zone isn't aiming at a slot
+        if (!onZone) previewDropAt(e.clientX, e.clientY); // aiming at the drop zone isn't aiming at a slot
       }
     });
-    item.addEventListener('pointerup', (e) => {
+    if (blockTouchScroll) {
+      trigger.addEventListener(
+        'touchmove',
+        (e) => {
+          if (ghost) e.preventDefault(); // see blockTouchScroll's doc comment
+        },
+        { passive: false }
+      );
+    }
+    trigger.addEventListener('pointerup', (e) => {
       releaseCapture();
       if (ghost) endDrag(e.clientX, e.clientY);
     });
     // the browser took the gesture over (a scroll/zoom pan, a system gesture):
     // its coordinates are zeroed, so it can never be read as a drop — close
     // the gap and leave the order alone
-    item.addEventListener('pointercancel', () => {
+    trigger.addEventListener('pointercancel', () => {
       releaseCapture();
       if (ghost) teardownDrag();
     });
@@ -3792,24 +3940,38 @@ class NotebookView {
   }
 
   /**
-   * Full-screen page manager: every page as a thumbnail, in order — reorder
-   * (hold a thumbnail to drag it, or the up/down arrows), duplicate, delete,
-   * or tap one to jump to it. Thumbnails are rendered once per open and
-   * cached in `thumbs` for the rest of the session — reordering/deleting
-   * just redraws the list from the cache; only a freshly duplicated page
-   * renders new pixels.
+   * Full-screen page manager: every page as a thumbnail, in order — hold a
+   * thumbnail to drag it to a new position, duplicate, delete, or tap one to
+   * jump to it. Thumbnails are rendered once per open and cached in `thumbs`
+   * for the rest of the session — reordering/deleting just redraws the list
+   * from the cache; only a freshly duplicated page renders new pixels.
+   *
+   * Reordering is `enableReorderDrag` in its grid mode — the same hold-then-
+   * drag the dock's tools and colour swatches use, so there is one drag
+   * implementation rather than one per surface. Up/down arrow buttons used
+   * to do this job here; they're gone, which is also what gives each card
+   * room for a bigger thumbnail.
    */
   private async openPageManager(): Promise<void> {
     const { renderPageCanvas } = await import('../export/raster'); // pulls in the (lazy) export/render code only when this opens
-    // rendered wider than the CSS grid's minimum column (150px) since the
-    // thumbnail box stretches to fill wider columns on a big screen —
-    // the canvas would otherwise upscale and look soft
-    const THUMB_W = 260;
+    // rendered wider than the CSS grid's minimum column (200px) since the
+    // thumbnail box stretches to fill wider columns on a big screen, and on
+    // an iPad a ~250px column is ~500 device px — the canvas would otherwise
+    // upscale and look soft. Capped rather than tracking devicePixelRatio
+    // outright: these are cached for the session, one per page.
+    const THUMB_W = 420;
     const thumbs = new Map<string, HTMLCanvasElement>();
 
     const wrap = el('div', { class: 'pagemgr' });
     const head = el('div', { class: 'pagemgr__head' });
-    head.append(el('h2', { class: 'pagemgr__title', text: 'Pages' }));
+    const titles = el('div', { class: 'pagemgr__titles' });
+    titles.append(
+      el('h2', { class: 'pagemgr__title', text: 'Pages' }),
+      // the hold-to-drag gesture is the only way to reorder now, and an
+      // invisible gesture nobody is told about is one nobody finds
+      el('span', { class: 'pagemgr__hint', text: 'Tap to jump to a page · hold and drag to reorder' })
+    );
+    head.append(titles);
     const closeBtn = el('button', { class: 'iconbtn', title: 'Close', 'aria-label': 'Close' });
     closeBtn.append(icon('close'));
     head.append(closeBtn);
@@ -3837,6 +3999,7 @@ class NotebookView {
       grid.replaceChildren();
       pages.forEach((page, i) => {
         const card = el('div', { class: 'pagemgr__card' });
+        card.dataset.pageId = page.id;
 
         const thumbBtn = el('button', {
           class: 'pagemgr__thumbbtn',
@@ -3846,29 +4009,51 @@ class NotebookView {
         const thumbBox = el('span', { class: 'pagemgr__thumb' });
         thumbBox.style.aspectRatio = `${pageW(page)} / ${pageH(page)}`; // a landscape-imported page thumbnails at its own shape, not the default portrait box
         thumbBtn.append(thumbBox, el('span', { class: 'pagemgr__num', text: `Page ${i + 1}` }));
-        let suppressClick = false;
-        thumbBtn.addEventListener('click', () => {
-          if (suppressClick) {
-            suppressClick = false;
-            return;
-          }
-          modal.close();
-          this.goToPage(page.id);
-        });
-        this.bindLongPressReorder({
-          trigger: thumbBtn,
+        const drag = this.enableReorderDrag({
+          container: grid,
           item: card,
-          scroller: grid,
-          itemSelector: '.pagemgr__card',
-          onDragStart: () => {
-            suppressClick = true;
+          trigger: thumbBtn, // not the whole card: its Duplicate/Delete buttons stay pressable
+          items: () => Array.from(grid.querySelectorAll<HTMLElement>('.pagemgr__card')),
+          liftedClass: 'pagemgr__card--lifted',
+          grid: true,
+          bounds: () => grid,
+          autoscroll: () => grid,
+          settleMs: 160,
+          // .pagemgr__thumbbtn keeps touch-action: pan-y so the grid scrolls
+          // from a thumbnail; a live drag has to cancel that pan itself
+          blockTouchScroll: true,
+          ghost: () => {
+            const g = el('div', { class: 'pagemgr__ghost' });
+            const r = thumbBox.getBoundingClientRect();
+            g.style.width = `${r.width}px`;
+            g.style.height = `${r.height}px`;
+            g.style.margin = `${-r.height / 2}px 0 0 ${-r.width / 2}px`; // centred on the pointer, like .swatch-ghost / .tool-ghost
+            const src = thumbs.get(page.id);
+            if (src) {
+              // a copy, not the live canvas: moving that one out of the card
+              // would leave the lifted slot blank, and the grid re-renders
+              // from the same cache on drop
+              const c = el('canvas') as HTMLCanvasElement;
+              c.width = src.width;
+              c.height = src.height;
+              c.className = 'pagemgr__canvas';
+              c.getContext('2d')?.drawImage(src, 0, 0);
+              g.append(c);
+            }
+            return g;
           },
-          onDrop: (finalIndex) => {
-            if (store.reorderPage(page.id, finalIndex)) {
+          commit: (order) => {
+            const to = order.indexOf(card);
+            if (to >= 0 && store.reorderPage(page.id, to)) {
               this.syncPages();
               render();
             }
           },
+        });
+        thumbBtn.addEventListener('click', () => {
+          if (drag.tookClick()) return; // the press turned into a drag; not a tap
+          modal.close();
+          this.goToPage(page.id);
         });
 
         const cached = thumbs.get(page.id);
@@ -3888,16 +4073,6 @@ class NotebookView {
 
         const actions = el('div', { class: 'pagemgr__actions' });
         actions.append(
-          actionBtn('arrow-up', 'Move page up', i === 0, () => {
-            store.movePage(page.id, -1);
-            this.syncPages();
-            render();
-          }),
-          actionBtn('arrow-down', 'Move page down', i === pages.length - 1, () => {
-            store.movePage(page.id, 1);
-            this.syncPages();
-            render();
-          }),
           actionBtn('duplicate', 'Duplicate page', false, () => {
             store.duplicatePage(page.id);
             store.enforceTrailingBlank(this.nb.id);
