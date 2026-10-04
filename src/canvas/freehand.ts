@@ -189,6 +189,8 @@ export function strokeOutline(points: number[][], size: number, highlighter: boo
     size,
     last: true,
     ...opts,
+    // smoothing only feeds perfect-freehand's outline-vertex cull ((size*smoothing)^2, world units); bound it by the densify target so zoomed-out ink doesn't get coarse facets.
+    smoothing: Math.min(opts.smoothing, DENSIFY_MAX / Math.max(size, 0.0001)),
   });
 }
 
