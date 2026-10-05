@@ -189,8 +189,8 @@ export function strokeOutline(points: number[][], size: number, highlighter: boo
     size,
     last: true,
     ...opts,
-    // smoothing only feeds perfect-freehand's outline-vertex cull ((size*smoothing)^2, world units); bound it by the densify target so zoomed-out ink doesn't get coarse facets.
-    smoothing: Math.min(opts.smoothing, DENSIFY_MAX / Math.max(size, 0.0001)),
+    // smoothing only feeds perfect-freehand's outline-vertex cull ((size*smoothing)^2, world units); the cull must be at most half the densify gap, otherwise every other outline vertex is dropped.
+    smoothing: Math.min(opts.smoothing, (0.5 * densifyTarget(size)) / Math.max(size, 0.0001)),
   });
 }
 

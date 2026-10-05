@@ -49,7 +49,14 @@ import {
   type Rect,
 } from './geom';
 import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
-import { INK_SETTLE_SIGMA_PX, InkSmoother, smoothInkStroke, type ClientSample } from './ink-smoothing';
+import {
+  INK_SETTLE_SIGMA_PX,
+  InkSmoother,
+  smoothInkStroke,
+  tagRawPressure,
+  trimLiftTail,
+  type ClientSample,
+} from './ink-smoothing';
 import {
   drawElement,
   layoutText,
@@ -952,6 +959,7 @@ export class BoardCanvas implements ItemSurface {
             break;
           }
           const ink = this.toBoard(smoothed);
+          tagRawPressure(ink, ev.pressure);
           const moved = trailMoved(this.live, ink);
           this.live.push(ink);
           if ((this.shapeMode || this.loopMode) && moved) {
@@ -1568,8 +1576,10 @@ export class BoardCanvas implements ItemSurface {
       const [x, y, p] = raw[0];
       raw.push([x + 0.1, y + 0.1, p]); // a tap becomes a dot
     }
-    // settled once at pen-up, at a fixed screen size — see smoothInkStroke
-    const settled = smoothInkStroke(raw, INK_SETTLE_SIGMA_PX / this.zoom());
+    // the pen-lift flick dropped, then settled once at pen-up, at a fixed
+    // screen size — see trimLiftTail and smoothInkStroke
+    const sigma = INK_SETTLE_SIGMA_PX / this.zoom();
+    const settled = smoothInkStroke(trimLiftTail(raw, sigma), sigma);
     // filled in to a zoom-independent density before anything measures or
     // stores it — a board is drawn on at zooms from 0.5 to 3 and read back at
     // any of them, so this is where it matters most. See densifyStrokePoints.

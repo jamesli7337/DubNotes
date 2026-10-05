@@ -35,7 +35,14 @@ import {
   textHeight,
 } from './elements';
 import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
-import { INK_SETTLE_SIGMA_PX, InkSmoother, smoothInkStroke, type ClientSample } from './ink-smoothing';
+import {
+  INK_SETTLE_SIGMA_PX,
+  InkSmoother,
+  smoothInkStroke,
+  tagRawPressure,
+  trimLiftTail,
+  type ClientSample,
+} from './ink-smoothing';
 import { Guide, projectOnEdge, type EdgeLine, type GuideKind } from './guide';
 import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
 import {
@@ -890,6 +897,7 @@ export class PageCanvas implements ItemSurface {
           const ink = this.toLocal(smoothed);
           const moved = trailMoved(this.live, ink);
           const next = this.snapped(ink);
+          tagRawPressure(next, ev.pressure);
           // A pen held still still delivers events — at Pencil rate ~120 a
           // second, each coalescing several more. Appending every one of them
           // piled thousands of coincident points onto a stroke that had
@@ -1203,9 +1211,12 @@ export class PageCanvas implements ItemSurface {
       const [x, y, p] = this.live[0];
       this.live.push([x + 0.1, y + 0.1, p]); // a tap becomes a dot
     }
-    // settled once at pen-up, at a fixed screen size — see smoothInkStroke. Not
-    // a stroke riding a ruler / protractor edge, which is already exact.
-    const settled = this.snapEdge ? this.live : smoothInkStroke(this.live, INK_SETTLE_SIGMA_PX / this.zoom());
+    // the pen-lift flick dropped (see trimLiftTail), then settled once at
+    // pen-up, at a fixed screen size — see smoothInkStroke. Not smoothed when
+    // riding a ruler / protractor edge, which is already exact.
+    const sigma = INK_SETTLE_SIGMA_PX / this.zoom();
+    const kept = trimLiftTail(this.live, sigma);
+    const settled = this.snapEdge ? kept : smoothInkStroke(kept, sigma);
     const stroke: Stroke = {
       id: uid(),
       pageId: this.page.id,
