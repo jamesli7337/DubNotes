@@ -257,6 +257,26 @@ class NotebookView {
   private qualityQueue: PageCanvas[] = [];
   private qualityRaf = 0;
   /**
+   * Pointers currently down anywhere in the window. While any is, no page is
+   * resized or repainted for quality and nothing is scheduled to retry — the
+   * pass waits (`qualityHeld`) and runs once the last one lifts.
+   */
+  private readonly pointersDown = new Set<number>();
+  /** A quality pass came due, or was cut short, while a pointer was down. */
+  private qualityHeld = false;
+  private readonly onAnyPointerDown = (e: PointerEvent): void => {
+    this.pointersDown.add(e.pointerId);
+  };
+  private readonly onAnyPointerUp = (e: PointerEvent): void => {
+    this.pointersDown.delete(e.pointerId);
+    this.resumeQuality();
+  };
+  /** The window lost focus mid-press, so a pointerup may never arrive — don't let a stale id hold quality off for good. */
+  private readonly onPointersLost = (): void => {
+    this.pointersDown.clear();
+    this.resumeQuality();
+  };
+  /**
    * Palm-vs-pen tracking, shared by bindZoomGestures, bindScrollbarThumb, and
    * SelectionOverlay (via isBlockedTouch) — see bindZoomGestures's own doc
    * comment for the full reasoning. A palm reports as an ordinary touch, so
@@ -476,6 +496,10 @@ class NotebookView {
       window.removeEventListener('hashchange', this.onLeave);
       window.removeEventListener('resize', this.repositionCallout);
       window.removeEventListener('resize', this.layoutDragPreviewCanvas);
+      window.removeEventListener('pointerdown', this.onAnyPointerDown, true);
+      window.removeEventListener('pointerup', this.onAnyPointerUp, true);
+      window.removeEventListener('pointercancel', this.onAnyPointerUp, true);
+      window.removeEventListener('blur', this.onPointersLost);
       this.hideSelectionCallout();
       this.hideTapePopover();
       this.deactivateAll(); // commit an open text edit before the canvases go away
@@ -493,6 +517,11 @@ class NotebookView {
     };
     window.addEventListener('keydown', this.onKey);
     window.addEventListener('hashchange', this.onLeave);
+    // capture phase, so a handler that stops propagation can't hide a press from the quality gate
+    window.addEventListener('pointerdown', this.onAnyPointerDown, true);
+    window.addEventListener('pointerup', this.onAnyPointerUp, true);
+    window.addEventListener('pointercancel', this.onAnyPointerUp, true);
+    window.addEventListener('blur', this.onPointersLost);
   }
 
   // --------------------------------------------------------------- chrome
@@ -1035,17 +1064,40 @@ class NotebookView {
    * that happens the whole pass is simply rescheduled, so it retries every
    * QUALITY_SETTLE_MS until the user is idle. That is also why nothing here
    * is on the per-frame camera path.
+   *
+   * Nothing at all runs while a pointer is down (see `pointersDown`): a
+   * resize and full repaint of some page, one per frame, is exactly what made
+   * the first stroke after a zoom lag. A press landing mid-pass stops it, and
+   * the whole pass is redone once every pointer lifts. Pages go nearest the
+   * viewport centre first, so the one about to be drawn on is sharp soonest.
    */
   private applyQuality(): void {
     this.renderQuality = this.pageQuality();
+    if (this.pointersDown.size) {
+      this.qualityHeld = true;
+      return;
+    }
     const q = this.renderQuality;
+    const centre = this.camera.y + this.scrollEl.clientHeight / this.camera.zoom / 2;
+    const distance = (pc: PageCanvas): number => {
+      const pageEl = this.wrapById.get(pc.page.id)?.querySelector<HTMLElement>('.page');
+      return pageEl ? Math.abs(pageEl.offsetTop + pageEl.offsetHeight / 2 - centre) : Infinity;
+    };
     this.qualityQueue = [...this.mounted]
       .map((id) => this.pcByPage.get(id))
-      .filter((pc): pc is PageCanvas => pc != null && pc.mounted);
+      .filter((pc): pc is PageCanvas => pc != null && pc.mounted)
+      .map((pc) => ({ pc, d: distance(pc) }))
+      .sort((a, b) => a.d - b.d)
+      .map(({ pc }) => pc);
     if (!this.qualityQueue.length) return;
     let deferred = false;
     const drain = (): void => {
       this.qualityRaf = 0;
+      if (this.pointersDown.size) {
+        this.qualityQueue = [];
+        this.qualityHeld = true;
+        return;
+      }
       const pc = this.qualityQueue.shift();
       // it may have been unmounted between frames (the user kept scrolling)
       if (pc?.mounted && !pc.setQuality(q)) deferred = true;
@@ -1059,14 +1111,28 @@ class NotebookView {
   /** Debounced applyQuality — called from anything that changes the zoom or which pages are mounted. */
   private settleQuality(): void {
     if (this.qualitySettleTimer) clearTimeout(this.qualitySettleTimer);
+    this.qualitySettleTimer = null;
+    if (this.pointersDown.size) {
+      // no timer, so no retry loop, while a pointer is down — resumeQuality picks it up
+      this.qualityHeld = true;
+      return;
+    }
     this.qualitySettleTimer = setTimeout(() => {
       this.qualitySettleTimer = null;
       this.applyQuality();
     }, QUALITY_SETTLE_MS);
   }
 
+  /** Runs a quality pass that was held off while pointers were down, once the last one has lifted. */
+  private resumeQuality(): void {
+    if (this.pointersDown.size || !this.qualityHeld) return;
+    this.qualityHeld = false;
+    this.settleQuality();
+  }
+
   /** Drops any queued/scheduled re-render — teardown, so nothing touches a page after onLeave. */
   private stopQuality(): void {
+    this.qualityHeld = false;
     if (this.qualitySettleTimer) clearTimeout(this.qualitySettleTimer);
     this.qualitySettleTimer = null;
     if (this.qualityRaf) cancelAnimationFrame(this.qualityRaf);

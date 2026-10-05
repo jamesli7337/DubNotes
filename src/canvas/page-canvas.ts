@@ -35,14 +35,7 @@ import {
   textHeight,
 } from './elements';
 import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
-import {
-  INK_SETTLE_SIGMA_PX,
-  InkSmoother,
-  smoothInkStroke,
-  tagRawPressure,
-  trimLiftTail,
-  type ClientSample,
-} from './ink-smoothing';
+import { InkSmoother, type ClientSample } from './ink-smoothing';
 import { Guide, projectOnEdge, type EdgeLine, type GuideKind } from './guide';
 import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
 import {
@@ -442,23 +435,34 @@ export class PageCanvas implements ItemSurface {
     if (q === this.quality) return true;
     this.quality = q;
     if (!this.isMounted) return true; // applied by mount()'s own resizeSurfaces
-    this.resizeSurfaces();
+    // past canvasPixelFactor's caps a new quality often lands on the same
+    // backing store, and repainting the whole page for that changes nothing
+    if (!this.resizeSurfaces()) return true;
     this.rebuild(this.lastDim);
     return true;
   }
 
-  /** Sizes both canvases' backing stores for the current quality and caches the factor the repaint transforms use. CSS size is fixed by `.page canvas` (var(--pw)/var(--ph)) and is deliberately untouched. */
-  private resizeSurfaces(): void {
+  /**
+   * Sizes both canvases' backing stores for the current quality and caches the factor the repaint transforms use. CSS size is fixed by `.page canvas` (var(--pw)/var(--ph)) and is deliberately untouched.
+   *
+   * Returns false, touching nothing (`pf` included, so the cache and the view
+   * keep painting at the one factor the cache was drawn with), when both
+   * canvases already have exactly the size this quality asks for.
+   */
+  private resizeSurfaces(): boolean {
     const pf = canvasPixelFactor(this.pw, this.ph, this.quality);
-    this.pf = pf;
     const w = Math.max(1, Math.round(this.pw * pf));
     const h = Math.max(1, Math.round(this.ph * pf));
+    const same = (c: HTMLCanvasElement | null): boolean => c != null && c.width === w && c.height === h;
+    if (same(this.view) && same(this.cache)) return false;
+    this.pf = pf;
     for (const c of [this.view, this.cache]) {
       if (!c) continue;
       // assigning width/height also clears the canvas — callers repaint after
       if (c.width !== w) c.width = w;
       if (c.height !== h) c.height = h;
     }
+    return true;
   }
 
   // ------------------------------------------------------------- painting
@@ -897,7 +901,6 @@ export class PageCanvas implements ItemSurface {
           const ink = this.toLocal(smoothed);
           const moved = trailMoved(this.live, ink);
           const next = this.snapped(ink);
-          tagRawPressure(next, ev.pressure);
           // A pen held still still delivers events — at Pencil rate ~120 a
           // second, each coalescing several more. Appending every one of them
           // piled thousands of coincident points onto a stroke that had
@@ -1211,12 +1214,6 @@ export class PageCanvas implements ItemSurface {
       const [x, y, p] = this.live[0];
       this.live.push([x + 0.1, y + 0.1, p]); // a tap becomes a dot
     }
-    // the pen-lift flick dropped (see trimLiftTail), then settled once at
-    // pen-up, at a fixed screen size — see smoothInkStroke. Not smoothed when
-    // riding a ruler / protractor edge, which is already exact.
-    const sigma = INK_SETTLE_SIGMA_PX / this.zoom();
-    const kept = trimLiftTail(this.live, sigma);
-    const settled = this.snapEdge ? kept : smoothInkStroke(kept, sigma);
     const stroke: Stroke = {
       id: uid(),
       pageId: this.page.id,
@@ -1228,7 +1225,7 @@ export class PageCanvas implements ItemSurface {
       // landed depends on the zoom (and the hand speed) this was drawn at, and
       // the outline is built from whatever it is given — see
       // densifyStrokePoints. A no-op for anything drawn around 100%.
-      points: densifyStrokePoints(settled, this.liveTool.size),
+      points: densifyStrokePoints(this.live, this.liveTool.size),
       createdAt: Date.now(),
     };
     store.addStroke(stroke);
