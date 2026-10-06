@@ -38,6 +38,7 @@ import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
 import { InkSmoother, type ClientSample } from './ink-smoothing';
 import { Guide, projectOnEdge, type EdgeLine, type GuideKind } from './guide';
 import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
+import { recognizeShape } from './recognize-shape';
 import {
   aabb,
   elementInPolygon,
@@ -262,6 +263,13 @@ export class PageCanvas implements ItemSurface {
   private readonly hold = new LineSnapHold();
   /** ghosted preview shown partway through the hold, alongside the still-visible ink — not yet snapped */
   private pendingFit: ShapeFit | null = null;
+  /** the last hold recognition and the stroke state it was for, so the cue and the snap don't both run it */
+  private fitCache: { n: number; x: number; y: number; fit: ShapeFit | null } | null = null;
+  /**
+   * a closed shape replaced this stroke while the pen was still down: it is
+   * already in the store (one undo step), so the rest of the press draws nothing
+   */
+  private shapeSnapped = false;
   /**
    * the snapped line, adjustable by its endpoint handles until a press elsewhere
    * (or a new stroke, a tool switch, undo) commits it; not in the store until then
@@ -889,6 +897,7 @@ export class PageCanvas implements ItemSurface {
       const smoothed = this.inkSmoother.next(ev);
       switch (this.mode) {
         case 'draw': {
+          if (this.shapeSnapped) break;
           if (this.lineEdit) {
             // already snapped: the pen is now dragging the line's far end
             this.lineEdit.b = [pt[0], pt[1]];
@@ -921,8 +930,9 @@ export class PageCanvas implements ItemSurface {
             if (this.pendingFit) {
               // translucent cue: keep tracking the pen so the ghost's length and
               // direction adjust live as you refine the stroke, rather than
-              // freezing or vanishing the moment you move
-              this.pendingFit = recognizeLine(this.live, this.liveTool.size, this.zoom());
+              // freezing or vanishing the moment you move. A closed-shape ghost
+              // is not re-fitted per move: it goes, and the re-armed hold shows it again.
+              this.pendingFit = this.pendingFit.shape === 'line' ? recognizeLine(this.live, this.liveTool.size, this.zoom()) : null;
             }
             this.armHold();
           }
@@ -1197,6 +1207,8 @@ export class PageCanvas implements ItemSurface {
     this.shapeHit = null;
     this.snapEdge = null;
     this.pendingFit = null;
+    this.fitCache = null;
+    this.shapeSnapped = false;
     this.adjustEnd = null; // lineEdit itself outlives the press: it stays until something commits it
     this.shapeMode = false;
     this.dismissingPress = false;
@@ -1265,7 +1277,7 @@ export class PageCanvas implements ItemSurface {
     this.hold.arm(
       () => {
         if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;
-        const fit = recognizeLine(this.live, this.liveTool.size, this.zoom());
+        const fit = this.recognizeHeld();
         if (fit) {
           this.pendingFit = fit;
           this.schedule();
@@ -1273,8 +1285,10 @@ export class PageCanvas implements ItemSurface {
       },
       () => {
         if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;
-        const fit = recognizeLine(this.live, this.liveTool.size, this.zoom());
-        if (fit) {
+        const fit = this.recognizeHeld();
+        if (fit && fit.shape !== 'line') {
+          this.commitSnappedShape(fit);
+        } else if (fit) {
           const [a, b] = lineEnds(fit);
           this.lineEdit = { a, b, color: this.liveTool.color, size: this.liveTool.size };
           this.adjustEnd = 'b';
@@ -1288,6 +1302,39 @@ export class PageCanvas implements ItemSurface {
 
   private disarmHold(): void {
     this.hold.disarm();
+  }
+
+  /**
+   * The held stroke's fit — a line, else a closed shape — computed once per
+   * stroke state: the cue and the snap fire back to back on a still pen, and
+   * only the pen's own jitter (a changed last point) invalidates the result.
+   */
+  private recognizeHeld(): ShapeFit | null {
+    const last = this.live[this.live.length - 1];
+    const c = this.fitCache;
+    if (c && c.n === this.live.length && c.x === last[0] && c.y === last[1]) return c.fit;
+    const fit = recognizeShape(this.live, this.liveTool.size, this.zoom());
+    this.fitCache = { n: this.live.length, x: last[0], y: last[1], fit };
+    return fit;
+  }
+
+  /**
+   * Replaces the held stroke with a clean closed shape. Unlike a line there are
+   * no endpoint handles to wait for, so it goes straight into the store as one
+   * undo step (the same add-items op commitLine and the Shapes tool raise,
+   * flagged aiInk the same way) and nothing is left pending: the next press has
+   * nothing of this to dismiss, and the stroke's lift draws nothing more.
+   */
+  private commitSnappedShape(fit: ShapeFit): void {
+    const shape = this.shapeFromFit(fit);
+    this.disarmHold();
+    this.shapeSnapped = true;
+    this.pendingFit = null;
+    this.live = [];
+    store.addItems([shape]);
+    this.rebuild();
+    this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items: [shape], aiInk: shape.color === AI_COLOR });
+    this.schedule();
   }
 
   private shapeFromFit(fit: ShapeFit, color = this.liveTool.color, size = this.liveTool.size): ShapeElement {
