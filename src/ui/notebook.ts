@@ -429,6 +429,12 @@ class NotebookView {
     this.root = root;
     this.nb = nb;
     this.isBoard = nb.kind === 'board';
+    // the Shapes tool is hidden on pages, so a device that last left it active reopens a page on the pen
+    // (done here rather than in tools.ts's load(), which has no notion of board vs page)
+    if (!this.isBoard && toolState.kind === 'shapes') {
+      toolState.kind = 'pen';
+      saveToolState();
+    }
     this.aiMode = new AiMode(nb.id, {
       refreshPage: (pageId) => this.rebuildIfMounted(pageId),
       onActiveChanged: () => this.refreshAiControls(),
@@ -597,6 +603,7 @@ class NotebookView {
       // not yet in the store) when Send is tapped — settle it first so this
       // turn's capture actually includes it. See PageCanvas.commitLine.
       this.pcByPage.get(this.currentPageId)?.commitLine();
+      this.pcByPage.get(this.currentPageId)?.commitShapeEdit();
       this.aiMode.sendNow(this.currentPageId);
     });
 
@@ -1293,7 +1300,11 @@ class NotebookView {
         for (const [pageId, pc] of this.pcByPage) {
           // another page's adjustable line counts as dismissed state too, so
           // the press that settles it is spent on that and draws nothing
-          if (pageId !== samePageId && pc.commitLine()) dismissed = true;
+          if (pageId !== samePageId) {
+            const line = pc.commitLine();
+            const shape = pc.commitShapeEdit();
+            if (line || shape) dismissed = true;
+          }
         }
         if (dismissed && samePageId) this.pcByPage.get(samePageId)?.markDismissingPress();
       },
@@ -2174,6 +2185,7 @@ class NotebookView {
     const built = new Map<ToolKind, HTMLElement>();
     for (const kind of toolState.toolOrder) {
       if (this.isBoard && !boardTools.includes(kind)) continue;
+      if (!this.isBoard && kind === 'shapes') continue; // pages get shapes from the pen's hold-to-snap instead
       const spec = TOOL_BUTTONS[kind];
       built.set(kind, toolBtn(kind, spec.icon, spec.label));
     }

@@ -74,13 +74,21 @@ Vite + TypeScript, no UI framework. All data lives on-device in IndexedDB.
   drag commits it). Tapping anywhere else, starting a new stroke, switching
   tools or undoing also commits it. Committed lines are elements: lasso them to
   move, resize or rotate.
-- **Shapes** – its own dock tool: pick rectangle, ellipse, arrow or triangle in
-  the dock, then drag on the page to place one sized to the drag (an arrow runs
-  from where you press to where you lift). The outline uses the pen's colour
-  and width. The shape lands already selected, with the usual move / resize /
-  rotate handles; it's an ordinary element from then on. Tap any existing
-  shape (a snapped line included) while the tool is active to select it again
-  and readjust it; dragging over a shape places a new one on top of it.
+- **Shapes** – on pages there is no Shapes dock button; the pen makes shapes
+  instead. The same hold-at-end snap as above also recognizes a closed stroke
+  as a rectangle, ellipse / circle, triangle or right triangle (a corner within
+  about 12° of square is made exactly square), shown with the same ghosted cue.
+  A recognized shape stays pending with draggable handles — the 4 corners, or
+  the 3 vertices of a triangle — and commits as one undo step on the next press
+  that isn't on a handle; switching tools or undoing also settles it (undo
+  drops it uncommitted). Lines behave as before. Pages can't currently create
+  new arrows; existing ones still render, select, erase and export. Boards are
+  unchanged: they keep the Shapes dock tool — pick rectangle, ellipse, arrow or
+  triangle, then drag to place one sized to the drag (an arrow runs from where
+  you press to where you lift), landing already selected with the usual move /
+  resize / rotate handles; tap any existing shape while the tool is active to
+  select it again, and dragging over one places a new one on top — and the
+  loop-snap that turns a loop drawn around content into a bubble.
 - **Ruler & protractor** – toggles at the end of the dock put a draggable,
   rotatable bar or semicircle on the page in view. The ruler spans the page
   width and reads in real units — centimetres and millimetres along the top,
@@ -100,7 +108,7 @@ Vite + TypeScript, no UI framework. All data lives on-device in IndexedDB.
   opens a picker (saturation/value square, hue strip, hex field). *Add colour*
   saves it to that tool's list (up to 8, newest first), shown after the presets
   as square swatches, and selects it. Pen custom colours also serve the text
-  and Shapes tools and the lasso's recolour row. Hold (or right-click) a custom
+  and Shapes (boards) tools and the lasso's recolour row. Hold (or right-click) a custom
   swatch to remove it.
   Lists are remembered on the device.
 - **Images** – the *Insert image* button in the dock opens the photo picker
@@ -191,6 +199,7 @@ src/
     elements.ts          text / image / shape rendering, text wrapping
     geom.ts              point-in-polygon, bounds, frame transforms
     recognize.ts         stroke → straight-line fitting (pen line-snap); line / arrow box geometry
+    recognize-shape.ts   closed-shape recognition (rect, ellipse, triangle) and handle geometry (shapeHandles, dragShapeHandle)
     guide.ts             ruler + protractor overlays and edge snapping
     freehand.ts          perfect-freehand -> Path2D
     templates.ts         paper backgrounds (blank / ruled / grid / dot), colour-aware

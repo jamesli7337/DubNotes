@@ -38,7 +38,7 @@ import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
 import { InkSmoother, type ClientSample } from './ink-smoothing';
 import { Guide, projectOnEdge, type EdgeLine, type GuideKind } from './guide';
 import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
-import { recognizeShape } from './recognize-shape';
+import { dragShapeHandle, recognizeShape, shapeHandles } from './recognize-shape';
 import {
   aabb,
   elementInPolygon,
@@ -214,6 +214,7 @@ export class PageCanvas implements ItemSurface {
     | 'shapes'
     | 'shape-press'
     | 'line-adjust'
+    | 'shape-adjust'
     | null = null;
   /**
    * laser-pointer trail: each entry is one pointer-down-to-up stroke, itself a
@@ -265,11 +266,16 @@ export class PageCanvas implements ItemSurface {
   private pendingFit: ShapeFit | null = null;
   /** the last hold recognition and the stroke state it was for, so the cue and the snap don't both run it */
   private fitCache: { n: number; x: number; y: number; fit: ShapeFit | null } | null = null;
-  /**
-   * a closed shape replaced this stroke while the pen was still down: it is
-   * already in the store (one undo step), so the rest of the press draws nothing
-   */
+  /** a closed shape replaced this stroke while the pen was still down, so the rest of the press draws nothing */
   private shapeSnapped = false;
+  /**
+   * the snapped closed shape, adjustable by its corner / vertex handles until a
+   * press elsewhere (or a new stroke, a tool switch, undo) commits it; not in the
+   * store until then. Like lineEdit it outlives the press that made it.
+   */
+  private shapeEdit: { fit: ShapeFit; color: string; size: number; aiInk: boolean } | null = null;
+  /** the handle the current press is dragging, and (for a box) the opposite corner that stays fixed */
+  private shapeAdjust: { handle: number; anchor: number[] } | null = null;
   /**
    * the snapped line, adjustable by its endpoint handles until a press elsewhere
    * (or a new stroke, a tool switch, undo) commits it; not in the store until then
@@ -386,6 +392,7 @@ export class PageCanvas implements ItemSurface {
   unmount(): void {
     if (!this.isMounted || this.busy) return; // never yank mid-stroke / mid-edit
     this.commitLine();
+    this.commitShapeEdit();
     this.clearSelection();
     const v = this.view;
     if (v) {
@@ -525,7 +532,7 @@ export class PageCanvas implements ItemSurface {
     // A rebuild is not rare while those are live — a settled-zoom
     // re-rasterise, a paper change, a cross-page refreshPage, or an image or
     // PDF page finishing its async load all land here.
-    if (this.lastLassoPath || this.lineEdit || this.pendingFit || this.live.length || this.hiddenIds()) this.schedule();
+    if (this.lastLassoPath || this.lineEdit || this.shapeEdit || this.pendingFit || this.live.length || this.hiddenIds()) this.schedule();
   }
 
   private paintItem(ctx: CanvasRenderingContext2D, it: PageItem, opacity = 1): void {
@@ -561,6 +568,7 @@ export class PageCanvas implements ItemSurface {
       }
     }
     if (this.lineEdit) this.paintLineEdit(v);
+    if (this.shapeEdit) this.paintShapeEdit(v);
     if (this.xfLive) {
       // painted on the shared, notebook-level drag-preview canvas, not this
       // page's own `v` — this page's own canvas is a fixed bitmap bounded to
@@ -735,6 +743,23 @@ export class PageCanvas implements ItemSurface {
         return;
       }
       this.commitLine();
+      this.dismissingPress = true;
+    }
+
+    // a snapped closed shape waiting to be adjusted: same rule as the line above
+    if (this.shapeEdit) {
+      const h = this.shapeHandleAt(pt);
+      if (h !== null) {
+        this.mode = 'shape-adjust';
+        this.shapeAdjust = {
+          handle: h,
+          anchor: this.shapeEdit.fit.shape === 'triangle' ? [] : shapeHandles(this.shapeEdit.fit)[(h + 2) % 4],
+        };
+        this.capture(e);
+        this.schedule();
+        return;
+      }
+      this.commitShapeEdit();
       this.dismissingPress = true;
     }
 
@@ -941,6 +966,11 @@ export class PageCanvas implements ItemSurface {
         case 'line-adjust':
           if (this.lineEdit && this.adjustEnd) this.lineEdit[this.adjustEnd] = [pt[0], pt[1]];
           break;
+        case 'shape-adjust':
+          if (this.shapeEdit && this.shapeAdjust) {
+            this.shapeEdit.fit = dragShapeHandle(this.shapeEdit.fit, this.shapeAdjust.handle, this.shapeAdjust.anchor, pt);
+          }
+          break;
         case 'shapes':
           this.live.push(pt);
           break;
@@ -1045,6 +1075,19 @@ export class PageCanvas implements ItemSurface {
     if (this.mode === 'line-adjust') {
       this.reset();
       if (!cancelled) this.commitLine(); // a handle drag ends with the line committed
+      this.schedule();
+      return;
+    }
+
+    if (this.mode === 'shape-adjust') {
+      this.reset(); // the shape stays pending, handles and all, until something commits it
+      this.schedule();
+      return;
+    }
+
+    if (this.mode === 'draw' && this.shapeSnapped) {
+      // the stroke snapped to a closed shape: lifting leaves it adjustable
+      this.reset();
       this.schedule();
       return;
     }
@@ -1209,6 +1252,7 @@ export class PageCanvas implements ItemSurface {
     this.pendingFit = null;
     this.fitCache = null;
     this.shapeSnapped = false;
+    this.shapeAdjust = null; // shapeEdit, like lineEdit, outlives the press
     this.adjustEnd = null; // lineEdit itself outlives the press: it stays until something commits it
     this.shapeMode = false;
     this.dismissingPress = false;
@@ -1287,7 +1331,7 @@ export class PageCanvas implements ItemSurface {
         if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;
         const fit = this.recognizeHeld();
         if (fit && fit.shape !== 'line') {
-          this.commitSnappedShape(fit);
+          this.enterShapeEdit(fit);
         } else if (fit) {
           const [a, b] = lineEnds(fit);
           this.lineEdit = { a, b, color: this.liveTool.color, size: this.liveTool.size };
@@ -1319,22 +1363,72 @@ export class PageCanvas implements ItemSurface {
   }
 
   /**
-   * Replaces the held stroke with a clean closed shape. Unlike a line there are
-   * no endpoint handles to wait for, so it goes straight into the store as one
-   * undo step (the same add-items op commitLine and the Shapes tool raise,
-   * flagged aiInk the same way) and nothing is left pending: the next press has
-   * nothing of this to dismiss, and the stroke's lift draws nothing more.
+   * Replaces the held stroke with a clean closed shape in its adjustable phase:
+   * painted with corner / vertex handles, not in the store until commitShapeEdit.
+   * The pen is still down, so the rest of this press draws nothing (shapeSnapped).
    */
-  private commitSnappedShape(fit: ShapeFit): void {
-    const shape = this.shapeFromFit(fit);
+  private enterShapeEdit(fit: ShapeFit): void {
     this.disarmHold();
     this.shapeSnapped = true;
     this.pendingFit = null;
     this.live = [];
+    this.shapeEdit = { fit, color: this.liveTool.color, size: this.liveTool.size, aiInk: this.liveTool.color === AI_COLOR };
+    this.hooks.onPendingLine();
+    this.schedule();
+  }
+
+  /** The single way out of the pending closed-shape phase, so the notebook hears about every one of them. */
+  private dropShapeEdit(): void {
+    this.shapeEdit = null;
+    this.shapeAdjust = null;
+    this.hooks.onPendingLine();
+  }
+
+  /** Adds the pending closed shape to the page as one undo step (not selected); returns whether there was one. */
+  commitShapeEdit(): boolean {
+    const se = this.shapeEdit;
+    if (!se) return false;
+    this.dropShapeEdit();
+    const shape = this.shapeFromFit(se.fit, se.color, se.size);
     store.addItems([shape]);
     this.rebuild();
-    this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items: [shape], aiInk: shape.color === AI_COLOR });
-    this.schedule();
+    this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items: [shape], aiInk: se.aiInk });
+    return true;
+  }
+
+  /** The pending shape and its handles, at a constant on-screen size. */
+  private paintShapeEdit(v: CanvasRenderingContext2D): void {
+    const se = this.shapeEdit;
+    if (!se) return;
+    drawElement(v, this.shapeFromFit(se.fit, se.color, se.size), this.page.paper);
+    const z = this.zoom();
+    v.save();
+    v.lineWidth = 2 / z;
+    v.strokeStyle = '#2563eb';
+    v.fillStyle = '#fff';
+    for (const p of shapeHandles(se.fit)) {
+      v.beginPath();
+      v.arc(p[0], p[1], LINE_HANDLE_R / z, 0, Math.PI * 2);
+      v.fill();
+      v.stroke();
+    }
+    v.restore();
+  }
+
+  /** Which handle of the pending shape a press lands on, if any (the nearest wins). */
+  private shapeHandleAt(pt: number[]): number | null {
+    if (!this.shapeEdit) return null;
+    const reach = LINE_HANDLE_HIT / this.zoom();
+    let best: number | null = null;
+    let bestD = reach;
+    shapeHandles(this.shapeEdit.fit).forEach((p, i) => {
+      const d = Math.hypot(pt[0] - p[0], pt[1] - p[1]);
+      if (d <= bestD) {
+        bestD = d;
+        best = i;
+      }
+    });
+    return best;
   }
 
   private shapeFromFit(fit: ShapeFit, color = this.liveTool.color, size = this.liveTool.size): ShapeElement {
@@ -1386,12 +1480,12 @@ export class PageCanvas implements ItemSurface {
 
   /** The view zoom changed: the pending line's handles and the lasso outline's dashes are both sized for the screen, so repaint them. */
   zoomChanged(): void {
-    if (this.lineEdit || this.lastLassoPath) this.schedule();
+    if (this.lineEdit || this.shapeEdit || this.lastLassoPath) this.schedule();
   }
 
   /** Whether a line is in its adjustable phase here — see the onPendingLine hook. */
   get hasPendingLine(): boolean {
-    return this.lineEdit !== null;
+    return this.lineEdit !== null || this.shapeEdit !== null;
   }
 
   /** The single way out of the adjustable phase, so the notebook hears about every one of them. */
@@ -1408,6 +1502,11 @@ export class PageCanvas implements ItemSurface {
    * there was one to drop.
    */
   cancelLine(): boolean {
+    if (this.shapeEdit) {
+      this.dropShapeEdit(); // a pending closed shape is dropped the same way, never committed
+      this.schedule();
+      return true;
+    }
     if (!this.lineEdit) return false;
     this.dropLineEdit();
     this.schedule();
@@ -1823,6 +1922,7 @@ export class PageCanvas implements ItemSurface {
   /** Called by the notebook when the active tool changes: finish any edit or pending line and drop the selection. */
   deactivate(): void {
     this.commitLine();
+    this.commitShapeEdit();
     this.clearSelection();
   }
 
@@ -1960,6 +2060,7 @@ export class PageCanvas implements ItemSurface {
   /** The store changed under us (undo/redo): settle any pending line (like a text edit), drop any selection and repaint. */
   refresh(): void {
     this.commitLine();
+    this.commitShapeEdit();
     this.clearSelection();
     this.rebuild();
   }

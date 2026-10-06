@@ -364,3 +364,67 @@ function fitEllipse(ring: number[][], total: number): ShapeFit | null {
   }
   return { shape: 'ellipse', x: mx - a, y: my - b, w: a * 2, h: b * 2, rotation: theta };
 }
+
+// ------------------------------------------------------- pending-shape handles
+/** Smallest side (page units) a corner drag will shrink a box to. */
+const HANDLE_MIN_SIDE = 8;
+
+/**
+ * The draggable points of a snapped closed shape, in page units: a triangle's
+ * three vertices, otherwise the four corners of its (rotated) box in the order
+ * top-left, top-right, bottom-right, bottom-left.
+ */
+export function shapeHandles(fit: ShapeFit): number[][] {
+  if (fit.shape === 'triangle') {
+    return (fit.pts ?? [[0.5, 0], [1, 1], [0, 1]]).map(([fx, fy]) => [fit.x + fx * fit.w, fit.y + fy * fit.h]);
+  }
+  const cx = fit.x + fit.w / 2;
+  const cy = fit.y + fit.h / 2;
+  const cos = Math.cos(fit.rotation);
+  const sin = Math.sin(fit.rotation);
+  return [
+    [-fit.w / 2, -fit.h / 2],
+    [fit.w / 2, -fit.h / 2],
+    [fit.w / 2, fit.h / 2],
+    [-fit.w / 2, fit.h / 2],
+  ].map(([lx, ly]) => [cx + lx * cos - ly * sin, cy + lx * sin + ly * cos]);
+}
+
+/**
+ * The fit after dragging handle `index` to `pt`. A triangle vertex moves and the
+ * box and `pts` are recomputed from the three vertices. For a box, `anchor` is
+ * the opposite corner as it was when the drag began: it stays put and the box
+ * is resized in its own rotated frame, so a rotated rectangle keeps its angle.
+ */
+export function dragShapeHandle(fit: ShapeFit, index: number, anchor: number[], pt: number[]): ShapeFit {
+  if (fit.shape === 'triangle') {
+    const v = shapeHandles(fit);
+    v[index] = [pt[0], pt[1]];
+    let x0 = Infinity;
+    let y0 = Infinity;
+    let x1 = -Infinity;
+    let y1 = -Infinity;
+    for (const p of v) {
+      if (p[0] < x0) x0 = p[0];
+      if (p[0] > x1) x1 = p[0];
+      if (p[1] < y0) y0 = p[1];
+      if (p[1] > y1) y1 = p[1];
+    }
+    const w = Math.max(x1 - x0, 1);
+    const h = Math.max(y1 - y0, 1);
+    return { ...fit, x: x0, y: y0, w, h, rotation: 0, pts: v.map((p) => [(p[0] - x0) / w, (p[1] - y0) / h]) };
+  }
+  const cos = Math.cos(fit.rotation);
+  const sin = Math.sin(fit.rotation);
+  const ex = pt[0] - anchor[0];
+  const ey = pt[1] - anchor[1];
+  let dx = ex * cos + ey * sin; // the drag, in the box's own frame
+  let dy = -ex * sin + ey * cos;
+  dx = (dx < 0 ? -1 : 1) * Math.max(Math.abs(dx), HANDLE_MIN_SIDE);
+  dy = (dy < 0 ? -1 : 1) * Math.max(Math.abs(dy), HANDLE_MIN_SIDE);
+  const px = anchor[0] + dx * cos - dy * sin;
+  const py = anchor[1] + dx * sin + dy * cos;
+  const w = Math.abs(dx);
+  const h = Math.abs(dy);
+  return { ...fit, x: (anchor[0] + px) / 2 - w / 2, y: (anchor[1] + py) / 2 - h / 2, w, h };
+}
