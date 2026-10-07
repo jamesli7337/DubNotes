@@ -84,7 +84,7 @@ import {
   type SurfaceHooks,
 } from './item-surface';
 import { drawTemplate, SPACING_PX } from './templates';
-import { TAPE_MIN } from './page-canvas';
+import { TAPE_MIN, rubOut, type Rubbed } from './page-canvas';
 
 /**
  * A board's whole visible surface: one canvas the size of the viewport,
@@ -271,8 +271,8 @@ export class BoardCanvas implements ItemSurface {
   private liveTool: { kind: 'pen' | 'highlighter'; color: string; size: number } = { kind: 'pen', color: '#000', size: 3 };
   /** ids the current eraser drag will delete on release (whole-stroke mode) */
   private erased = new Set<string>();
-  /** partial eraser: stroke id -> indices rubbed out so far, applied on release */
-  private partial = new Map<string, Set<number>>();
+  /** partial eraser: stroke id -> its points (boundary points inserted where the eraser circle cut it) and the indices rubbed out so far, applied on release */
+  private partial = new Map<string, Rubbed>();
 
   /** lasso: the polygon being drawn, and the latest point (for the tap-vs-drag test) */
   private lasso: number[][] = [];
@@ -693,11 +693,11 @@ export class BoardCanvas implements ItemSurface {
       drawElement(v, this.lineElement(this.lineEdit), paper);
       paintLineHandles(v, this.lineEdit, this.zoom());
     }
-    for (const [id, gone] of this.partial) {
+    for (const [id, rub] of this.partial) {
       const st = this.strokeById(id);
       if (!st) continue;
       drawStroke(v, st, paper, PENDING_OPACITY); // what is being rubbed out, dimmed
-      for (const seg of survivingSegments(st.points, gone)) drawStroke(v, { ...st, points: seg }, paper);
+      for (const seg of survivingSegments(rub.pts, rub.gone)) drawStroke(v, { ...st, points: seg }, paper);
     }
     // the items being dragged / resized / rotated, plus the outline riding along
     if (this.xfLive) {
@@ -1664,16 +1664,10 @@ export class BoardCanvas implements ItemSurface {
         if (nearPolyline(pt[0], pt[1], it.points, r + it.size / 2)) this.erased.add(it.id);
         continue;
       }
-      let gone = this.partial.get(it.id);
-      for (let i = 0; i < it.points.length; i++) {
-        const p = it.points[i];
-        if (Math.hypot(p[0] - pt[0], p[1] - pt[1]) > r + it.size / 2) continue;
-        if (!gone) {
-          gone = new Set();
-          this.partial.set(it.id, gone);
-        }
-        gone.add(i);
-      }
+      // centreline only (the stroke's width doesn't widen the reach), cut at the circle
+      const prev = this.partial.get(it.id);
+      const next = rubOut(prev?.pts ?? it.points, prev?.gone ?? new Set(), pt[0], pt[1], r);
+      if (next) this.partial.set(it.id, next);
     }
     if (this.erased.size) this.invalidate(); // dimming is baked into the settled copy
   }
@@ -1714,12 +1708,12 @@ export class BoardCanvas implements ItemSurface {
     // fresh strokes — the same shape as the page eraser's own 'edit' op, so
     // undo/redo needs nothing board-specific.
     const byPage = new Map<string, { removed: PageItem[]; added: PageItem[] }>();
-    for (const [id, gone] of this.partial) {
+    for (const [id, rub] of this.partial) {
       const st = this.strokeById(id);
       if (!st) continue;
       const bucket = byPage.get(st.pageId) ?? { removed: [], added: [] };
       bucket.removed.push(st);
-      for (const seg of survivingSegments(st.points, gone)) {
+      for (const seg of survivingSegments(rub.pts, rub.gone)) {
         if (seg.length < 2) continue;
         const b = boundsOfPoints(seg);
         bucket.added.push({

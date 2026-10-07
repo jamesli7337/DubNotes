@@ -136,6 +136,65 @@ type CoalescingEvent = PointerEvent & { getCoalescedEvents?: () => PointerEvent[
 
 /** Opacity for strokes the eraser is currently hovering, before they're actually removed. */
 const PENDING_OPACITY = 0.25;
+
+/** A partially erased stroke: its points (boundary points inserted where the eraser circle cut a segment) and the indices rubbed out. */
+export interface Rubbed {
+  pts: number[][];
+  gone: Set<number>;
+}
+
+/**
+ * Rubs the circle (cx, cy, r) out of a polyline. Points inside it join `gone`;
+ * a segment the circle crosses is split at the exact intersection by inserting
+ * boundary points that survive, so the erased region equals the circle even
+ * when the stroke is sparse. Segments already cut away (an end in `gone`) are
+ * left alone. Returns the new state, or null when the circle touched nothing
+ * new. Neither input is mutated.
+ */
+export function rubOut(points: number[][], gone: Set<number>, cx: number, cy: number, r: number): Rubbed | null {
+  const r2 = r * r;
+  const inside = points.map((p, i) => !gone.has(i) && (p[0] - cx) ** 2 + (p[1] - cy) ** 2 <= r2);
+  const lerp = (a: number[], b: number[], t: number): number[] => a.map((v, k) => v + (b[k] - v) * t);
+  const pts: number[][] = [];
+  const out = new Set<number>();
+  let changed = false;
+  for (let i = 0; i < points.length; i++) {
+    if (gone.has(i) || inside[i]) {
+      out.add(pts.length);
+      if (inside[i]) changed = true;
+    }
+    pts.push(points[i]);
+    const j = i + 1;
+    if (j >= points.length || gone.has(i) || gone.has(j)) continue;
+    const a = points[i];
+    const b = points[j];
+    const dx = b[0] - a[0];
+    const dy = b[1] - a[1];
+    const fx = a[0] - cx;
+    const fy = a[1] - cy;
+    const A = dx * dx + dy * dy;
+    if (!A) continue;
+    const B = 2 * (fx * dx + fy * dy);
+    const disc = B * B - 4 * A * (fx * fx + fy * fy - r2);
+    if (disc <= 0) continue;
+    const s = Math.sqrt(disc);
+    const lo = Math.max((-B - s) / (2 * A), 0);
+    const hi = Math.min((-B + s) / (2 * A), 1);
+    if (lo >= hi) continue;
+    if (inside[i] && inside[j]) continue;
+    if (inside[i]) pts.push(lerp(a, b, hi));
+    else if (inside[j]) pts.push(lerp(a, b, lo));
+    else {
+      // the circle crosses between two samples without containing either
+      pts.push(lerp(a, b, lo));
+      out.add(pts.length);
+      pts.push(lerp(a, b, (lo + hi) / 2));
+      pts.push(lerp(a, b, hi));
+      changed = true;
+    }
+  }
+  return changed ? { pts, gone: out } : null;
+}
 /** Max gap between two taps (ms) and how far apart they may land (page units) to still count as one double-tap — see isDoubleTap. */
 const DOUBLE_TAP_MS = 350;
 const DOUBLE_TAP_SLOP = 24;
@@ -244,8 +303,8 @@ export class PageCanvas implements ItemSurface {
     size: 3,
   };
   private erased = new Set<string>();
-  /** partial eraser: stroke id → indices of the points rubbed out so far (view-only until pointerup) */
-  private partial = new Map<string, Set<number>>();
+  /** partial eraser: stroke id → its points (with boundary points inserted where the eraser circle cut it) and the indices rubbed out so far (view-only until pointerup) */
+  private partial = new Map<string, Rubbed>();
   /** the selection polygon: the path drawn (freehand) or the box / ellipse spanning press → pointer */
   private lasso: number[][] = [];
   /** where the lasso pointer is now — for box / circle the polygon's points aren't the pointer */
@@ -602,11 +661,11 @@ export class PageCanvas implements ItemSurface {
     if (this.laser.length) this.paintLaser(v);
     if (this.partial.size) {
       // partially erased strokes: the rubbed-out parts dimmed, the survivors solid
-      for (const [id, gone] of this.partial) {
+      for (const [id, rub] of this.partial) {
         const s = store.strokesOf(this.page.id).find((k) => k.id === id);
         if (!s) continue;
         drawStroke(v, s, this.page.paper, PENDING_OPACITY);
-        for (const seg of survivingSegments(s.points, gone)) drawStroke(v, { ...s, points: seg }, this.page.paper);
+        for (const seg of survivingSegments(rub.pts, rub.gone)) drawStroke(v, { ...s, points: seg }, this.page.paper);
       }
     }
     if (this.mode === 'lasso' && this.lasso.length > 1) {
@@ -1669,34 +1728,17 @@ export class PageCanvas implements ItemSurface {
   private partialEraseAt(pt: number[]): void {
     let newStroke = false;
     let changed = false;
+    // the stroke's own width doesn't widen the reach: the eraser circle is tested
+    // against the centreline alone, and a segment is cut where the circle crosses it
     const eraserTol = ERASER_RADIUS / this.zoom();
     for (const s of store.strokesOf(this.page.id)) {
       if (!this.erasable(s.id)) continue;
-      const tol = s.size / 2 + eraserTol;
-      const t2 = tol * tol;
-      let gone = this.partial.get(s.id);
-      const p = s.points;
-      for (let i = 0; i < p.length; i++) {
-        const near = (pt[0] - p[i][0]) ** 2 + (pt[1] - p[i][1]) ** 2 <= t2;
-        // a sparse stroke can pass through the eraser between two samples: treat
-        // the segment as hit too, taking both of its ends
-        const segHit =
-          !near && i + 1 < p.length && nearPolyline(pt[0], pt[1], [p[i], p[i + 1]], tol);
-        if (!near && !segHit) continue;
-        if (!gone) {
-          gone = new Set();
-          this.partial.set(s.id, gone);
-          newStroke = true;
-        }
-        if (!gone.has(i)) {
-          gone.add(i);
-          changed = true;
-        }
-        if (segHit && !gone.has(i + 1)) {
-          gone.add(i + 1);
-          changed = true;
-        }
-      }
+      const prev = this.partial.get(s.id);
+      const next = rubOut(prev?.pts ?? s.points, prev?.gone ?? new Set(), pt[0], pt[1], eraserTol);
+      if (!next) continue;
+      if (!prev) newStroke = true;
+      this.partial.set(s.id, next);
+      changed = true;
     }
     const shapeHit = this.eraseShapesAt(pt);
     if (newStroke || shapeHit) this.rebuild(this.erased.size ? this.erased : undefined);
@@ -1708,11 +1750,11 @@ export class PageCanvas implements ItemSurface {
     const pageId = this.page.id;
     const removed: PageItem[] = [];
     const added: Stroke[] = [];
-    for (const [id, gone] of this.partial) {
+    for (const [id, rub] of this.partial) {
       const s = store.strokesOf(pageId).find((k) => k.id === id);
       if (!s) continue;
       removed.push(s);
-      for (const seg of survivingSegments(s.points, gone)) added.push({ ...s, id: uid(), points: seg });
+      for (const seg of survivingSegments(rub.pts, rub.gone)) added.push({ ...s, id: uid(), points: seg });
     }
     // shapes touched during a partial erase go whole, in the same undo step
     for (const e of store.elementsOf(pageId)) if (this.erased.has(e.id)) removed.push(e);

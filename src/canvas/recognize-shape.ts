@@ -385,7 +385,7 @@ function cornerCandidates(ring: number[][], total: number): number[] {
   return [];
 }
 
-/** `v` with the corner nearest square, if within RIGHT_SNAP of 90°, made exactly square: its first leg stays, the second is turned perpendicular. */
+/** `v` with the corner nearest square, if within RIGHT_SNAP of 90°, made exactly square (its first leg stays, the second is turned perpendicular), then axis-aligned if within AXIS_SNAP. */
 function snapRight(v: number[][]): number[][] {
   const ang = v.map((p, k) => interiorAngle(v[(k + 2) % 3], p, v[(k + 1) % 3]));
   let right = -1;
@@ -410,6 +410,16 @@ function snapRight(v: number[][]): number[][] {
   const len = dist(b, c);
   const out = v.map((p) => [p[0], p[1]]);
   out[bi] = [c[0] + nx * side * len, c[1] + ny * side * len];
+
+  // like a rectangle, a right triangle whose legs are close to the axes is laid exactly on them:
+  // the tilt of one leg modulo 90° (the legs may point left / right / up / down) is turned out about the right-angle corner
+  const quarter = Math.PI / 2;
+  const tilt = ((((Math.atan2(a[1] - c[1], a[0] - c[0]) + quarter / 2) % quarter) + quarter) % quarter) - quarter / 2;
+  if (Math.abs(tilt) <= AXIS_SNAP) {
+    const cos = Math.cos(-tilt);
+    const sin = Math.sin(-tilt);
+    return out.map((p) => [c[0] + (p[0] - c[0]) * cos - (p[1] - c[1]) * sin, c[1] + (p[0] - c[0]) * sin + (p[1] - c[1]) * cos]);
+  }
   return out;
 }
 
