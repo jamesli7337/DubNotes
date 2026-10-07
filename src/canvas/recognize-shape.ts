@@ -12,43 +12,53 @@ export function recognizeShape(pts: number[][], nib: number, zoom: number): Shap
 
 const DEG = Math.PI / 180;
 
+// ------------------------------------------------------------ tuning constants
+// Floors: what keeps small handwriting from snapping. Screen px, divided by zoom.
 /** Fewest samples a closed stroke may have. */
 const MIN_POINTS = 12;
 /** Shortest path (screen px) worth considering as a closed shape. */
 const MIN_LEN = 80;
 /** Smallest bounding-box side (screen px). */
 const MIN_SIZE = 24;
+
+// Acceptance: every candidate is fitted and scored; the best one wins if it is good enough.
 /** The end may sit this far from the start, as a fraction of the path, and still count as closed. */
-const MAX_GAP = 0.15;
-/** Douglas-Peucker tolerance as a fraction of the path length, with a floor in screen px. */
-const DP_EPS = 0.03;
-const DP_EPS_FLOOR = 4;
-/** A vertex turning the path less than this is not a corner. */
-const MIN_TURN = 28 * DEG;
-/**
- * How far a side may bow off its own chord, as a fraction of the chord, and
- * still be a straight side. A circle's quarter arc bows 0.21 (see MAX_BOW in
- * recognize.ts), so a circle can never pass for a four-cornered shape.
- */
-const EDGE_BOW = 0.12;
-const EDGE_BOW_FLOOR = 4;
-/** A triangle corner this close to 90° is snapped to exactly 90°. */
-const RIGHT_SNAP = 12 * DEG;
-/** Every corner of a rectangle must be this close to 90°. */
-const RECT_RIGHT_TOL = 18 * DEG;
-/** A rectangle / ellipse within this of the axes is snapped to them. */
-const AXIS_SNAP = 10 * DEG;
-/** Narrowest interior angle a triangle may have. */
-const MIN_TRI_ANGLE = 20 * DEG;
-/** An ellipse whose axes are within this fraction of each other is a circle. */
-const CIRCLE_ASPECT = 0.1;
-/** RMS deviation of the stroke's normalised radius from 1 that still reads as an ellipse. A square scores ~0.11. */
-const ELLIPSE_RESIDUAL = 0.06;
+const MAX_GAP = 0.25;
+/** Highest mean point-to-outline distance, as a fraction of sqrt(bbox area), the winning candidate may have. Raise to snap more. */
+const ACCEPT_ERROR = 0.08;
+/** The stroke must enclose at least this fraction of the candidate's area — rejects there-and-back squiggles and figure-8s. */
+const ENCLOSED_MIN = 0.6;
+/** Points the stroke is resampled to (by arc length) for fitting and scoring. */
+const RESAMPLE_N = 64;
+
+// Rectangle
+/** Coarse step of the orientation search over ±45° (a rectangle repeats every 90°). */
+const RECT_ANGLE_STEP = 5 * DEG;
+/** Fine step of the search around the best coarse angle. */
+const RECT_REFINE_STEP = 1 * DEG;
+/** A rectangle / ellipse rotated less than this is snapped to the axes. */
+const AXIS_SNAP = 15 * DEG;
+
+// Ellipse
 /** Minor / major axis below which it is a squashed there-and-back, not an ellipse. */
 const ELLIPSE_MIN_ASPECT = 0.15;
-/** Enclosed area as a fraction of the fitted ellipse's — separates a ring from a figure-8 or scribble. */
-const ELLIPSE_MIN_FILL = 0.75;
-const RESAMPLE_N = 64;
+/** An ellipse whose axes are within this fraction of each other is a circle. */
+const CIRCLE_ASPECT = 0.1;
+
+// Triangle
+/** Narrowest interior angle a triangle may have. */
+const MIN_TRI_ANGLE = 15 * DEG;
+/** A triangle corner this close to 90° is snapped to exactly 90°. */
+const RIGHT_SNAP = 18 * DEG;
+/** Douglas-Peucker is loosened until at most this many corner candidates remain, then the best three are chosen. */
+const TRI_MAX_CANDIDATES = 8;
+/** Starting Douglas-Peucker tolerance as a fraction of the path length, and the factor it grows by each pass. */
+const TRI_START_EPS = 0.01;
+const TRI_EPS_GROWTH = 1.5;
+
+// Handles
+/** Smallest side (page units) a corner drag will shrink a box to. */
+const HANDLE_MIN_SIDE = 8;
 
 const dist = (a: number[], b: number[]): number => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
@@ -58,6 +68,16 @@ function distToChord(p: number[], a: number[], b: number[]): number {
   const len = Math.hypot(dx, dy);
   if (len < 1e-9) return dist(p, a);
   return Math.abs((p[0] - a[0]) * dy - (p[1] - a[1]) * dx) / len;
+}
+
+/** Distance from `p` to the segment a–b. */
+function distToSegment(p: number[], a: number[], b: number[]): number {
+  const dx = b[0] - a[0];
+  const dy = b[1] - a[1];
+  const len2 = dx * dx + dy * dy;
+  if (len2 < 1e-9) return dist(p, a);
+  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2));
+  return Math.hypot(p[0] - (a[0] + t * dx), p[1] - (a[1] + t * dy));
 }
 
 /** Douglas-Peucker over ring[i0..i1], adding the indices of the points it keeps. */
@@ -81,15 +101,6 @@ function simplify(ring: number[][], i0: number, i1: number, eps: number, keep: S
   }
 }
 
-/** How much the path turns at `cur`, 0..π. */
-function turnAt(prev: number[], cur: number[], next: number[]): number {
-  const a1 = Math.atan2(cur[1] - prev[1], cur[0] - prev[0]);
-  const a2 = Math.atan2(next[1] - cur[1], next[0] - cur[0]);
-  let d = Math.abs(a2 - a1);
-  if (d > Math.PI) d = Math.PI * 2 - d;
-  return d;
-}
-
 /** Interior angle at `cur` between its two neighbours, 0..π. */
 function interiorAngle(prev: number[], cur: number[], next: number[]): number {
   const ax = prev[0] - cur[0];
@@ -101,6 +112,7 @@ function interiorAngle(prev: number[], cur: number[], next: number[]): number {
   return Math.acos(Math.max(-1, Math.min(1, (ax * bx + ay * by) / m)));
 }
 
+/** Twice the enclosed area of the implicitly-closed polygon (shoelace), signed. */
 function shoelace2(pts: number[][]): number {
   let sum = 0;
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
@@ -131,12 +143,62 @@ function resample(ring: number[][], total: number, n: number): number[][] {
   return out;
 }
 
+// ------------------------------------------------------------------ scoring
+/** A function giving a point's distance to the outline of `fit`. */
+function outlineDistance(fit: ShapeFit): (p: number[]) => number {
+  if (fit.shape === 'triangle') {
+    const v = shapeHandles(fit);
+    return (p) => Math.min(distToSegment(p, v[0], v[1]), distToSegment(p, v[1], v[2]), distToSegment(p, v[2], v[0]));
+  }
+  const cx = fit.x + fit.w / 2;
+  const cy = fit.y + fit.h / 2;
+  const hw = fit.w / 2;
+  const hh = fit.h / 2;
+  const cos = Math.cos(fit.rotation);
+  const sin = Math.sin(fit.rotation);
+  if (fit.shape === 'rect') {
+    return (p) => {
+      const dx = p[0] - cx;
+      const dy = p[1] - cy;
+      const du = hw - Math.abs(dx * cos + dy * sin); // how far inside each side, negative when outside
+      const dv = hh - Math.abs(-dx * sin + dy * cos);
+      return du >= 0 && dv >= 0 ? Math.min(du, dv) : Math.hypot(Math.max(-du, 0), Math.max(-dv, 0));
+    };
+  }
+  return (p) => {
+    const dx = p[0] - cx;
+    const dy = p[1] - cy;
+    const u = dx * cos + dy * sin;
+    const v = -dx * sin + dy * cos;
+    const r = Math.hypot(u, v);
+    if (r < 1e-9) return Math.min(hw, hh);
+    const rho = Math.hypot(u / hw, v / hh);
+    return r * Math.abs(1 - 1 / rho); // along the ray from the centre
+  };
+}
+
+/** Mean distance of the sample points from the fit's outline. */
+function meanError(fit: ShapeFit, s: number[][]): number {
+  if (fit.w < 1e-6 || fit.h < 1e-6) return Infinity;
+  const d = outlineDistance(fit);
+  let t = 0;
+  for (const p of s) t += d(p);
+  return t / s.length;
+}
+
+/** The area a fit encloses. */
+function fitArea(fit: ShapeFit): number {
+  if (fit.shape === 'rect') return fit.w * fit.h;
+  if (fit.shape === 'ellipse') return (Math.PI * fit.w * fit.h) / 4;
+  return Math.abs(shoelace2(shapeHandles(fit))) / 2;
+}
+
 /**
- * Fits a triangle, rectangle or ellipse to a stroke that loops back to where it
- * began, or returns null (writing, a scribble, a stroke that is merely curved).
- * Corners come from Douglas-Peucker on the closed path; sides must be straight
- * for a polygon, which is also what keeps a circle (four vertices, bowed sides)
- * from being read as a square. No corners at all falls to the ellipse fit.
+ * Fits a rectangle, ellipse and triangle to a stroke that loops back to near
+ * where it began, scores each by how far the stroke strays from that outline,
+ * and returns the best if it is good enough — or null (writing, a scribble, a
+ * there-and-back). Rounded corners and wobbly sides only raise a candidate's
+ * score a little, so they no longer disqualify it.
  */
 function recognizeClosed(pts: number[][], zoom: number): ShapeFit | null {
   const n = pts.length;
@@ -160,144 +222,42 @@ function recognizeClosed(pts: number[][], zoom: number): ShapeFit | null {
   const min = MIN_SIZE / zoom;
   if (x1 - x0 < min || y1 - y0 < min) return null;
 
-  const corners = findCorners(ring, total, zoom);
-  if (corners) {
-    const poly = corners.length === 3 ? fitTriangle(ring, corners, zoom) : corners.length === 4 ? fitRect(ring, corners) : null;
-    if (poly) return poly;
-  }
-  return fitEllipse(ring, total);
-}
+  const s = resample(ring, total, RESAMPLE_N);
+  const size = Math.sqrt((x1 - x0) * (y1 - y0));
+  const enclosed = Math.abs(shoelace2(s)) / 2;
 
-/**
- * Indices into `ring` of the stroke's corners, or null unless every side
- * between them is straight. A vertex that barely turns the path is dropped, the
- * flattest first.
- */
-function findCorners(ring: number[][], total: number, zoom: number): number[] | null {
-  const last = ring.length - 1;
-  let far = 0;
-  let farD = 0;
-  for (let i = 1; i < last; i++) {
-    const d = dist(ring[0], ring[i]);
-    if (d > farD) {
-      farD = d;
-      far = i;
+  let best: ShapeFit | null = null;
+  let bestErr = Infinity;
+  for (const fit of [fitRect(s), fitEllipse(s), fitTriangle(ring, total, s, zoom)]) {
+    if (!fit || enclosed < ENCLOSED_MIN * fitArea(fit)) continue;
+    const err = meanError(fit, s) / size;
+    if (err < bestErr) {
+      bestErr = err;
+      best = fit;
     }
   }
-  if (far === 0) return null;
-  const eps = Math.max(DP_EPS * total, DP_EPS_FLOOR / zoom);
-  const keep = new Set<number>([0, far, last]);
-  simplify(ring, 0, far, eps, keep);
-  simplify(ring, far, last, eps, keep);
-  const idx = [...keep].sort((a, b) => a - b);
-  idx.pop(); // the closing duplicate of index 0
-
-  for (;;) {
-    if (idx.length < 3) return null;
-    let flat = -1;
-    let flatTurn = MIN_TURN;
-    for (let k = 0; k < idx.length; k++) {
-      const t = turnAt(ring[idx[(k + idx.length - 1) % idx.length]], ring[idx[k]], ring[idx[(k + 1) % idx.length]]);
-      if (t < flatTurn) {
-        flatTurn = t;
-        flat = k;
-      }
-    }
-    if (flat < 0) break;
-    idx.splice(flat, 1);
-  }
-  if (idx.length !== 3 && idx.length !== 4) return null;
-
-  for (let k = 0; k < idx.length; k++) {
-    const a = idx[k];
-    const b = k + 1 < idx.length ? idx[k + 1] : last;
-    const chord = dist(ring[a], ring[b]);
-    const tol = Math.max(EDGE_BOW * chord, EDGE_BOW_FLOOR / zoom);
-    for (let i = a + 1; i < b; i++) if (distToChord(ring[i], ring[a], ring[b]) > tol) return null;
-  }
-  return idx;
+  return best && bestErr <= ACCEPT_ERROR ? best : null;
 }
 
-function fitTriangle(ring: number[][], idx: number[], zoom: number): ShapeFit | null {
-  const v = idx.map((i) => [ring[i][0], ring[i][1]]);
-  const ang = v.map((p, k) => interiorAngle(v[(k + 2) % 3], p, v[(k + 1) % 3]));
-  if (Math.min(...ang) < MIN_TRI_ANGLE) return null;
-
-  // one corner close enough to square becomes exactly square: its first leg stays, the second is turned perpendicular
-  let right = -1;
-  let rightOff = RIGHT_SNAP;
-  ang.forEach((a, k) => {
-    const off = Math.abs(a - Math.PI / 2);
-    if (off <= rightOff) {
-      rightOff = off;
-      right = k;
-    }
-  });
-  if (right >= 0) {
-    const c = v[right];
-    const a = v[(right + 2) % 3];
-    const bi = (right + 1) % 3;
-    const b = v[bi];
-    const ul = dist(a, c);
-    const ux = (a[0] - c[0]) / ul;
-    const uy = (a[1] - c[1]) / ul;
-    const nx = -uy;
-    const ny = ux;
-    const side = (b[0] - c[0]) * nx + (b[1] - c[1]) * ny >= 0 ? 1 : -1;
-    const len = dist(b, c);
-    v[bi] = [c[0] + nx * side * len, c[1] + ny * side * len];
-  }
-
-  let x0 = Infinity;
-  let y0 = Infinity;
-  let x1 = -Infinity;
-  let y1 = -Infinity;
-  for (const p of v) {
-    if (p[0] < x0) x0 = p[0];
-    if (p[0] > x1) x1 = p[0];
-    if (p[1] < y0) y0 = p[1];
-    if (p[1] > y1) y1 = p[1];
-  }
-  const w = x1 - x0;
-  const h = y1 - y0;
-  const min = MIN_SIZE / zoom;
-  if (w < min || h < min) return null;
-  return { shape: 'triangle', x: x0, y: y0, w, h, rotation: 0, pts: v.map((p) => [(p[0] - x0) / w, (p[1] - y0) / h]) };
-}
-
-function fitRect(ring: number[][], idx: number[]): ShapeFit | null {
-  const v = idx.map((i) => ring[i]);
-  let sin4 = 0;
-  let cos4 = 0;
-  for (let k = 0; k < 4; k++) {
-    const a = v[(k + 3) % 4];
-    const c = v[k];
-    const b = v[(k + 1) % 4];
-    if (Math.abs(interiorAngle(a, c, b) - Math.PI / 2) > RECT_RIGHT_TOL) return null;
-    const dir = Math.atan2(b[1] - c[1], b[0] - c[0]);
-    sin4 += Math.sin(4 * dir);
-    cos4 += Math.cos(4 * dir);
-  }
-  // the sides' common direction, folded to ±45°: averaging 4×angle makes the four sides agree
-  let rot = Math.atan2(sin4, cos4) / 4;
-  if (Math.abs(rot) < AXIS_SNAP) rot = 0;
+// --------------------------------------------------------------- candidates
+/** The tightest box around `s` at orientation `rot`. */
+function boxAt(s: number[][], rot: number): ShapeFit {
   const cos = Math.cos(rot);
   const sin = Math.sin(rot);
   let u0 = Infinity;
   let v0 = Infinity;
   let u1 = -Infinity;
   let v1 = -Infinity;
-  for (const p of v) {
+  for (const p of s) {
     const u = p[0] * cos + p[1] * sin;
-    const w = -p[0] * sin + p[1] * cos;
+    const v = -p[0] * sin + p[1] * cos;
     if (u < u0) u0 = u;
     if (u > u1) u1 = u;
-    if (w < v0) v0 = w;
-    if (w > v1) v1 = w;
+    if (v < v0) v0 = v;
+    if (v > v1) v1 = v;
   }
   const w = u1 - u0;
   const h = v1 - v0;
-  if (w <= 0 || h <= 0) return null;
   const cu = (u0 + u1) / 2;
   const cv = (v0 + v1) / 2;
   const cx = cu * cos - cv * sin;
@@ -305,8 +265,26 @@ function fitRect(ring: number[][], idx: number[]): ShapeFit | null {
   return { shape: 'rect', x: cx - w / 2, y: cy - h / 2, w, h, rotation: rot };
 }
 
-function fitEllipse(ring: number[][], total: number): ShapeFit | null {
-  const s = resample(ring, total, RESAMPLE_N);
+/** The oriented bounding rectangle that sits closest to the stroke, found by searching orientations. */
+function fitRect(s: number[][]): ShapeFit | null {
+  let bestRot = 0;
+  let bestErr = Infinity;
+  const tryRot = (rot: number): void => {
+    const err = meanError(boxAt(s, rot), s);
+    if (err < bestErr) {
+      bestErr = err;
+      bestRot = rot;
+    }
+  };
+  for (let r = -Math.PI / 4; r < Math.PI / 4; r += RECT_ANGLE_STEP) tryRot(r);
+  const coarse = bestRot;
+  for (let r = coarse - RECT_ANGLE_STEP; r <= coarse + RECT_ANGLE_STEP; r += RECT_REFINE_STEP) tryRot(r);
+  if (!Number.isFinite(bestErr)) return null;
+  return boxAt(s, Math.abs(bestRot) < AXIS_SNAP ? 0 : bestRot);
+}
+
+/** The ellipse with the stroke's own principal axes, scaled through its mean radius. */
+function fitEllipse(s: number[][]): ShapeFit | null {
   let mx = 0;
   let my = 0;
   for (const p of s) {
@@ -338,25 +316,20 @@ function fitEllipse(ring: number[][], total: number): ShapeFit | null {
 
   const cos = Math.cos(theta);
   const sin = Math.sin(theta);
-  const rho = s.map((p) => {
+  let avg = 0;
+  for (const p of s) {
     const u = (p[0] - mx) * cos + (p[1] - my) * sin;
     const v = -(p[0] - mx) * sin + (p[1] - my) * cos;
-    return Math.hypot(u / a, v / b);
-  });
-  const avg = rho.reduce((t, r) => t + r, 0) / rho.length;
-  let sq = 0;
-  for (const r of rho) sq += (r - 1) * (r - 1);
-  if (Math.sqrt(sq / rho.length) > ELLIPSE_RESIDUAL) return null;
+    avg += Math.hypot(u / a, v / b);
+  }
+  avg /= s.length;
   a *= avg; // pass through the stroke's mean radius rather than the variance estimate
   b *= avg;
-  if (Math.abs(shoelace2(s) / 2) < ELLIPSE_MIN_FILL * Math.PI * a * b) return null;
 
   if (Math.abs(a - b) / Math.max(a, b) < CIRCLE_ASPECT) {
     const r = (a + b) / 2;
     return { shape: 'ellipse', x: mx - r, y: my - r, w: r * 2, h: r * 2, rotation: 0 };
   }
-  // fold the major axis to (-90°, 90°], then snap to the axes if close
-  if (theta > Math.PI / 2) theta -= Math.PI;
   if (Math.abs(theta) < AXIS_SNAP) theta = 0;
   else if (Math.abs(Math.abs(theta) - Math.PI / 2) < AXIS_SNAP) {
     theta = 0;
@@ -365,10 +338,108 @@ function fitEllipse(ring: number[][], total: number): ShapeFit | null {
   return { shape: 'ellipse', x: mx - a, y: my - b, w: a * 2, h: b * 2, rotation: theta };
 }
 
-// ------------------------------------------------------- pending-shape handles
-/** Smallest side (page units) a corner drag will shrink a box to. */
-const HANDLE_MIN_SIDE = 8;
+/** A triangle fit from its three vertices: the box around them and each vertex as a fraction of it. */
+function triangleFit(v: number[][]): ShapeFit {
+  let x0 = Infinity;
+  let y0 = Infinity;
+  let x1 = -Infinity;
+  let y1 = -Infinity;
+  for (const p of v) {
+    if (p[0] < x0) x0 = p[0];
+    if (p[0] > x1) x1 = p[0];
+    if (p[1] < y0) y0 = p[1];
+    if (p[1] > y1) y1 = p[1];
+  }
+  const w = Math.max(x1 - x0, 1);
+  const h = Math.max(y1 - y0, 1);
+  return { shape: 'triangle', x: x0, y: y0, w, h, rotation: 0, pts: v.map((p) => [(p[0] - x0) / w, (p[1] - y0) / h]) };
+}
 
+/**
+ * Indices into `ring` of the stroke's corner candidates: Douglas-Peucker on the
+ * closed path, its tolerance loosened until no more than TRI_MAX_CANDIDATES
+ * remain, so a wobbly or rounded corner leaves a few candidates, not dozens.
+ */
+function cornerCandidates(ring: number[][], total: number): number[] {
+  const last = ring.length - 1;
+  let far = 0;
+  let farD = 0;
+  for (let i = 1; i < last; i++) {
+    const d = dist(ring[0], ring[i]);
+    if (d > farD) {
+      farD = d;
+      far = i;
+    }
+  }
+  if (far === 0) return [];
+  let eps = TRI_START_EPS * total;
+  for (let pass = 0; pass < 16; pass++) {
+    const keep = new Set<number>([0, far, last]);
+    simplify(ring, 0, far, eps, keep);
+    simplify(ring, far, last, eps, keep);
+    const idx = [...keep].sort((a, b) => a - b);
+    idx.pop(); // the closing duplicate of index 0
+    if (idx.length <= TRI_MAX_CANDIDATES) return idx;
+    eps *= TRI_EPS_GROWTH;
+  }
+  return [];
+}
+
+/** `v` with the corner nearest square, if within RIGHT_SNAP of 90°, made exactly square: its first leg stays, the second is turned perpendicular. */
+function snapRight(v: number[][]): number[][] {
+  const ang = v.map((p, k) => interiorAngle(v[(k + 2) % 3], p, v[(k + 1) % 3]));
+  let right = -1;
+  let rightOff = RIGHT_SNAP;
+  ang.forEach((a, k) => {
+    const off = Math.abs(a - Math.PI / 2);
+    if (off <= rightOff) {
+      rightOff = off;
+      right = k;
+    }
+  });
+  if (right < 0) return v;
+  const c = v[right];
+  const a = v[(right + 2) % 3];
+  const bi = (right + 1) % 3;
+  const b = v[bi];
+  const ul = dist(a, c);
+  if (ul < 1e-9) return v;
+  const nx = -(a[1] - c[1]) / ul;
+  const ny = (a[0] - c[0]) / ul;
+  const side = (b[0] - c[0]) * nx + (b[1] - c[1]) * ny >= 0 ? 1 : -1;
+  const len = dist(b, c);
+  const out = v.map((p) => [p[0], p[1]]);
+  out[bi] = [c[0] + nx * side * len, c[1] + ny * side * len];
+  return out;
+}
+
+/** The best three of the stroke's corner candidates, by how closely their triangle follows the stroke; a corner near square is then squared. */
+function fitTriangle(ring: number[][], total: number, s: number[][], zoom: number): ShapeFit | null {
+  const cand = cornerCandidates(ring, total);
+  if (cand.length < 3) return null;
+  const min = MIN_SIZE / zoom;
+  let best: number[][] | null = null;
+  let bestErr = Infinity;
+  for (let i = 0; i < cand.length - 2; i++) {
+    for (let j = i + 1; j < cand.length - 1; j++) {
+      for (let k = j + 1; k < cand.length; k++) {
+        const v = [ring[cand[i]], ring[cand[j]], ring[cand[k]]];
+        const smallest = Math.min(...v.map((p, q) => interiorAngle(v[(q + 2) % 3], p, v[(q + 1) % 3])));
+        if (smallest < MIN_TRI_ANGLE) continue;
+        const fit = triangleFit(v);
+        if (fit.w < min || fit.h < min) continue;
+        const err = meanError(fit, s);
+        if (err < bestErr) {
+          bestErr = err;
+          best = v;
+        }
+      }
+    }
+  }
+  return best ? triangleFit(snapRight(best)) : null;
+}
+
+// ------------------------------------------------------- pending-shape handles
 /**
  * The draggable points of a snapped closed shape, in page units: a triangle's
  * three vertices, otherwise the four corners of its (rotated) box in the order
@@ -400,19 +471,7 @@ export function dragShapeHandle(fit: ShapeFit, index: number, anchor: number[], 
   if (fit.shape === 'triangle') {
     const v = shapeHandles(fit);
     v[index] = [pt[0], pt[1]];
-    let x0 = Infinity;
-    let y0 = Infinity;
-    let x1 = -Infinity;
-    let y1 = -Infinity;
-    for (const p of v) {
-      if (p[0] < x0) x0 = p[0];
-      if (p[0] > x1) x1 = p[0];
-      if (p[1] < y0) y0 = p[1];
-      if (p[1] > y1) y1 = p[1];
-    }
-    const w = Math.max(x1 - x0, 1);
-    const h = Math.max(y1 - y0, 1);
-    return { ...fit, x: x0, y: y0, w, h, rotation: 0, pts: v.map((p) => [(p[0] - x0) / w, (p[1] - y0) / h]) };
+    return { ...fit, ...triangleFit(v) };
   }
   const cos = Math.cos(fit.rotation);
   const sin = Math.sin(fit.rotation);

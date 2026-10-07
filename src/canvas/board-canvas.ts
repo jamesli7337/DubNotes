@@ -66,6 +66,7 @@ import {
   lineEndAt,
   paintLaserTrail,
   paintLineHandles,
+  holdDrifted,
   SHAPE_CUE_OPACITY,
   trailMoved,
   type LaserTrail,
@@ -298,6 +299,8 @@ export class BoardCanvas implements ItemSurface {
   private lineEdit: LineEdit | null = null;
   private adjustEnd: 'a' | 'b' | null = null;
   private readonly hold = new LineSnapHold();
+  /** the pen tip when the snap hold was last (re)armed; the hold only restarts once the tip drifts HOLD_DRIFT_PX from here */
+  private holdAnchor: number[] | null = null;
   /** this press is spent settling a pending line / selection elsewhere, so it must not also draw */
   private dismissingPress = false;
 
@@ -952,9 +955,8 @@ export class BoardCanvas implements ItemSurface {
             break;
           }
           const ink = this.toBoard(smoothed);
-          const moved = trailMoved(this.live, ink);
           this.live.push(ink);
-          if ((this.shapeMode || this.loopMode) && moved) {
+          if ((this.shapeMode || this.loopMode) && holdDrifted(this.holdAnchor, ink, this.zoom())) {
             if (this.pendingFit) {
               // keep tracking the pen so the ghost's length and direction adjust
               // live as the stroke is refined, rather than freezing or vanishing
@@ -1292,6 +1294,8 @@ export class BoardCanvas implements ItemSurface {
    * flags are mutually exclusive, so there is never a race between them.
    */
   private armSnapHold(): void {
+    const tip = this.live[this.live.length - 1];
+    this.holdAnchor = tip ? [tip[0], tip[1]] : null;
     if (this.loopMode) this.armLoopHold();
     else if (this.shapeMode) this.armHold();
   }

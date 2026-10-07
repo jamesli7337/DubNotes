@@ -63,6 +63,7 @@ import {
   lineEndAt,
   paintLaserTrail,
   paintLineHandles,
+  holdDrifted,
   SHAPE_CUE_OPACITY,
   STILL_TRAIL,
   trailMoved,
@@ -262,6 +263,8 @@ export class PageCanvas implements ItemSurface {
   /** line-snap (pen tool only): the stroke snaps to a line once the pen has held still */
   private shapeMode = false;
   private readonly hold = new LineSnapHold();
+  /** the pen tip when the hold was last (re)armed; the hold only restarts once the tip drifts HOLD_DRIFT_PX from here */
+  private holdAnchor: number[] | null = null;
   /** ghosted preview shown partway through the hold, alongside the still-visible ink — not yet snapped */
   private pendingFit: ShapeFit | null = null;
   /** the last hold recognition and the stroke state it was for, so the cue and the snap don't both run it */
@@ -951,7 +954,7 @@ export class PageCanvas implements ItemSurface {
           // press point itself, which has to survive as the stroke's start.
           if (!moved && this.live.length > 1) this.live[this.live.length - 1] = next;
           else this.live.push(next);
-          if (this.shapeMode && moved) {
+          if (this.shapeMode && holdDrifted(this.holdAnchor, next, this.zoom())) {
             if (this.pendingFit) {
               // translucent cue: keep tracking the pen so the ghost's length and
               // direction adjust live as you refine the stroke, rather than
@@ -1318,6 +1321,8 @@ export class PageCanvas implements ItemSurface {
    */
   private armHold(): void {
     this.disarmHold();
+    const tip = this.live[this.live.length - 1];
+    this.holdAnchor = tip ? [tip[0], tip[1]] : null;
     this.hold.arm(
       () => {
         if (this.mode !== 'draw' || !this.shapeMode || this.lineEdit) return;

@@ -1,4 +1,4 @@
-import { LASER_COLOR, LASER_FADE_MS, SHAPE_CUE_MS, SHAPE_HOLD_MS } from '../tools';
+import { HOLD_DRIFT_PX, LASER_COLOR, LASER_FADE_MS, SHAPE_CUE_MS, SHAPE_HOLD_MS } from '../tools';
 import type { PageItem, PageElement, ShapeElement, TapeElement, TextElement } from '../types';
 import { isStroke, nearPolyline, uid } from '../util';
 import { aabb, itemsFrame, nearConnector, pointInElement, type Frame } from './geom';
@@ -428,6 +428,16 @@ export function trailMoved(live: number[][], pt: number[]): boolean {
   const ax = trail.reduce((sum, p) => sum + p[0], 0) / trail.length;
   const ay = trail.reduce((sum, p) => sum + p[1], 0) / trail.length;
   return Math.hypot(pt[0] - ax, pt[1] - ay) > 1.5;
+}
+
+/**
+ * Whether the pen tip has drifted far enough from the point the hold last
+ * started at (`anchor`) to restart it. Measured in screen px (page/board
+ * distance × zoom), so Pencil rest jitter stays inside the radius at any zoom.
+ */
+export function holdDrifted(anchor: number[] | null, tip: number[], zoom: number): boolean {
+  if (!anchor) return true;
+  return Math.hypot(tip[0] - anchor[0], tip[1] - anchor[1]) * zoom > HOLD_DRIFT_PX;
 }
 
 /** The pending line's two endpoint handles, drawn at a constant on-screen size. */

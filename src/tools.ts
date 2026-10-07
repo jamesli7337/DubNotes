@@ -35,6 +35,8 @@ export const CUSTOM_COLORS_MAX = 8;
  */
 export const SHAPE_CUE_MS = 500;
 export const SHAPE_HOLD_MS = 1100;
+/** How far (screen px) the pen tip may drift from where the hold last started before the hold restarts. Absorbs Pencil rest jitter. */
+export const HOLD_DRIFT_PX = 4;
 
 /** Default type size for a freshly placed text box, in page units. */
 export const TEXT_DEFAULT_SIZE = 20;
