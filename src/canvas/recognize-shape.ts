@@ -515,6 +515,47 @@ export function shapeCenter(fit: ShapeFit): number[] {
   return [fit.x + fit.w / 2, fit.y + fit.h / 2];
 }
 
+/** Index of the triangle vertex within RIGHT_ANGLE_TOL of 90°, or -1. */
+function rightCorner(v: number[][]): number {
+  return v.findIndex((p, k) => Math.abs(interiorAngle(v[(k + 2) % 3], p, v[(k + 1) % 3]) - Math.PI / 2) <= RIGHT_ANGLE_TOL);
+}
+
+/** Whether `fit` is a triangle with a corner within RIGHT_ANGLE_TOL of 90°. */
+export function isRightTriangle(fit: ShapeFit): boolean {
+  return fit.shape === 'triangle' && rightCorner(shapeHandles(fit)) >= 0;
+}
+
+/** `fit` with its three vertices scaled by `factor` about `anchor`; box and `pts` are recomputed (rotation stays 0). */
+export function scaleTriangle(fit: ShapeFit, anchor: number[], factor: number): ShapeFit {
+  const v = shapeHandles(fit).map((p) => [anchor[0] + (p[0] - anchor[0]) * factor, anchor[1] + (p[1] - anchor[1]) * factor]);
+  return { ...fit, ...triangleFit(v) };
+}
+
+/**
+ * Dragging vertex `index` of a right triangle to `pt`: all three vertices scale
+ * uniformly, so the angles and the leg ratio survive. An acute vertex scales
+ * about the opposite acute vertex; the right-angle vertex about the hypotenuse's
+ * midpoint. The factor is how far `pt` has travelled along the line from the
+ * anchor through the vertex's original position, always measured from `startFit`
+ * (the triangle as it was at the press), never from the previous step.
+ */
+export function dragRightTriangleVertex(startFit: ShapeFit, index: number, pt: number[]): ShapeFit {
+  const v = shapeHandles(startFit);
+  const r = rightCorner(v);
+  if (r < 0) return startFit;
+  const anchor =
+    index === r
+      ? [(v[(r + 1) % 3][0] + v[(r + 2) % 3][0]) / 2, (v[(r + 1) % 3][1] + v[(r + 2) % 3][1]) / 2]
+      : v[3 - index - r];
+  const ax = v[index][0] - anchor[0];
+  const ay = v[index][1] - anchor[1];
+  const len2 = ax * ax + ay * ay;
+  if (len2 < 1e-9) return startFit;
+  const shortest = Math.min(dist(v[0], v[1]), dist(v[1], v[2]), dist(v[2], v[0]));
+  const factor = Math.max(((pt[0] - anchor[0]) * ax + (pt[1] - anchor[1]) * ay) / len2, HANDLE_MIN_SIDE / shortest);
+  return scaleTriangle(startFit, anchor, factor);
+}
+
 /**
  * The rotate grip: a stem from `anchor`, a point on the shape's outline, out to
  * `dot`, a fixed screen distance beyond it.
@@ -537,7 +578,7 @@ export function shapeRotateGrip(
   let dy: number;
   if (fit.shape === 'triangle') {
     const v = shapeHandles(fit);
-    const right = v.findIndex((p, k) => Math.abs(interiorAngle(v[(k + 2) % 3], p, v[(k + 1) % 3]) - Math.PI / 2) <= RIGHT_ANGLE_TOL);
+    const right = rightCorner(v);
     if (right >= 0) {
       const a = v[(right + 1) % 3];
       const b = v[(right + 2) % 3];

@@ -39,7 +39,9 @@ import { InkSmoother, type ClientSample } from './ink-smoothing';
 import { Guide, projectOnEdge, type EdgeLine, type GuideKind } from './guide';
 import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
 import {
+  dragRightTriangleVertex,
   dragShapeHandle,
+  isRightTriangle,
   recognizeShape,
   rotateShape,
   shapeCenter,
@@ -346,7 +348,7 @@ export class PageCanvas implements ItemSurface {
   private shapeEdit: { fit: ShapeFit; color: string; size: number; aiInk: boolean } | null = null;
   /** the handle the current press is dragging, and (for a box) the opposite corner that stays fixed */
   private shapeAdjust:
-    | { kind: 'corner'; handle: number; anchor: number[] }
+    | { kind: 'corner'; handle: number; anchor: number[]; rightStart: ShapeFit | null }
     | { kind: 'rotate'; center: number[]; startFit: ShapeFit; startAngle: number }
     | null = null;
   /**
@@ -829,7 +831,12 @@ export class PageCanvas implements ItemSurface {
           const center = shapeCenter(fit);
           this.shapeAdjust = { kind: 'rotate', center, startFit: fit, startAngle: Math.atan2(pt[1] - center[1], pt[0] - center[0]) };
         } else {
-          this.shapeAdjust = { kind: 'corner', handle: h, anchor: fit.shape === 'triangle' ? [] : shapeHandles(fit)[(h + 2) % 4] };
+          this.shapeAdjust = {
+            kind: 'corner',
+            handle: h,
+            anchor: fit.shape === 'triangle' ? [] : shapeHandles(fit)[(h + 2) % 4],
+            rightStart: isRightTriangle(fit) ? fit : null, // fixed for the whole drag: a right triangle scales uniformly
+          };
         }
         this.capture(e);
         this.schedule();
@@ -1049,6 +1056,8 @@ export class PageCanvas implements ItemSurface {
               // always turned from the shape as it was at the press, so the steps don't compound
               const turn = Math.atan2(pt[1] - sa.center[1], pt[0] - sa.center[0]) - sa.startAngle;
               this.shapeEdit.fit = rotateShape(sa.startFit, sa.center, snapRotationDelta(sa.startFit, turn));
+            } else if (sa.rightStart) {
+              this.shapeEdit.fit = dragRightTriangleVertex(sa.rightStart, sa.handle, pt);
             } else {
               this.shapeEdit.fit = dragShapeHandle(this.shapeEdit.fit, sa.handle, sa.anchor, pt);
             }
