@@ -50,6 +50,8 @@ const CIRCLE_ASPECT = 0.1;
 const MIN_TRI_ANGLE = 15 * DEG;
 /** A triangle corner this close to 90° is snapped to exactly 90°. */
 const RIGHT_SNAP = 18 * DEG;
+/** A triangle with a corner within this of 90° counts as a right triangle when placing the rotate grip. */
+const RIGHT_ANGLE_TOL = 1 * DEG;
 /** Douglas-Peucker is loosened until at most this many corner candidates remain, then the best three are chosen. */
 const TRI_MAX_CANDIDATES = 8;
 /** Starting Douglas-Peucker tolerance as a fraction of the path length, and the factor it grows by each pass. */
@@ -514,37 +516,58 @@ export function shapeCenter(fit: ShapeFit): number[] {
 }
 
 /**
- * Where the rotate grip sits: a fixed screen distance beyond the shape's top —
- * along a box's own -y axis past top-centre, or from a triangle's centroid
- * through its top-most vertex. If that falls off the page (`bounds`, the page's
- * size) it goes to the opposite side of the shape instead.
+ * The rotate grip: a stem from `anchor`, a point on the shape's outline, out to
+ * `dot`, a fixed screen distance beyond it.
+ *  - rect, ellipse, circle: the top of the outline in the box's own frame (its
+ *    -y axis, turned by the rotation), pointing along that axis;
+ *  - right triangle (a corner within RIGHT_ANGLE_TOL of 90°): the middle of the
+ *    hypotenuse, pointing along its outward normal, away from the right angle;
+ *  - any other triangle: the top-most vertex, pointing from the centroid through it.
+ * If the dot falls off the page (`bounds`, the page's size) the stem is turned
+ * 180° about its anchor; when both ways are off the less-off one is used.
  */
-export function shapeRotateGrip(fit: ShapeFit, zoom: number, bounds: { w: number; h: number }): number[] {
+export function shapeRotateGrip(
+  fit: ShapeFit,
+  zoom: number,
+  bounds: { w: number; h: number }
+): { anchor: number[]; dot: number[] } {
   const off = ROTATE_GRIP_OFFSET / zoom;
-  const c = shapeCenter(fit);
-  let dx = Math.sin(fit.rotation);
-  let dy = -Math.cos(fit.rotation);
-  const v = fit.shape === 'triangle' ? shapeHandles(fit) : null;
-  if (v) {
-    const top = v.reduce((t, p) => (p[1] < t[1] ? p : t), v[0]);
-    const len = Math.hypot(top[0] - c[0], top[1] - c[1]);
-    if (len > 1e-9) {
-      dx = (top[0] - c[0]) / len;
-      dy = (top[1] - c[1]) / len;
+  let anchor: number[];
+  let dx: number;
+  let dy: number;
+  if (fit.shape === 'triangle') {
+    const v = shapeHandles(fit);
+    const right = v.findIndex((p, k) => Math.abs(interiorAngle(v[(k + 2) % 3], p, v[(k + 1) % 3]) - Math.PI / 2) <= RIGHT_ANGLE_TOL);
+    if (right >= 0) {
+      const a = v[(right + 1) % 3];
+      const b = v[(right + 2) % 3];
+      anchor = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+      const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+      dx = -(b[1] - a[1]) / len;
+      dy = (b[0] - a[0]) / len;
+      if (dx * (anchor[0] - v[right][0]) + dy * (anchor[1] - v[right][1]) < 0) {
+        dx = -dx;
+        dy = -dy;
+      }
     } else {
-      dx = 0;
-      dy = -1;
+      const c = shapeCenter(fit);
+      anchor = v.reduce((t, p) => (p[1] < t[1] ? p : t), v[0]);
+      const len = Math.hypot(anchor[0] - c[0], anchor[1] - c[1]);
+      dx = len > 1e-9 ? (anchor[0] - c[0]) / len : 0;
+      dy = len > 1e-9 ? (anchor[1] - c[1]) / len : -1;
     }
+  } else {
+    const c = shapeCenter(fit);
+    dx = Math.sin(fit.rotation);
+    dy = -Math.cos(fit.rotation);
+    anchor = [c[0] + (dx * fit.h) / 2, c[1] + (dy * fit.h) / 2];
   }
-  const at = (sign: number): number[] => {
-    const reach = v ? Math.max(...v.map((p) => (p[0] - c[0]) * dx * sign + (p[1] - c[1]) * dy * sign)) : fit.h / 2;
-    return [c[0] + dx * sign * (reach + off), c[1] + dy * sign * (reach + off)];
-  };
+  const at = (sign: number): number[] => [anchor[0] + dx * sign * off, anchor[1] + dy * sign * off];
   const over = (p: number[]): number => Math.max(0, -p[0], p[0] - bounds.w) + Math.max(0, -p[1], p[1] - bounds.h);
   const primary = at(1);
-  if (over(primary) === 0) return primary;
+  if (over(primary) === 0) return { anchor, dot: primary };
   const flipped = at(-1);
-  return over(flipped) < over(primary) ? flipped : primary;
+  return { anchor, dot: over(flipped) < over(primary) ? flipped : primary };
 }
 
 /** `fit` turned by `angle` (radians) about `center`: a box keeps its size and gains the rotation, a triangle's vertices move and its box and `pts` are recomputed (rotation stays 0). */

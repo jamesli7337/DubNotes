@@ -1491,7 +1491,14 @@ export class PageCanvas implements ItemSurface {
     v.lineWidth = 2 / z;
     v.strokeStyle = '#2563eb';
     v.fillStyle = '#fff';
-    for (const p of [...shapeHandles(se.fit), shapeRotateGrip(se.fit, z, { w: this.pw, h: this.ph })]) {
+    const grip = shapeRotateGrip(se.fit, z, { w: this.pw, h: this.ph });
+    v.lineWidth = 1.5 / z;
+    v.beginPath(); // the stem, from the outline out to the grip dot
+    v.moveTo(grip.anchor[0], grip.anchor[1]);
+    v.lineTo(grip.dot[0], grip.dot[1]);
+    v.stroke();
+    v.lineWidth = 2 / z;
+    for (const p of [...shapeHandles(se.fit), grip.dot]) {
       v.beginPath();
       v.arc(p[0], p[1], LINE_HANDLE_R / z, 0, Math.PI * 2);
       v.fill();
@@ -1504,7 +1511,7 @@ export class PageCanvas implements ItemSurface {
   private shapeHandleAt(pt: number[]): number | 'rotate' | null {
     if (!this.shapeEdit) return null;
     const reach = LINE_HANDLE_HIT / this.zoom();
-    const grip = shapeRotateGrip(this.shapeEdit.fit, this.zoom(), { w: this.pw, h: this.ph });
+    const grip = shapeRotateGrip(this.shapeEdit.fit, this.zoom(), { w: this.pw, h: this.ph }).dot;
     if (Math.hypot(pt[0] - grip[0], pt[1] - grip[1]) <= reach) return 'rotate';
     let best: number | null = null;
     let bestD = reach;
