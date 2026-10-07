@@ -59,6 +59,12 @@ const TRI_EPS_GROWTH = 1.5;
 // Handles
 /** Smallest side (page units) a corner drag will shrink a box to. */
 const HANDLE_MIN_SIDE = 8;
+/** How far the rotate grip sits beyond the shape's edge (screen px, divided by zoom). */
+const ROTATE_GRIP_OFFSET = 28;
+/** A rotation drag snaps to multiples of this... */
+const ROTATE_SNAP_STEP = 15 * DEG;
+/** ...when within this of one. */
+const ROTATE_SNAP_NEAR = 4 * DEG;
 
 const dist = (a: number[], b: number[]): number => Math.hypot(a[0] - b[0], a[1] - b[1]);
 
@@ -496,4 +502,68 @@ export function dragShapeHandle(fit: ShapeFit, index: number, anchor: number[], 
   const w = Math.abs(dx);
   const h = Math.abs(dy);
   return { ...fit, x: (anchor[0] + px) / 2 - w / 2, y: (anchor[1] + py) / 2 - h / 2, w, h };
+}
+
+/** The point a snapped shape rotates about: a box's centre, a triangle's centroid. */
+export function shapeCenter(fit: ShapeFit): number[] {
+  if (fit.shape === 'triangle') {
+    const v = shapeHandles(fit);
+    return [(v[0][0] + v[1][0] + v[2][0]) / 3, (v[0][1] + v[1][1] + v[2][1]) / 3];
+  }
+  return [fit.x + fit.w / 2, fit.y + fit.h / 2];
+}
+
+/**
+ * Where the rotate grip sits: a fixed screen distance beyond the shape's top —
+ * along a box's own -y axis past top-centre, or from a triangle's centroid
+ * through its top-most vertex. If that falls off the page (`bounds`, the page's
+ * size) it goes to the opposite side of the shape instead.
+ */
+export function shapeRotateGrip(fit: ShapeFit, zoom: number, bounds: { w: number; h: number }): number[] {
+  const off = ROTATE_GRIP_OFFSET / zoom;
+  const c = shapeCenter(fit);
+  let dx = Math.sin(fit.rotation);
+  let dy = -Math.cos(fit.rotation);
+  const v = fit.shape === 'triangle' ? shapeHandles(fit) : null;
+  if (v) {
+    const top = v.reduce((t, p) => (p[1] < t[1] ? p : t), v[0]);
+    const len = Math.hypot(top[0] - c[0], top[1] - c[1]);
+    if (len > 1e-9) {
+      dx = (top[0] - c[0]) / len;
+      dy = (top[1] - c[1]) / len;
+    } else {
+      dx = 0;
+      dy = -1;
+    }
+  }
+  const at = (sign: number): number[] => {
+    const reach = v ? Math.max(...v.map((p) => (p[0] - c[0]) * dx * sign + (p[1] - c[1]) * dy * sign)) : fit.h / 2;
+    return [c[0] + dx * sign * (reach + off), c[1] + dy * sign * (reach + off)];
+  };
+  const over = (p: number[]): number => Math.max(0, -p[0], p[0] - bounds.w) + Math.max(0, -p[1], p[1] - bounds.h);
+  const primary = at(1);
+  if (over(primary) === 0) return primary;
+  const flipped = at(-1);
+  return over(flipped) < over(primary) ? flipped : primary;
+}
+
+/** `fit` turned by `angle` (radians) about `center`: a box keeps its size and gains the rotation, a triangle's vertices move and its box and `pts` are recomputed (rotation stays 0). */
+export function rotateShape(fit: ShapeFit, center: number[], angle: number): ShapeFit {
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+  const turn = (p: number[]): number[] => [
+    center[0] + (p[0] - center[0]) * cos - (p[1] - center[1]) * sin,
+    center[1] + (p[0] - center[0]) * sin + (p[1] - center[1]) * cos,
+  ];
+  if (fit.shape === 'triangle') return { ...fit, ...triangleFit(shapeHandles(fit).map(turn)) };
+  const [cx, cy] = turn([fit.x + fit.w / 2, fit.y + fit.h / 2]);
+  return { ...fit, x: cx - fit.w / 2, y: cy - fit.h / 2, rotation: fit.rotation + angle };
+}
+
+/** A rotation drag's turn from the press (`delta`) with the shape's resulting orientation snapped to the nearest 15° when within ~4° of it (a triangle's orientation is measured from where the drag began). */
+export function snapRotationDelta(fit: ShapeFit, delta: number): number {
+  const base = fit.shape === 'triangle' ? 0 : fit.rotation;
+  const total = base + delta;
+  const nearest = Math.round(total / ROTATE_SNAP_STEP) * ROTATE_SNAP_STEP;
+  return Math.abs(total - nearest) <= ROTATE_SNAP_NEAR ? nearest - base : delta;
 }

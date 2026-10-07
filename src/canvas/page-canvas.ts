@@ -38,7 +38,15 @@ import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
 import { InkSmoother, type ClientSample } from './ink-smoothing';
 import { Guide, projectOnEdge, type EdgeLine, type GuideKind } from './guide';
 import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
-import { dragShapeHandle, recognizeShape, shapeHandles } from './recognize-shape';
+import {
+  dragShapeHandle,
+  recognizeShape,
+  rotateShape,
+  shapeCenter,
+  shapeHandles,
+  shapeRotateGrip,
+  snapRotationDelta,
+} from './recognize-shape';
 import {
   aabb,
   elementInPolygon,
@@ -337,7 +345,10 @@ export class PageCanvas implements ItemSurface {
    */
   private shapeEdit: { fit: ShapeFit; color: string; size: number; aiInk: boolean } | null = null;
   /** the handle the current press is dragging, and (for a box) the opposite corner that stays fixed */
-  private shapeAdjust: { handle: number; anchor: number[] } | null = null;
+  private shapeAdjust:
+    | { kind: 'corner'; handle: number; anchor: number[] }
+    | { kind: 'rotate'; center: number[]; startFit: ShapeFit; startAngle: number }
+    | null = null;
   /**
    * the snapped line, adjustable by its endpoint handles until a press elsewhere
    * (or a new stroke, a tool switch, undo) commits it; not in the store until then
@@ -812,11 +823,14 @@ export class PageCanvas implements ItemSurface {
     if (this.shapeEdit) {
       const h = this.shapeHandleAt(pt);
       if (h !== null) {
+        const fit = this.shapeEdit.fit;
         this.mode = 'shape-adjust';
-        this.shapeAdjust = {
-          handle: h,
-          anchor: this.shapeEdit.fit.shape === 'triangle' ? [] : shapeHandles(this.shapeEdit.fit)[(h + 2) % 4],
-        };
+        if (h === 'rotate') {
+          const center = shapeCenter(fit);
+          this.shapeAdjust = { kind: 'rotate', center, startFit: fit, startAngle: Math.atan2(pt[1] - center[1], pt[0] - center[0]) };
+        } else {
+          this.shapeAdjust = { kind: 'corner', handle: h, anchor: fit.shape === 'triangle' ? [] : shapeHandles(fit)[(h + 2) % 4] };
+        }
         this.capture(e);
         this.schedule();
         return;
@@ -1030,7 +1044,14 @@ export class PageCanvas implements ItemSurface {
           break;
         case 'shape-adjust':
           if (this.shapeEdit && this.shapeAdjust) {
-            this.shapeEdit.fit = dragShapeHandle(this.shapeEdit.fit, this.shapeAdjust.handle, this.shapeAdjust.anchor, pt);
+            const sa = this.shapeAdjust;
+            if (sa.kind === 'rotate') {
+              // always turned from the shape as it was at the press, so the steps don't compound
+              const turn = Math.atan2(pt[1] - sa.center[1], pt[0] - sa.center[0]) - sa.startAngle;
+              this.shapeEdit.fit = rotateShape(sa.startFit, sa.center, snapRotationDelta(sa.startFit, turn));
+            } else {
+              this.shapeEdit.fit = dragShapeHandle(this.shapeEdit.fit, sa.handle, sa.anchor, pt);
+            }
           }
           break;
         case 'shapes':
@@ -1470,7 +1491,7 @@ export class PageCanvas implements ItemSurface {
     v.lineWidth = 2 / z;
     v.strokeStyle = '#2563eb';
     v.fillStyle = '#fff';
-    for (const p of shapeHandles(se.fit)) {
+    for (const p of [...shapeHandles(se.fit), shapeRotateGrip(se.fit, z, { w: this.pw, h: this.ph })]) {
       v.beginPath();
       v.arc(p[0], p[1], LINE_HANDLE_R / z, 0, Math.PI * 2);
       v.fill();
@@ -1479,10 +1500,12 @@ export class PageCanvas implements ItemSurface {
     v.restore();
   }
 
-  /** Which handle of the pending shape a press lands on, if any (the nearest wins). */
-  private shapeHandleAt(pt: number[]): number | null {
+  /** Which handle of the pending shape a press lands on, if any: the rotate grip first, else the nearest corner / vertex. */
+  private shapeHandleAt(pt: number[]): number | 'rotate' | null {
     if (!this.shapeEdit) return null;
     const reach = LINE_HANDLE_HIT / this.zoom();
+    const grip = shapeRotateGrip(this.shapeEdit.fit, this.zoom(), { w: this.pw, h: this.ph });
+    if (Math.hypot(pt[0] - grip[0], pt[1] - grip[1]) <= reach) return 'rotate';
     let best: number | null = null;
     let bestD = reach;
     shapeHandles(this.shapeEdit.fit).forEach((p, i) => {
