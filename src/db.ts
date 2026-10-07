@@ -420,6 +420,25 @@ export async function deletePageCascade(pageId: string): Promise<void> {
   return txDone(t);
 }
 
+/**
+ * One transaction for a multi-page edit (page manager multi-select): puts the
+ * given page records (re-indexed survivors, or a reordered set) and cascades
+ * the deletes for `deleteIds`, so the whole action lands or none of it does.
+ * Like deletePageCascade, a deleted page's PDF asset is left for the startup sweep.
+ */
+export async function commitPageBatch(puts: Page[], deleteIds: string[]): Promise<void> {
+  const db = await openDB();
+  const t = db.transaction(['pages', 'strokes', 'elements'], 'readwrite');
+  const pages = t.objectStore('pages');
+  for (const p of puts) pages.put(p);
+  for (const id of deleteIds) {
+    pages.delete(id);
+    void deleteByIndex(t.objectStore('strokes'), 'pageId', id);
+    void deleteByIndex(t.objectStore('elements'), 'pageId', id);
+  }
+  return txDone(t);
+}
+
 /** Every `assetId` referenced by any page, walked with a cursor so page records (a v5 `background.src` can be a large data URL) are never all resident at once. */
 function referencedAssetIds(store: IDBObjectStore): Promise<Set<string>> {
   return new Promise((resolve, reject) => {

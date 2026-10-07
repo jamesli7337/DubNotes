@@ -47,7 +47,13 @@ import { blockGestures, el } from './dom';
 import { icon, type IconName } from './icon';
 import { IMAGE_ACCEPT, SecondaryPane } from './secondary-pane';
 
-type ViewOp = Op | { kind: 'del-page'; page: Page; strokes: Stroke[]; elements: PageElement[] };
+type ViewOp =
+  | Op
+  | { kind: 'del-page'; page: Page; strokes: Stroke[]; elements: PageElement[] }
+  /** page manager multi-select delete: one undo step; `items` in ascending original index */
+  | { kind: 'del-pages'; items: Array<{ page: Page; strokes: Stroke[]; elements: PageElement[] }> }
+  /** page manager multi-select move: the notebook's full page-id order before and after */
+  | { kind: 'reorder-pages'; before: string[]; after: string[] };
 /** WebKit-only, non-standard: tags a Touch as a stylus contact — see bindZoomGestures and page-canvas.ts's own copy of this type. */
 type WebKitTouch = Touch & { touchType?: 'direct' | 'stylus' };
 
@@ -4052,9 +4058,24 @@ class NotebookView {
     head.append(titles);
     const closeBtn = el('button', { class: 'iconbtn', title: 'Close', 'aria-label': 'Close' });
     closeBtn.append(icon('close'));
-    head.append(closeBtn);
+    const selectBtn = el('button', { class: 'ghost', text: 'Select' }) as HTMLButtonElement;
+    const headBtns = el('div', { class: 'pagemgr__headbtns' });
+    headBtns.append(selectBtn, closeBtn);
+    head.append(headBtns);
     const grid = el('div', { class: 'pagemgr__grid' });
-    wrap.append(head, grid);
+
+    // multi-select: while `selecting`, a tap on a thumbnail toggles it and the
+    // hold-to-drag reorder isn't bound at all (render() rebuilds on each mode change)
+    let selecting = false;
+    const selected = new Set<string>();
+    const bar = el('div', { class: 'pagemgr__bar' });
+    bar.hidden = true;
+    const countEl = el('span', { class: 'pagemgr__count' });
+    const selectAllBtn = el('button', { class: 'ghost', text: 'Select all' }) as HTMLButtonElement;
+    const moveBtn = el('button', { class: 'ghost', text: 'Move' }) as HTMLButtonElement;
+    const deleteBtn = el('button', { class: 'danger', text: 'Delete' }) as HTMLButtonElement;
+    bar.append(countEl, selectAllBtn, moveBtn, deleteBtn);
+    wrap.append(head, grid, bar);
 
     const modal = openModal(wrap, {
       cardClass: 'modal-card--pages',
@@ -4072,12 +4093,42 @@ class NotebookView {
       return b;
     };
 
+    /** Pages that can be selected: every page but the trailing blank the notebook keeps for itself. */
+    const selectableIds = (): string[] => {
+      const pages = store.pagesOf(this.nb.id);
+      if (pages.length && store.isBlankPage(pages[pages.length - 1].id)) pages.pop();
+      return pages.map((p) => p.id);
+    };
+
+    const refreshBar = (): void => {
+      const n = selected.size;
+      countEl.textContent = n === 1 ? '1 selected' : `${n} selected`;
+      moveBtn.disabled = n === 0;
+      deleteBtn.disabled = n === 0;
+      selectAllBtn.disabled = n >= selectableIds().length;
+    };
+
+    const setSelecting = (on: boolean): void => {
+      selecting = on;
+      selected.clear();
+      selectBtn.textContent = on ? 'Done' : 'Select';
+      bar.hidden = !on;
+      refreshBar();
+      render();
+    };
+
     const render = (): void => {
       const pages = store.pagesOf(this.nb.id);
+      const lastBlank = pages.length > 0 && store.isBlankPage(pages[pages.length - 1].id);
       grid.replaceChildren();
       pages.forEach((page, i) => {
+        const selectable = !(lastBlank && i === pages.length - 1);
         const card = el('div', { class: 'pagemgr__card' });
         card.dataset.pageId = page.id;
+        if (selecting && selectable) {
+          card.classList.add('pagemgr__card--selectable');
+          card.classList.toggle('pagemgr__card--selected', selected.has(page.id));
+        }
 
         const thumbBtn = el('button', {
           class: 'pagemgr__thumbbtn',
@@ -4087,7 +4138,7 @@ class NotebookView {
         const thumbBox = el('span', { class: 'pagemgr__thumb' });
         thumbBox.style.aspectRatio = `${pageW(page)} / ${pageH(page)}`; // a landscape-imported page thumbnails at its own shape, not the default portrait box
         thumbBtn.append(thumbBox, el('span', { class: 'pagemgr__num', text: `Page ${i + 1}` }));
-        const drag = this.enableReorderDrag({
+        const drag = selecting ? null : this.enableReorderDrag({
           container: grid,
           item: card,
           trigger: thumbBtn, // not the whole card: its Duplicate/Delete buttons stay pressable
@@ -4129,7 +4180,16 @@ class NotebookView {
           },
         });
         thumbBtn.addEventListener('click', () => {
-          if (drag.tookClick()) return; // the press turned into a drag; not a tap
+          if (selecting) {
+            if (!selectable) return;
+            const on = !selected.has(page.id);
+            if (on) selected.add(page.id);
+            else selected.delete(page.id);
+            card.classList.toggle('pagemgr__card--selected', on);
+            refreshBar();
+            return;
+          }
+          if (drag?.tookClick()) return; // the press turned into a drag; not a tap
           modal.close();
           this.goToPage(page.id);
         });
@@ -4151,13 +4211,13 @@ class NotebookView {
 
         const actions = el('div', { class: 'pagemgr__actions' });
         actions.append(
-          actionBtn('duplicate', 'Duplicate page', false, () => {
+          actionBtn('duplicate', 'Duplicate page', selecting, () => {
             store.duplicatePage(page.id);
             store.enforceTrailingBlank(this.nb.id);
             this.syncPages();
             render();
           }),
-          actionBtn('delete', 'Delete page', false, async () => {
+          actionBtn('delete', 'Delete page', selecting, async () => {
             const ok = await confirmDialog({
               title: `Delete page ${i + 1}?`,
               message: 'Its strokes and content will be removed from this notebook.',
@@ -4172,9 +4232,99 @@ class NotebookView {
         );
 
         card.append(thumbBtn, actions);
+        if (selecting && selectable) {
+          // on the card, not the thumb box: the async thumbnail paint replaces that box's children
+          const check = el('span', { class: 'pagemgr__check' });
+          check.append(icon('check'));
+          card.append(check);
+        }
         grid.append(card);
       });
     };
+
+    selectBtn.addEventListener('click', () => setSelecting(!selecting));
+    selectAllBtn.addEventListener('click', () => {
+      for (const id of selectableIds()) selected.add(id);
+      refreshBar();
+      for (const c of grid.querySelectorAll<HTMLElement>('.pagemgr__card--selectable')) c.classList.add('pagemgr__card--selected');
+    });
+
+    deleteBtn.addEventListener('click', async () => {
+      const n = selected.size;
+      if (!n) return;
+      const ok = await confirmDialog({
+        title: n === 1 ? 'Delete 1 page?' : `Delete ${n} pages?`,
+        message: 'Their strokes and content will be removed from this notebook.',
+        confirmText: n === 1 ? 'Delete page' : 'Delete pages',
+        danger: true,
+      });
+      if (!ok) return;
+      // snapshot in page order (ascending index) so undo can re-insert them the same way
+      const items: Array<{ page: Page; strokes: Stroke[]; elements: PageElement[] }> = [];
+      for (const id of selected) {
+        const page = store.pageById(id);
+        if (!page) continue;
+        items.push({
+          page: { ...page },
+          strokes: store.strokesOf(id).map((s) => ({ ...s })),
+          elements: store.elementsOf(id).map((e) => ({ ...e })),
+        });
+        thumbs.delete(id);
+      }
+      items.sort((a, b) => a.page.index - b.page.index);
+      selected.clear();
+      if (items.length) {
+        store.deletePages(items.map((it) => it.page.id));
+        this.pushOp({ kind: 'del-pages', items });
+        this.syncPages();
+      }
+      refreshBar();
+      render();
+    });
+
+    moveBtn.addEventListener('click', () => {
+      if (!selected.size) return;
+      const pages = store.pagesOf(this.nb.id); // the one scan for this move
+      const before = pages.map((p) => p.id);
+      const picked = pages.filter((p) => selected.has(p.id)).map((p) => p.id); // keeps their relative order
+      const rest = before.filter((id) => !selected.has(id));
+      // "End" stops short of the trailing blank page the notebook keeps last
+      const endAt = pages.length && store.isBlankPage(before[before.length - 1]) && !selected.has(before[before.length - 1]) ? rest.length - 1 : rest.length;
+
+      const apply = (at: number): void => {
+        const after = [...rest.slice(0, at), ...picked, ...rest.slice(at)];
+        if (after.every((id, i) => id === before[i])) return; // nothing would move
+        if (!store.reorderPages(this.nb.id, after, pages)) return;
+        this.pushOp({ kind: 'reorder-pages', before, after });
+        this.syncPages();
+        selected.clear();
+        refreshBar();
+        render();
+      };
+
+      const box = el('div', { class: 'dlg' });
+      box.append(el('h2', { class: 'dlg__title', text: picked.length === 1 ? 'Move 1 page to…' : `Move ${picked.length} pages to…` }));
+      const list = el('div', { class: 'pagemgr__pick' });
+      const option = (label: string, at: number): void => {
+        const b = el('button', { class: 'ghost', text: label }) as HTMLButtonElement;
+        b.addEventListener('click', () => {
+          picker.close();
+          apply(at);
+        });
+        list.append(b);
+      };
+      option('Start', 0);
+      option('End', endAt);
+      rest.forEach((id, at) => {
+        if (at === endAt && endAt < rest.length) return; // the trailing blank: "Before" it is "End"
+        const n = before.indexOf(id) + 1;
+        option(`Before page ${n}`, at);
+      });
+      box.append(list);
+      const picker = openModal(box);
+    });
+
+    refreshBar();
     render();
   }
 
@@ -4293,6 +4443,19 @@ class NotebookView {
         for (const e of op.elements) store.addElement({ ...e });
         this.syncPages();
         break;
+      case 'del-pages':
+        // ascending original index, so each page lands where it was
+        for (const it of op.items) {
+          store.insertPage({ ...it.page }, it.page.index);
+          for (const s of it.strokes) store.addStroke({ ...s });
+          for (const e of it.elements) store.addElement({ ...e });
+        }
+        this.syncPages();
+        break;
+      case 'reorder-pages':
+        store.reorderPages(this.nb.id, op.before);
+        this.syncPages();
+        break;
     }
   }
 
@@ -4331,6 +4494,14 @@ class NotebookView {
         break;
       case 'del-page':
         store.deletePage(op.page.id);
+        this.syncPages();
+        break;
+      case 'del-pages':
+        store.deletePages(op.items.map((it) => it.page.id));
+        this.syncPages();
+        break;
+      case 'reorder-pages':
+        store.reorderPages(this.nb.id, op.after);
         this.syncPages();
         break;
     }
@@ -4376,6 +4547,8 @@ class NotebookView {
 function opPageIds(op: ViewOp): string[] {
   if (op.kind === 'move-page') return [op.fromPageId, op.toPageId];
   if (op.kind === 'del-page') return [op.page.id];
+  if (op.kind === 'del-pages') return op.items.map((it) => it.page.id);
+  if (op.kind === 'reorder-pages') return op.after; // content is unchanged, but the pane repaints what it shows
   return [op.pageId];
 }
 

@@ -2,6 +2,7 @@ import {
   deleteDividerRecord,
   deleteFolderRecord,
   deleteNotebookCascade,
+  commitPageBatch,
   deletePageCascade,
   loadAll,
   migrateToCurrent,
@@ -471,6 +472,80 @@ class Store {
     this.reindex(p.notebookId);
     this.bump(p.notebookId);
     this.schedule();
+  }
+
+  /**
+   * Deletes several pages of one notebook at once (page manager multi-select).
+   * Memory updates synchronously; the write is one IDB transaction
+   * (commitPageBatch) covering the deletes and the survivors' new indexes,
+   * queued on the flush chain so it stays ordered against ordinary flushes.
+   * Ids it handles are kept out of the dirty/deleted sets so flush() skips them.
+   */
+  deletePages(ids: string[]): void {
+    const gone = ids.filter((id) => this.pages.has(id));
+    if (!gone.length) return;
+    const notebookId = this.pages.get(gone[0])!.notebookId;
+    const goneSet = new Set(gone);
+    for (const id of gone) {
+      this.pages.delete(id);
+      this.strokesByPage.delete(id);
+      this.elementsByPage.delete(id);
+      this.dirtyPg.delete(id);
+      this.dirtyStrokes.delete(id);
+      this.dirtyElements.delete(id);
+    }
+    const survivors = this.pagesOf(notebookId).filter((p) => !goneSet.has(p.id));
+    this.commitPageBatchOf(notebookId, survivors, gone);
+  }
+
+  /**
+   * Applies a new page order (page manager multi-select Move, and its undo).
+   * `order` is page ids, first to last; ids that no longer exist are ignored
+   * and pages it doesn't name (e.g. a trailing blank added since) keep their
+   * relative order after it. A caller that already holds the notebook's
+   * sorted pages passes them as `siblings`, so the list is scanned once per op.
+   */
+  reorderPages(notebookId: string, order: string[], siblings?: Page[]): boolean {
+    const listed = new Set<string>();
+    const next: Page[] = [];
+    for (const id of order) {
+      const p = this.pages.get(id);
+      if (p && p.notebookId === notebookId && !listed.has(id)) {
+        listed.add(id);
+        next.push(p);
+      }
+    }
+    if (!next.length) return false;
+    const rest = (siblings ?? this.pagesOf(notebookId)).filter((p) => !listed.has(p.id));
+    return this.commitPageBatchOf(notebookId, [...next, ...rest], []);
+  }
+
+  /** Assigns `ordered`'s positions as indexes and writes whatever changed (plus `deleted`) in one transaction. False if nothing changed. */
+  private commitPageBatchOf(notebookId: string, ordered: Page[], deleted: string[]): boolean {
+    const changed: string[] = [];
+    ordered.forEach((p, i) => {
+      if (p.index !== i) {
+        p.index = i;
+        changed.push(p.id);
+      }
+    });
+    if (!changed.length && !deleted.length) return false;
+    for (const id of changed) this.dirtyPg.delete(id); // the batch writes these; flush() needn't
+    this.bump(notebookId);
+    this.chain = this.chain.then(async () => {
+      try {
+        const puts = changed.map((id) => this.pages.get(id)).filter((p): p is Page => !!p);
+        await commitPageBatch(puts, deleted);
+      } catch (err) {
+        console.error('[noteapp] page batch failed', err);
+        // hand it to the ordinary flush so nothing is lost
+        for (const id of changed) if (this.pages.has(id)) this.dirtyPg.add(id);
+        for (const id of deleted) if (!this.pages.has(id)) this.delPg.add(id);
+        this.schedule();
+      }
+    });
+    this.schedule(); // the notebook's updatedAt still goes out through flush
+    return true;
   }
 
   /** Moves a page one step earlier/later among its notebook's pages. False (no-op) at either end. */

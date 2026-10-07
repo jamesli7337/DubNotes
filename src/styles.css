@@ -2827,6 +2827,64 @@ select {
   display: flex;
   gap: 2px;
 }
+/* multi-select: header buttons, selection overlay, action bar, move picker */
+.pagemgr__headbtns {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.pagemgr__card--selectable {
+  position: relative;
+}
+.pagemgr__check {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, 0.85);
+  border: 2px solid var(--primary);
+  color: transparent;
+  pointer-events: none;
+}
+.pagemgr__check .icon {
+  width: 16px;
+  height: 16px;
+}
+.pagemgr__card--selected .pagemgr__check {
+  background: var(--primary);
+  color: #fff;
+}
+.pagemgr__card--selected .pagemgr__thumb {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px var(--primary);
+}
+.pagemgr__bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.pagemgr__bar[hidden] {
+  display: none;
+}
+.pagemgr__count {
+  flex: 1;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--on-surface-variant);
+}
+.pagemgr__pick {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
 .pagemgr__actions .iconbtn {
   width: 32px;
   height: 32px;
