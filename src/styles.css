@@ -1200,7 +1200,9 @@ select {
   box-shadow: var(--sh-2), inset 0 -1px 0 var(--chrome-edge);
 }
 .nb-appbar__left {
-  gap: 2px;
+  /* clear space between Back (navigation) and the title (rename) so a tap on
+     one can't land on the other */
+  gap: 32px;
   flex: 0 1 auto;
   min-width: 0;
   /* the title ellipsises inside this, so it never reaches the right island */
@@ -1225,7 +1227,15 @@ select {
   overflow: hidden;
   text-overflow: ellipsis;
   padding: 6px 4px;
+  /* 44px tap area (rename) */
+  line-height: 32px;
+  min-width: 44px;
   cursor: text;
+}
+.nb-appbar__left .iconbtn {
+  flex: none;
+  width: 44px;
+  height: 44px;
 }
 .nb-appbar__right {
   gap: 6px;
