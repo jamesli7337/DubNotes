@@ -417,9 +417,8 @@ class NotebookView {
     this.root = root;
     this.nb = nb;
     this.isBoard = nb.kind === 'board';
-    // the Shapes tool is hidden on pages, so a device that last left it active reopens a page on the pen
-    // (done here rather than in tools.ts's load(), which has no notion of board vs page)
-    if (!this.isBoard && toolState.kind === 'shapes') {
+    // the Shapes tool has no button anywhere, so a device that last left it active reopens on the pen
+    if (toolState.kind === 'shapes') {
       toolState.kind = 'pen';
       saveToolState();
     }
@@ -882,6 +881,7 @@ class NotebookView {
         saveToolState();
       }
       this.applyDockPosition();
+      this.repositionCallout(); // no-ops unless a callout is open
     };
     grip.addEventListener('pointerup', end);
     grip.addEventListener('pointercancel', end);
@@ -2251,7 +2251,7 @@ class NotebookView {
     const built = new Map<ToolKind, HTMLElement>();
     for (const kind of toolState.toolOrder) {
       if (this.isBoard && !boardTools.includes(kind)) continue;
-      if (!this.isBoard && kind === 'shapes') continue; // pages get shapes from the pen's hold-to-snap instead
+      if (kind === 'shapes') continue; // no Shapes button anywhere; pages get shapes from the pen's hold-to-snap
       const spec = TOOL_BUTTONS[kind];
       built.set(kind, toolBtn(kind, spec.icon, spec.label));
     }
