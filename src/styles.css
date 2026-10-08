@@ -1327,7 +1327,7 @@ select {
   gap: 0;
 }
 /* bottom-docked: mirrored — tool row against the screen edge, options row
-   above it, grip (last child) on the edge facing the page. */
+   above it. */
 .nb-dock--bottom {
   top: auto;
   bottom: calc(env(safe-area-inset-bottom) + 16px);
@@ -1338,36 +1338,28 @@ select {
   bottom: auto;
   transition: none;
 }
-.nb-dock__grip {
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 12px;
-  margin: -2px 0;
-  touch-action: none;
-  flex: none;
-  position: relative;
+/* drop-slot placeholders shown while the dock is held and dragged: dock-sized
+   (JS sets width/height), at the two docked positions, the one the dock would
+   snap to highlighted. Under the dock (40), never intercepting input. */
+.nb-dock-slot {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 39;
+  box-sizing: border-box;
+  border: 2px dashed var(--outline-variant);
+  border-radius: var(--r-xl);
+  pointer-events: none;
 }
-/* Enlarged touch target (~28px) with no visible change: the grip's own 12px
-   box sits against the rows, so the extra height extends outward past the dock
-   edge instead of back over the tool buttons / swatches / options row. */
-.nb-dock__grip::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  top: 0;
-  bottom: -16px;
+.nb-dock-slot--top {
+  top: calc(var(--header-h) + env(safe-area-inset-top) + 16px);
 }
-.nb-dock--bottom .nb-dock__grip::before {
-  top: -16px;
-  bottom: 0;
+.nb-dock-slot--bottom {
+  bottom: calc(env(safe-area-inset-bottom) + 16px);
 }
-.nb-dock__grip-pill {
-  width: 36px;
-  height: 4px;
-  border-radius: var(--r-full);
-  background: var(--outline-variant);
+.nb-dock-slot--active {
+  border-color: var(--primary);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
 }
 /* each row is a single line — never wraps to a second line — so a row's
    height stays constant regardless of its content; a row too wide for the

@@ -25,6 +25,7 @@ import {
   type LassoShape,
   type PlacedShape,
   type SizeRange,
+  type DockPosition,
   type ToolKind,
 } from '../tools';
 import { pickColor } from './color';
@@ -56,6 +57,14 @@ type ViewOp =
   | { kind: 'reorder-pages'; before: string[]; after: string[] };
 /** WebKit-only, non-standard: tags a Touch as a stylus contact — see bindZoomGestures and page-canvas.ts's own copy of this type. */
 type WebKitTouch = Touch & { touchType?: 'direct' | 'stylus' };
+
+/** How long a press on a non-interactive part of the dock is held, without moving, before it picks the dock up. */
+const DOCK_HOLD_MS = 350;
+/** Pointer movement, in px, allowed during that hold before it's treated as something else (a pan) and abandoned. */
+const DOCK_HOLD_SLOP = 8;
+/** Anything inside the dock that has its own tap / drag / reorder handling — a press starting on one of these never starts a dock drag. */
+const DOCK_INTERACTIVE =
+  'button, input, select, textarea, a, label, [role="button"], [role="slider"], [draggable="true"], .tool, .swatch, .size-btn, .mode-btn, .iconbtn, .seg, .size-slider';
 
 /** Offset applied when pasting back onto the page the items were copied from. */
 const PASTE_OFFSET = 24;
@@ -685,7 +694,8 @@ class NotebookView {
     this.toolsEl = el('div', { class: 'nb-dock nb-dock--collapsed' });
     this.toolsTopEl = el('div', { class: 'nb-dock__row nb-dock__row--tools' });
     this.toolsOptionsEl = el('div', { class: 'nb-dock__row nb-dock__row--options' });
-    this.toolsEl.append(this.toolsTopEl, this.toolsOptionsEl, this.buildDockGrip());
+    this.toolsEl.append(this.toolsTopEl, this.toolsOptionsEl);
+    this.bindDockHoldDrag();
     this.toolsEl.classList.toggle('nb-dock--bottom', toolState.dockPosition === 'bottom');
     this.scrollEl = el('div', { class: 'nb-scroll' });
     // `.nb-split` is what now fills the space under the dock: `.nb-scroll` is
@@ -840,52 +850,107 @@ class NotebookView {
   }
 
   /**
-   * The dock's drag handle. Touch/pen only: drag moves the dock vertically
-   * with the finger, and on release it snaps to whichever half of the viewport
-   * its centre is in. `toolState.dockPosition` is the only state; everything
-   * else (CSS class, clearances) is derived from it in `applyDockPosition`.
+   * Hold-to-drag for the dock. Touch/pen only: holding a non-interactive part
+   * of the dock (background / padding) for `DOCK_HOLD_MS` without moving picks
+   * it up; it then follows the pointer vertically and on release snaps to
+   * whichever half of the viewport its centre is in. Presses that start on a
+   * button, swatch, control or any other reorderable element are ignored, so
+   * their own tap / long-press-reorder handling is untouched.
+   * `toolState.dockPosition` is the only state; everything else (CSS class,
+   * clearances) is derived from it in `applyDockPosition`.
    */
-  private buildDockGrip(): HTMLElement {
-    const grip = el('div', { class: 'nb-dock__grip', role: 'separator', 'aria-label': 'Move toolbar' });
-    grip.append(el('span', { class: 'nb-dock__grip-pill' }));
+  private bindDockHoldDrag(): void {
+    const dock = this.toolsEl;
     let activeId: number | null = null;
+    let holdTimer: ReturnType<typeof setTimeout> | null = null;
+    let dragging = false;
+    let downX = 0;
+    let downY = 0;
+    let lastY = 0;
     let startY = 0;
     let startTop = 0;
-    const dock = this.toolsEl;
+    let slots: HTMLElement[] = [];
 
-    grip.addEventListener('pointerdown', (e) => {
-      if (e.pointerType === 'mouse' || activeId !== null) return;
-      activeId = e.pointerId;
-      startY = e.clientY;
+    const snapTarget = (): DockPosition => {
+      const r = dock.getBoundingClientRect();
+      return r.top + r.height / 2 > window.innerHeight / 2 ? 'bottom' : 'top';
+    };
+    const showSlots = (): void => {
+      const r = dock.getBoundingClientRect();
+      for (const pos of ['top', 'bottom'] as const) {
+        const slot = el('div', { class: `nb-dock-slot nb-dock-slot--${pos}` });
+        slot.style.width = `${r.width}px`;
+        slot.style.height = `${r.height}px`;
+        document.body.append(slot);
+        slots.push(slot);
+      }
+      markSlot();
+    };
+    const markSlot = (): void => {
+      const target = snapTarget();
+      slots.forEach((slot, i) => slot.classList.toggle('nb-dock-slot--active', (i === 0 ? 'top' : 'bottom') === target));
+    };
+    const blockScroll = (e: Event): void => e.preventDefault();
+    const cancelHold = (): void => {
+      if (holdTimer) clearTimeout(holdTimer);
+      holdTimer = null;
+    };
+    const enterDrag = (): void => {
+      holdTimer = null;
+      if (activeId === null) return;
+      dragging = true;
+      startY = lastY;
       startTop = dock.getBoundingClientRect().top;
-      grip.setPointerCapture(e.pointerId);
+      dock.setPointerCapture(activeId);
       dock.classList.add('nb-dock--dragging');
       dock.style.top = `${startTop}px`;
-      e.preventDefault();
-      e.stopPropagation();
+      dock.addEventListener('touchmove', blockScroll, { passive: false });
+      showSlots();
+    };
+    const finish = (): void => {
+      cancelHold();
+      if (dragging) {
+        const next = snapTarget();
+        dock.classList.remove('nb-dock--dragging');
+        dock.style.top = '';
+        dock.removeEventListener('touchmove', blockScroll);
+        for (const slot of slots) slot.remove();
+        slots = [];
+        if (next !== toolState.dockPosition) {
+          toolState.dockPosition = next;
+          saveToolState();
+        }
+        this.applyDockPosition();
+        this.repositionCallout(); // no-ops unless a callout is open
+      }
+      dragging = false;
+      activeId = null;
+    };
+
+    dock.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' || activeId !== null) return;
+      if ((e.target as Element).closest(DOCK_INTERACTIVE)) return;
+      activeId = e.pointerId;
+      downX = e.clientX;
+      downY = lastY = e.clientY;
+      holdTimer = setTimeout(enterDrag, DOCK_HOLD_MS);
     });
-    grip.addEventListener('pointermove', (e) => {
+    dock.addEventListener('pointermove', (e) => {
       if (e.pointerId !== activeId) return;
+      lastY = e.clientY;
+      if (!dragging) {
+        if (Math.hypot(e.clientX - downX, e.clientY - downY) > DOCK_HOLD_SLOP) finish();
+        return;
+      }
       const maxTop = window.innerHeight - dock.offsetHeight;
       dock.style.top = `${clamp(startTop + e.clientY - startY, 0, Math.max(0, maxTop))}px`;
+      markSlot();
     });
     const end = (e: PointerEvent): void => {
-      if (e.pointerId !== activeId) return;
-      activeId = null;
-      const r = dock.getBoundingClientRect();
-      const next = r.top + r.height / 2 > window.innerHeight / 2 ? 'bottom' : 'top';
-      dock.classList.remove('nb-dock--dragging');
-      dock.style.top = '';
-      if (next !== toolState.dockPosition) {
-        toolState.dockPosition = next;
-        saveToolState();
-      }
-      this.applyDockPosition();
-      this.repositionCallout(); // no-ops unless a callout is open
+      if (e.pointerId === activeId) finish();
     };
-    grip.addEventListener('pointerup', end);
-    grip.addEventListener('pointercancel', end);
-    return grip;
+    dock.addEventListener('pointerup', end);
+    dock.addEventListener('pointercancel', end);
   }
 
   /** Popovers launched from a dock button open away from the edge the dock is docked to. */
