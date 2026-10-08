@@ -101,6 +101,19 @@ const RESPONSE_SCHEMA = {
   propertyOrdering: ['transcript', 'answer'],
 };
 
+/** First turn of a chat only (empty history): the schema gains a required "title". */
+const FIRST_TURN_RESPONSE_SCHEMA = {
+  ...RESPONSE_SCHEMA,
+  properties: { ...RESPONSE_SCHEMA.properties, title: { type: 'STRING' } },
+  required: [...RESPONSE_SCHEMA.required, 'title'],
+  propertyOrdering: [...RESPONSE_SCHEMA.propertyOrdering, 'title'],
+};
+
+const TITLE_INSTRUCTION =
+  ' Also set "title" to a topic label for this chat: 2-5 words, max 40 characters, plain words only, ' +
+  'no LaTeX, math symbols, markdown, emoji, quotes, colons or trailing punctuation. ' +
+  "Describe the topic, don't copy the question.";
+
 const SYSTEM_INSTRUCTION =
   'Earlier turns of this conversation, if any, arrive as text only: each of ' +
   "the user's earlier turns is a transcript of what they wrote, and each of " +
@@ -188,12 +201,15 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
+  // a chat's first message (no history) also asks for a title
+  const wantTitle = history.length === 0;
+
   // serialized once — the same request goes to the fallback if it's needed
   const upstreamBody = JSON.stringify({
-    system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+    system_instruction: { parts: [{ text: wantTitle ? SYSTEM_INSTRUCTION + TITLE_INSTRUCTION : SYSTEM_INSTRUCTION }] },
     generationConfig: {
       responseMimeType: 'application/json',
-      responseSchema: RESPONSE_SCHEMA,
+      responseSchema: wantTitle ? FIRST_TURN_RESPONSE_SCHEMA : RESPONSE_SCHEMA,
       maxOutputTokens: MAX_OUTPUT_TOKENS,
     },
     contents: [
@@ -285,7 +301,12 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
 
   // `text` keeps its old name (the answer) so the client's success check is
   // unchanged; `model` is whichever of MODELS answered
-  res.status(200).json({ text: reply.answer, transcript: reply.transcript, model });
+  res.status(200).json({
+    text: reply.answer,
+    transcript: reply.transcript,
+    model,
+    ...(wantTitle && reply.title ? { title: reply.title } : {}),
+  });
 }
 
 interface HistoryTurn {
@@ -318,8 +339,8 @@ function parseHistory(v: unknown): HistoryTurn[] | null {
 }
 
 /** Parses the JSON reply requested via RESPONSE_SCHEMA; null if it isn't one. */
-function parseReply(text: string): { transcript: string; answer: string } | null {
-  let obj: { transcript?: unknown; answer?: unknown };
+function parseReply(text: string): { transcript: string; answer: string; title: string } | null {
+  let obj: { transcript?: unknown; answer?: unknown; title?: unknown };
   try {
     obj = JSON.parse(text);
   } catch {
@@ -328,7 +349,8 @@ function parseReply(text: string): { transcript: string; answer: string } | null
   const answer = typeof obj?.answer === 'string' ? obj.answer.trim() : '';
   if (!answer) return null;
   const transcript = typeof obj.transcript === 'string' ? obj.transcript.trim() : '';
-  return { transcript, answer };
+  const title = typeof obj.title === 'string' ? obj.title.trim() : '';
+  return { transcript, answer, title };
 }
 
 interface TurnPage {

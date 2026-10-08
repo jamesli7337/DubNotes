@@ -14,6 +14,8 @@ export interface GeminiResult {
   transcript: string;
   /** which model answered a successful reply ('' otherwise) — the server may have fallen back from its primary */
   model: string;
+  /** a first-turn reply's model-written chat title ('' if absent or on error) */
+  title: string;
   isError: boolean;
 }
 
@@ -50,13 +52,19 @@ export async function callGemini(body: object): Promise<GeminiResult> {
       headers: { 'Content-Type': 'application/json', 'X-NoteApp-Secret': PROXY_SECRET },
       body: JSON.stringify(body),
     });
-    const data: { text?: unknown; transcript?: unknown; model?: unknown; error?: unknown; code?: unknown } | null = await res
-      .json()
-      .catch(() => null);
+    const data: {
+      text?: unknown;
+      transcript?: unknown;
+      model?: unknown;
+      title?: unknown;
+      error?: unknown;
+      code?: unknown;
+    } | null = await res.json().catch(() => null);
     if (res.ok && typeof data?.text === 'string' && data.text) {
       const transcript = typeof data.transcript === 'string' ? data.transcript : '';
       const model = typeof data.model === 'string' ? data.model : '';
-      return { text: data.text, transcript, model, isError: false };
+      const title = typeof data.title === 'string' ? data.title : '';
+      return { text: data.text, transcript, model, title, isError: false };
     }
     const reason = typeof data?.error === 'string' ? data.error : `request failed (${res.status})`;
     console.error(`Gemini request failed: ${reason}`);
@@ -64,6 +72,7 @@ export async function callGemini(body: object): Promise<GeminiResult> {
       text: `DubNotes AI error: ${friendlyErrorText(res.status, data?.code)}`,
       transcript: '',
       model: '',
+      title: '',
       isError: true,
     };
   } catch (err) {
@@ -72,6 +81,7 @@ export async function callGemini(body: object): Promise<GeminiResult> {
       text: "DubNotes AI error: Couldn't reach the AI, check your internet connection.",
       transcript: '',
       model: '',
+      title: '',
       isError: true,
     };
   }

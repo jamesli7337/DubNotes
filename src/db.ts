@@ -402,8 +402,9 @@ export async function putAiChat(chat: AiChat): Promise<void> {
  * Persists one resolved turn into its chat — but only if that chat still
  * exists, checked in the same transaction, so a turn that resolves after its
  * chat was deleted can't resurrect it. Bumps the chat's `updatedAt`, and gives
- * an untitled chat `title`. Resolves to the updated chat, or null if the chat
- * was gone and nothing was written.
+ * an untitled, not manually titled chat the model's `title` (cleaned up; left
+ * untitled if nothing usable is left). Resolves to the updated chat, or null
+ * if the chat was gone and nothing was written.
  */
 export async function putAiTurn(e: AiConversationEntry, title: string): Promise<AiChat | null> {
   const db = await openDB();
@@ -415,9 +416,43 @@ export async function putAiTurn(e: AiConversationEntry, title: string): Promise<
   get.onsuccess = () => {
     const chat = get.result;
     if (!chat) return;
-    saved = { ...chat, updatedAt: Math.max(chat.updatedAt, e.createdAt), title: chat.title || title };
+    const next = chat.title || chat.titleManual ? chat.title : cleanAiTitle(title);
+    saved = { ...chat, updatedAt: Math.max(chat.updatedAt, e.createdAt), title: next };
     chats.put(saved);
     t.objectStore('aiConversations').put(e);
+  };
+  await done;
+  return saved;
+}
+
+const AI_TITLE_MAX = 40;
+
+/** A model-written chat title with any symbols that slipped through stripped: letters, digits, spaces, hyphens and apostrophes only; trimmed, capped. */
+function cleanAiTitle(raw: string): string {
+  return raw
+    .replace(/[^\p{L}\p{N}\s'’-]/gu, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, AI_TITLE_MAX)
+    .trim();
+}
+
+/**
+ * Sets a chat's title by the user's hand ("Rename chat") and marks it manual,
+ * read-modify-write in one transaction so it can't be lost to (or lose) a turn
+ * resolving at the same time. Resolves to the updated chat, or null if gone.
+ */
+export async function renameAiChat(chatId: string, title: string): Promise<AiChat | null> {
+  const db = await openDB();
+  const t = db.transaction('aiChats', 'readwrite');
+  const done = txDone(t);
+  const chats = t.objectStore('aiChats');
+  let saved: AiChat | null = null;
+  const get = chats.get(chatId) as IDBRequest<AiChat | undefined>;
+  get.onsuccess = () => {
+    if (!get.result) return;
+    saved = { ...get.result, title, titleManual: true };
+    chats.put(saved);
   };
   await done;
   return saved;

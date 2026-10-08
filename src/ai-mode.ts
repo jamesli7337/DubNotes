@@ -28,10 +28,10 @@
  */
 import { el } from './ui/dom';
 import { icon } from './ui/icon';
-import { confirmDialog } from './ui/dialog';
+import { confirmDialog, textPrompt } from './ui/dialog';
 import { renderItemsImage, renderPageRegionImage } from './export/raster';
 import { store } from './store';
-import { deleteAiChat, getAiChats, getAiEntries, putAiChat, putAiTurn } from './db';
+import { deleteAiChat, getAiChats, getAiEntries, putAiChat, putAiTurn, renameAiChat } from './db';
 import { renderAiReply, renderChatTitle } from './ai-render';
 import { callGemini } from './gemini-client';
 import type { Op } from './canvas/page-canvas';
@@ -88,12 +88,6 @@ function writeActiveChat(notebookId: string, chatId: string | null): void {
   } catch {
     // storage unavailable — the chat just isn't remembered
   }
-}
-
-/** A chat's title from its first transcript: whitespace collapsed, truncated. */
-function titleFrom(transcript: string): string {
-  const t = transcript.replace(/\s+/g, ' ').trim();
-  return t.length > TITLE_MAX ? t.slice(0, TITLE_MAX - 1).trimEnd() + '…' : t;
 }
 
 /**
@@ -358,13 +352,19 @@ export class AiMode {
         this.setChatMenuOpen(false);
         if (!isActive) void this.setActiveChat(chat.id);
       });
+      const rename = el('button', { class: 'iconbtn ai-chatmenu__rename', title: 'Rename chat', 'aria-label': 'Rename chat' });
+      rename.append(icon('rename'));
+      rename.addEventListener('click', () => {
+        this.setChatMenuOpen(false);
+        void this.renameChat(chat.id);
+      });
       const del = el('button', { class: 'iconbtn ai-chatmenu__delete', title: 'Delete chat', 'aria-label': 'Delete chat' });
       del.append(icon('delete'));
       del.addEventListener('click', () => {
         this.setChatMenuOpen(false);
         void this.deleteChat(chat.id);
       });
-      menu.append(el('div', { class: 'ai-chatmenu__row' + (isActive ? ' ai-chatmenu__row--active' : '') }, pick, del));
+      menu.append(el('div', { class: 'ai-chatmenu__row' + (isActive ? ' ai-chatmenu__row--active' : '') }, pick, rename, del));
     }
   }
 
@@ -469,6 +469,33 @@ export class AiMode {
     body.addEventListener('touchcancel', () => {
       dragging = false;
     });
+  }
+
+  /** Asks for a new title (prefilled with the current one; empty is rejected) and saves it as a manual title that no model title overwrites. */
+  private async renameChat(chatId: string): Promise<void> {
+    const current = this.chats.find((c) => c.id === chatId);
+    if (!current) return;
+    const input = await textPrompt({
+      title: 'Rename chat',
+      value: current.title,
+      confirmText: 'Rename',
+      dismissable: false,
+    });
+    const title = input?.replace(/\s+/g, ' ').trim().slice(0, TITLE_MAX).trim();
+    if (!title) return; // cancelled, or empty — rejected, the title is unchanged
+    let saved: AiChat | null = null;
+    try {
+      saved = await renameAiChat(chatId, title);
+    } catch (err) {
+      console.error('AI chat rename failed:', err);
+      this.panelError = 'Couldn’t rename this chat.';
+      this.renderConversation();
+      return;
+    }
+    if (!saved) return; // deleted meanwhile
+    const renamed = saved;
+    this.chats = this.chats.map((c) => (c.id === chatId ? renamed : c));
+    this.renderChats();
   }
 
   /** Confirms, then permanently deletes `chatId` and its entries; if it was the active chat, switches to the most recently updated remaining chat (or a new draft). */
@@ -927,9 +954,10 @@ export class AiMode {
     let text: string;
     let transcript = '';
     let model = '';
+    let title = '';
     let isError = false;
     try {
-      ({ text, transcript, model, isError } = await callGemini(body));
+      ({ text, transcript, model, title, isError } = await callGemini(body));
     } catch (err) {
       console.error('AI mode send failed:', err);
       text = "DubNotes AI error: Couldn't reach the AI, check your internet connection.";
@@ -945,7 +973,7 @@ export class AiMode {
     if (!isError && transcript) entry.transcript = transcript;
     if (!isError && model) entry.model = model;
     this.renderConversation();
-    void this.persistTurn(entry);
+    void this.persistTurn(entry, title);
   }
 
   /**
@@ -953,13 +981,13 @@ export class AiMode {
    * was deleted meanwhile. Joins the visible list only if its chat is still
    * the active one; otherwise it simply shows up when that chat is next opened.
    */
-  private async persistTurn(entry: ConversationEntry): Promise<void> {
+  private async persistTurn(entry: ConversationEntry, title: string): Promise<void> {
     // `pending` is transient UI state, left out of storage
     const { pending: _pending, ...persisted } = entry;
     let saved: AiChat | null = null;
     let failed = false;
     try {
-      saved = await putAiTurn(persisted, entry.transcript ? titleFrom(entry.transcript) : '');
+      saved = await putAiTurn(persisted, title);
     } catch (err) {
       console.error('AI turn save failed:', err);
       failed = true;

@@ -195,8 +195,10 @@ export interface BackupAsset extends Omit<PdfAsset, 'data'> {
 export interface AiChat {
   id: string;
   notebookId: string;
-  /** the first transcript, truncated; '' until a turn has one */
+  /** model-written on the first turn, or the user's rename; '' until set */
   title: string;
+  /** true once the user renamed the chat — a manual title is never overwritten */
+  titleManual?: boolean;
   createdAt: number;
   /** bumped by every persisted turn — the switcher's order and the default chat */
   updatedAt: number;

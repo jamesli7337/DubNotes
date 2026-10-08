@@ -2308,6 +2308,7 @@ select {
 .ai-chatmenu__row--active .ai-chatmenu__check {
   visibility: visible;
 }
+.ai-chatmenu__rename,
 .ai-chatmenu__delete {
   flex: none;
   width: 44px;
