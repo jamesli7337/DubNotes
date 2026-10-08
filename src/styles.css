@@ -1202,7 +1202,7 @@ select {
 .nb-appbar__left {
   /* clear space between Back (navigation) and the title (rename) so a tap on
      one can't land on the other */
-  gap: 32px;
+  gap: 16px;
   flex: 0 1 auto;
   min-width: 0;
   /* the title ellipsises inside this, so it never reaches the right island */
