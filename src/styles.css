@@ -1345,6 +1345,12 @@ select {
 .nb-dock--collapsed {
   gap: 0;
 }
+/* top-docked and narrow enough to share the islands' row: same top as the
+   islands (.nb-appbar), so the tool row sits level with them. The options row
+   still hangs below it. */
+.nb-dock--inline {
+  top: calc(env(safe-area-inset-top) + 10px);
+}
 /* bottom-docked: mirrored — tool row against the screen edge, options row
    above it. */
 .nb-dock--bottom {
@@ -1372,6 +1378,9 @@ select {
 }
 .nb-dock-slot--top {
   top: calc(var(--header-h) + env(safe-area-inset-top) + 16px);
+}
+.nb-dock-slot--top.nb-dock-slot--inline {
+  top: calc(env(safe-area-inset-top) + 10px);
 }
 .nb-dock-slot--bottom {
   bottom: calc(env(safe-area-inset-bottom) + 16px);

@@ -441,6 +441,11 @@ class NotebookView {
       onAiHistoryChanged: (pageId) => {
         if (pageId === this.currentPageId) this.syncHistory();
       },
+      // the left island's margin changes at once with `.ai-panel-open` (only the
+      // panel itself slides), so its edge is already final when this runs
+      onPanelToggled: () => {
+        if (this.syncDockInline()) this.applyDockPosition();
+      },
     });
     void this.aiMode.loadConversation(); // async; resolves after buildChrome's mountPanel has run
 
@@ -788,6 +793,9 @@ class NotebookView {
     let islandsH = -1;
     this.appBarObserver = new ResizeObserver(() => {
       const h = this.appBarEl.offsetHeight;
+      // a resize changes both the viewport and the island widths, and an
+      // island can change width on its own (observed below)
+      if (this.syncDockInline()) this.applyDockPosition();
       const first = islandsH < 0;
       islandsH = h;
       if (first) return;
@@ -795,6 +803,9 @@ class NotebookView {
       else this.settleTopClearance();
     });
     this.appBarObserver.observe(this.appBarEl);
+    for (const island of this.appBarEl.querySelectorAll('.nb-appbar__left, .nb-appbar__right')) {
+      this.appBarObserver.observe(island);
+    }
 
     // Opening/closing/floating the pane resizes `.nb-scroll` without a window
     // `resize` to announce it, and the shared drag-preview canvas is sized by
@@ -905,8 +916,10 @@ class NotebookView {
     };
     const showSlots = (): void => {
       const r = dock.getBoundingClientRect();
+      const inline = this.dockFitsInline() === true; // judged once, at pickup — not re-evaluated mid-drag
       for (const pos of ['top', 'bottom'] as const) {
         const slot = el('div', { class: `nb-dock-slot nb-dock-slot--${pos}` });
+        if (pos === 'top' && inline) slot.classList.add('nb-dock-slot--inline');
         slot.style.width = `${r.width}px`;
         slot.style.height = `${r.height}px`;
         document.body.append(slot);
@@ -989,6 +1002,7 @@ class NotebookView {
   /** Derives everything that depends on the dock's edge from `toolState.dockPosition`. */
   private applyDockPosition(): void {
     this.toolsEl.classList.toggle('nb-dock--bottom', toolState.dockPosition === 'bottom');
+    this.syncDockInline();
     if (this.isBoard) {
       // dockHeightChanged skips boards; they only need the clearances and thumb re-derived
       this.refreshTopClearance();
@@ -2517,6 +2531,37 @@ class NotebookView {
     // a rebuild discards and recreates every button above — reapply the AI
     // lockdown (and the pen's violet colouring) to the fresh ones right away.
     this.applyAiToolbarLockdown();
+    if (this.syncDockInline()) this.applyDockPosition(); // the tool row's natural width may have changed
+  }
+
+  /**
+   * Whether the tool row, centred in the viewport at its natural width, clears
+   * both islands by 20px each side — judged by the islands' actual edges, so
+   * an island shifted by the AI panel counts. Null until the row has a width.
+   */
+  private dockFitsInline(): boolean | null {
+    const w = this.toolsTopEl.scrollWidth;
+    const left = this.appBarEl.querySelector<HTMLElement>('.nb-appbar__left');
+    const right = this.appBarEl.querySelector<HTMLElement>('.nb-appbar__right');
+    if (!left || !right || w === 0) return null;
+    const vw = document.documentElement.clientWidth;
+    return vw / 2 - w / 2 >= left.getBoundingClientRect().right + 20 && vw / 2 + w / 2 <= right.getBoundingClientRect().left - 20;
+  }
+
+  /**
+   * Puts the dock's tool row on the islands' row (`nb-dock--inline`) when it is
+   * top-docked and the row, centred, clears both islands. Measures the tool
+   * row's `scrollWidth` — its natural content width, which the class (it only
+   * moves `top`) can't change — so toggling can't feed back into the check.
+   * Returns whether the class changed; the caller re-derives the clearances.
+   */
+  private syncDockInline(): boolean {
+    const fits = this.dockFitsInline();
+    if (fits === null) return false; // not laid out yet
+    const inline = toolState.dockPosition === 'top' && fits;
+    if (inline === this.toolsEl.classList.contains('nb-dock--inline')) return false;
+    this.toolsEl.classList.toggle('nb-dock--inline', inline);
+    return true;
   }
 
   /** Reads a picked photo / GIF and drops it on the page in view, selected, with the lasso tool active. */
@@ -3196,7 +3241,7 @@ class NotebookView {
    * own selection keeps using the dock's Delete action, unchanged).
    */
   private onSelectionFrame(pc: ItemSurface, frame: Frame | null): void {
-    if (frame && toolState.kind === 'lasso') {
+    if (frame && (toolState.kind === 'lasso' || toolState.kind === 'tape')) {
       this.calloutPc = pc;
       this.showSelectionCallout(pc, frame);
     } else if (pc === this.calloutPc) {

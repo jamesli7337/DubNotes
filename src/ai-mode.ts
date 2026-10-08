@@ -70,6 +70,8 @@ export interface AiModeHost {
   onActiveChanged(active: boolean): void;
   /** This page's AI-scoped undo/redo stacks changed — lets the app-bar undo/redo buttons refresh (enabled state) if it's the current page. */
   onAiHistoryChanged(pageId: string): void;
+  /** The chat panel opened or closed — the left island shifts with it, so anything laid out against the islands' edges needs re-checking. */
+  onPanelToggled?(): void;
 }
 
 export class AiMode {
@@ -253,6 +255,7 @@ export class AiMode {
     this.panelOpen = open;
     this.panelEl?.classList.toggle('ai-panel--open', open);
     this.hostEl?.classList.toggle('ai-panel-open', open);
+    this.host.onPanelToggled?.();
   }
 
   /** Whether AI mode is on — one global switch, the same answer regardless of which page you ask about. */

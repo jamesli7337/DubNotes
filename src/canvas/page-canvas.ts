@@ -765,7 +765,7 @@ export class PageCanvas implements ItemSurface {
     if (toolState.kind === 'hand') return;
     if (e.pointerType === 'touch') {
       // finger drags scroll; a finger *tap* on a tape strip still peels /
-      // covers it. Can't yet tell a plain finger from a stylus contact
+      // covers it (selects it with the tape or lasso tool). Can't yet tell a plain finger from a stylus contact
       // WebKit hands us as 'touch' — that only shows up on the matching
       // TouchEvent (touchType), which fires just after this pointerdown, not
       // before — so this is stashed for blockNativeGesture to promote into a
@@ -1835,13 +1835,14 @@ export class PageCanvas implements ItemSurface {
 
   /**
    * A tap/hold resolved on an existing tape strip: every tool but the tape
-   * tool itself still peels/covers it; the tape tool instead selects it
-   * (shared handles + callout), since a tap there can no longer mean "start
-   * a new strip" (that only fires when the press lands on empty page — see
-   * topTapeAt's caller in onDown).
+   * and lasso tools still peels/covers it; those two instead select it
+   * (shared handles + callout) — for the tape tool a tap can no longer mean
+   * "start a new strip" (that only fires when the press lands on empty page —
+   * see topTapeAt's caller in onDown), and a finger with the lasso tool
+   * selects like the Pencil does.
    */
   private handleTapeTap(id: string): void {
-    if (toolState.kind !== 'tape') {
+    if (toolState.kind !== 'tape' && toolState.kind !== 'lasso') {
       this.toggleTape(id);
       return;
     }
