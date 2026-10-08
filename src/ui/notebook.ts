@@ -198,6 +198,8 @@ class NotebookView {
   private penToolBtn!: HTMLButtonElement;
   /** The dock's own Eraser button — also left enabled by AI mode's lockdown; set fresh by renderTools each rebuild. */
   private eraserToolBtn!: HTMLButtonElement;
+  /** The eraser's whole/partial mode button in the options row, while the eraser is the active tool (null otherwise) — exempt from AI mode's lockdown like the eraser itself; set fresh by renderTools each rebuild. */
+  private eraserModeBtn: HTMLButtonElement | null = null;
   /**
    * The single camera: `x`/`y` (world-space, pre-camera-transform "page-wrap
    * layout" units — see geom.ts's own Camera doc comment) is the point
@@ -444,9 +446,7 @@ class NotebookView {
         this.refreshAiControls();
         this.animateAiFade();
       },
-      onAiHistoryChanged: (pageId) => {
-        if (pageId === this.currentPageId) this.syncHistory();
-      },
+      onAiHistoryChanged: () => this.syncHistory(),
       // the left island's margin changes at once with `.ai-panel-open` (only the
       // panel itself slides), so its edge is already final when this runs
       onPanelToggled: () => {
@@ -619,13 +619,15 @@ class NotebookView {
     }) as HTMLButtonElement;
     this.aiSendBtn.append(icon('send'));
     this.aiSendBtn.addEventListener('click', () => {
-      if (!this.currentPageId) return;
       // a snapped line can still be sitting uncommitted (adjustable handles,
       // not yet in the store) when Send is tapped — settle it first so this
-      // turn's capture actually includes it. See PageCanvas.commitLine.
-      this.pcByPage.get(this.currentPageId)?.commitLine();
-      this.pcByPage.get(this.currentPageId)?.commitShapeEdit();
-      this.aiMode.sendNow(this.currentPageId);
+      // turn's capture actually includes it. See PageCanvas.commitLine. On
+      // every mounted page, not just the current one: a turn spans them all.
+      for (const pc of this.pcByPage.values()) {
+        pc.commitLine();
+        pc.commitShapeEdit();
+      }
+      this.aiMode.sendNow();
     });
 
     // Split screen: show a second, read-only page (from any notebook) or a
@@ -2376,6 +2378,7 @@ class NotebookView {
     // Both are in boardTools, so neither lookup is ever empty.
     this.penToolBtn = built.get('pen') as HTMLButtonElement;
     this.eraserToolBtn = built.get('eraser') as HTMLButtonElement;
+    this.eraserModeBtn = null; // set below only when the eraser's options are the ones being built
     top.append(...built.values(), el('span', { class: 'divider' }));
 
     switch (toolState.kind) {
@@ -2386,7 +2389,8 @@ class NotebookView {
           title: 'Eraser mode',
           'aria-label': 'Eraser mode',
           'aria-haspopup': 'menu',
-        });
+        }) as HTMLButtonElement;
+        this.eraserModeBtn = modeBtn;
         modeBtn.append(ERASER_MODES[toolState.eraserMode].label, icon('chevron-down'));
         modeBtn.addEventListener('click', () => this.openEraserMenu(modeBtn));
         opts.append(
@@ -3715,8 +3719,8 @@ class NotebookView {
       {
         onOp: (op) => {
           // ink drawn while AI mode is active is ephemeral (see AiMode) — it
-          // never enters the main undo history, only AiMode's own turn-scoped
-          // stack sees it (see AiMode.handleOp). A snapped line lands as an
+          // never enters the main undo history, only AiMode's own
+          // notebook-wide one sees it (see AiMode.handleOp). A snapped line lands as an
           // 'add-items' op like any other insertion, so it's only excluded
           // here when PageCanvas itself flagged it as AI ink (aiInk).
           // An erase raised while AI mode is on ('remove-items' whole, 'edit'
@@ -3957,14 +3961,16 @@ class NotebookView {
 
   /**
    * While AI mode is on, every toolbar/app-bar button is genuinely disabled
-   * (not just dimmed) except the pen, Eraser, Undo/Redo, the AI toggle and
-   * the Send button — AI mode is meant to be a focused "just draw, erase,
+   * (not just dimmed) except the pen, Eraser (and its whole/partial mode
+   * switch), Undo/Redo, the AI toggle and the Send button — the eraser only
+   * ever reaches this turn's AI ink (see PageCanvas's `erasable`). AI mode
+   * is meant to be a focused "just draw, erase,
    * undo/redo, and send" surface, not a place to also switch tools, insert
    * images, manage pages, etc. `button:disabled` already renders greyed-out
    * and inert (see styles.css), so this only needs to set the attribute on
    * the right elements. Undo/redo are left alone here and handled by
    * syncHistory instead (it already owns their disabled state the rest of
-   * the time), so they keep reflecting AiMode's own per-page canUndo/canRedo
+   * the time), so they keep reflecting AiMode's own notebook-wide canUndo/canRedo
    * rather than being force-disabled like everything else. Reapplied on
    * every dock rebuild too (renderTools), since that discards and recreates
    * all of these as fresh elements.
@@ -3979,6 +3985,9 @@ class NotebookView {
       (b as HTMLButtonElement).disabled = active;
     }
     for (const b of this.toolsOptionsEl.querySelectorAll('button')) {
+      // the eraser keeps its own whole/partial switch, exactly as outside AI
+      // mode — what it may erase is confined to AI ink by PageCanvas's `erasable`
+      if (b === this.eraserModeBtn) continue;
       (b as HTMLButtonElement).disabled = active;
     }
     for (const b of this.appBarRightGroup.querySelectorAll('button')) {
@@ -4445,17 +4454,17 @@ class NotebookView {
     for (const id of opPageIds(op)) this.pane?.refreshIfShowing(id);
   }
 
-  /** While AI mode is active on the current page, Undo/Redo act on that
-   * turn's own ephemeral ink stack instead of the notebook's normal
-   * content — see AiMode.undo/redo. */
+  /** While AI mode is active, Undo/Redo act on AI mode's own notebook-wide
+   * history of ephemeral ink instead of the notebook's normal content — see
+   * AiMode.undo/redo. */
   private undo(): void {
     // A line still in its adjustable phase is the newest thing the user did,
     // but it isn't in the store or on either stack yet — popping the stack
     // here would undo the element *before* it while rebuildIfMounted's
     // refresh() quietly committed the line on the way past. Drop it instead.
     if (this.cancelPendingLine()) return;
-    if (this.currentPageId && this.aiMode.isActive()) {
-      this.aiMode.undo(this.currentPageId);
+    if (this.aiMode.isActive()) {
+      this.aiMode.undo();
       return;
     }
     const op = this.undoStack.pop();
@@ -4487,8 +4496,8 @@ class NotebookView {
   }
 
   private redo(): void {
-    if (this.currentPageId && this.aiMode.isActive()) {
-      this.aiMode.redo(this.currentPageId);
+    if (this.aiMode.isActive()) {
+      this.aiMode.redo();
       return;
     }
     const op = this.redoStack.pop();
@@ -4619,14 +4628,14 @@ class NotebookView {
     this.pane?.refreshIfShowing(pageId);
   }
 
-  /** Undo/redo button enabled state — reflects AiMode's turn-scoped stack while it's active on the current page (Undo/Redo are exceptions to the toolbar lockdown, see applyAiToolbarLockdown), the main stacks otherwise. */
+  /** Undo/redo button enabled state — reflects AiMode's own history while it's active (Undo/Redo are exceptions to the toolbar lockdown, see applyAiToolbarLockdown), the main stacks otherwise. */
   private syncHistory(): void {
     // Undo drops an adjustable line before it consults either stack, so it has
     // something to do even on a page where nothing has been committed yet.
     const pending = this.hasPendingLine();
-    if (this.currentPageId && this.aiMode.isActive()) {
-      this.undoBtn.disabled = !pending && !this.aiMode.canUndo(this.currentPageId);
-      this.redoBtn.disabled = !this.aiMode.canRedo(this.currentPageId);
+    if (this.aiMode.isActive()) {
+      this.undoBtn.disabled = !pending && !this.aiMode.canUndo();
+      this.redoBtn.disabled = !this.aiMode.canRedo();
       return;
     }
     this.undoBtn.disabled = !pending && this.undoStack.length === 0;

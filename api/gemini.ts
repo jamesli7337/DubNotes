@@ -3,15 +3,19 @@
  * text. Vercel serverless function (Node.js runtime); deployed alongside the
  * static Vite build, see README "Deploy the Gemini endpoint".
  *
- * Takes two images, not one: `question` is just the user's violet AI-mode
- * ink (already cropped to it by the client — see ai-mode.ts's
- * `renderItemsImage`), `context` is the whole page. They're sent to Gemini
- * as two separate labeled parts (see `contents` below) rather than composited
- * into one picture, so the model is never asked to itself pick the question
- * out of a mixed image by colour — a previous version relied on a system-
- * prompt instruction ("the violet ink is the question") over one merged
- * screenshot, which asked Gemini to reliably notice a colour distinction
- * rather than just being told which image was which.
+ * A turn can span pages: `pages` holds 1..MAX_TURN_PAGES entries, each with
+ * its `pageIndex` and two images — `question` is just the user's violet
+ * AI-mode ink on that page (already cropped to it by the client — see
+ * ai-mode.ts's `renderItemsImage`), `context` is that whole page. They're
+ * sent to Gemini as separate labeled parts ("Page N question" / "Page N
+ * context", see turnParts) rather than composited into one picture, so the
+ * model is never asked to itself pick the question out of a mixed image by
+ * colour — a previous version relied on a system-prompt instruction ("the
+ * violet ink is the question") over one merged screenshot, which asked Gemini
+ * to reliably notice a colour distinction rather than just being told which
+ * image was which. The older single-page body (`question` + `context` at the
+ * top level) is still accepted as a one-page turn, for a client still running
+ * a cached build from before turns spanned pages.
  *
  * Multi-turn: an optional `history` of earlier turns in the same chat arrives
  * as plain text ({ role, text } — the user side is each earlier turn's
@@ -52,6 +56,9 @@ const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GE
 const MAX_HISTORY_ITEMS = 40;
 const MAX_HISTORY_CHARS = 32_000;
 
+/** Most pages one turn may include — the same cap as ai-mode.ts's. */
+const MAX_TURN_PAGES = 6;
+
 /** Output cap per reply. The model's hard limit is 65,536, and on Gemini 3
  * thinking tokens count against this too, so the default (or a tight cap)
  * can run out mid-JSON. Half the hard limit leaves ample room for thinking
@@ -80,13 +87,18 @@ const SYSTEM_INSTRUCTION =
   "the user's earlier turns is a transcript of what they wrote, and each of " +
   'your earlier turns is the answer you gave. Only the current (last) turn ' +
   'has images, and its question may be a follow-up to those earlier turns. ' +
-  'For the current turn you will be given two images from a handwritten notebook page. The ' +
-  "first is cropped to show ONLY the page author's actual question or " +
-  "instruction to you — that crop is the one thing you must directly " +
-  'answer. The second is a photo of the whole page, given purely as ' +
-  "background — read it if it helps you answer the question in the first " +
-  "image, but don't summarize it, describe it, or respond to anything in " +
-  "it on its own; it may repeat what's in the first image, which is normal. " +
+  'The current turn comes from one or more pages of a handwritten notebook, ' +
+  'and gives you two labeled images per page. "Page N question" is cropped ' +
+  "to show ONLY what the page author wrote to you on page N — their actual " +
+  'question or instruction. Taken together, every page\'s question crop is ' +
+  'the one thing you must directly answer: a single question can be split ' +
+  'across pages, and question ink on one page may point at, circle or refer ' +
+  'to content on a different page (e.g. "solve the circled one" on page 4 ' +
+  'about an equation circled on page 3). "Page N context" is a photo of the ' +
+  'whole of page N, given purely as background — read it to find what the ' +
+  "question refers to, but don't summarize it, describe it, or respond to " +
+  'anything in it on its own; it repeats what is in that page\'s question ' +
+  'crop, which is normal. ' +
   'Explain things simply: short sentences, plain everyday words, one idea ' +
   "at a time, as if talking to a beginner seeing this for the first time. " +
   "Avoid jargon; if a technical term is unavoidable, explain it in a " +
@@ -96,10 +108,13 @@ const SYSTEM_INSTRUCTION =
   'equation, \\frac, \\sqrt, ^, _, etc.) and simple markdown for formatting ' +
   "(**bold**, short bullet lists) — don't overuse either. " +
   'Respond with JSON matching the schema: "transcript" is a concise text ' +
-  'rendering of the handwritten question in the first image, plus whatever ' +
-  'content from the page it refers to (e.g. the equation, list or diagram it ' +
-  'asks about), written so it could stand in for both images in a later turn ' +
-  '— use LaTeX for math; "answer" is your reply, following the rules above.';
+  'rendering of the handwritten question, plus whatever content it refers ' +
+  'to, written so it could stand in for every image of this turn in a later ' +
+  'turn, when the images are gone. State what things actually say: write out ' +
+  'the circled, underlined or pointed-at equation, problem, list or diagram ' +
+  'itself, never just "the circled problem" or "this equation". When the turn ' +
+  'spans pages, say which page each part comes from (e.g. "Page 3: …; Page 4: ' +
+  '…"). Use LaTeX for math. "answer" is your reply, following the rules above.';
 
 /** Every response carries this — the app is a static site on another origin. */
 function setCors(res: ApiResponse, origin: string | string[] | undefined): void {
@@ -138,13 +153,14 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
-  const body = req.body as { question?: unknown; context?: unknown; history?: unknown } | null;
-  const question = parseImage(body?.question);
-  const context = parseImage(body?.context);
-  if (!question || !context) {
-    res
-      .status(400)
-      .json({ error: 'Missing or invalid "question"/"context" image (each needs a base64 "image" string) in request body.' });
+  const body = req.body as { pages?: unknown; question?: unknown; context?: unknown; history?: unknown } | null;
+  const pages = parsePages(body);
+  if (!pages) {
+    res.status(400).json({
+      error:
+        `Missing or invalid "pages": expected 1–${MAX_TURN_PAGES} { pageIndex, question, context } entries, ` +
+        'each image needing a base64 "image" string.',
+    });
     return;
   }
   const history = parseHistory(body?.history);
@@ -167,15 +183,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
         },
         contents: [
           ...history.map((h) => ({ role: h.role, parts: [{ text: h.text }] })),
-          {
-            role: 'user',
-            parts: [
-              { text: 'Image 1 of 2 — the question (answer this):' },
-              { inline_data: { mime_type: question.mimeType, data: question.image } },
-              { text: 'Image 2 of 2 — the whole page, background only:' },
-              { inline_data: { mime_type: context.mimeType, data: context.image } },
-            ],
-          },
+          { role: 'user', parts: turnParts(pages) },
         ],
       }),
     });
@@ -267,6 +275,54 @@ function parseReply(text: string): { transcript: string; answer: string } | null
   if (!answer) return null;
   const transcript = typeof obj.transcript === 'string' ? obj.transcript.trim() : '';
   return { transcript, answer };
+}
+
+interface TurnPage {
+  /** 0-based; null for the legacy single-page body, which carried none */
+  pageIndex: number | null;
+  question: { image: string; mimeType: string };
+  context: { image: string; mimeType: string };
+}
+
+/**
+ * Validates the turn's pages: `pages` (1..MAX_TURN_PAGES entries, each a
+ * non-negative integer `pageIndex` plus two valid images), sorted by page;
+ * or else the legacy top-level `question` + `context` as one page. Null if
+ * neither is valid.
+ */
+function parsePages(body: { pages?: unknown; question?: unknown; context?: unknown } | null): TurnPage[] | null {
+  if (body?.pages === undefined) {
+    const question = parseImage(body?.question);
+    const context = parseImage(body?.context);
+    return question && context ? [{ pageIndex: null, question, context }] : null;
+  }
+  const raw = body.pages;
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > MAX_TURN_PAGES) return null;
+  const pages: TurnPage[] = [];
+  for (const v of raw) {
+    const p = v as { pageIndex?: unknown; question?: unknown; context?: unknown } | null;
+    const pageIndex = p?.pageIndex;
+    const question = parseImage(p?.question);
+    const context = parseImage(p?.context);
+    if (typeof pageIndex !== 'number' || !Number.isInteger(pageIndex) || pageIndex < 0 || !question || !context) return null;
+    pages.push({ pageIndex, question, context });
+  }
+  return pages.sort((a, b) => a.pageIndex! - b.pageIndex!);
+}
+
+/** The current turn's parts: per page, its labeled question crop then its labeled whole-page context. */
+function turnParts(pages: TurnPage[]): object[] {
+  const parts: object[] = [];
+  for (const p of pages) {
+    const name = p.pageIndex == null ? 'Page' : `Page ${p.pageIndex + 1}`;
+    parts.push(
+      { text: `${name} question (answer this):` },
+      { inline_data: { mime_type: p.question.mimeType, data: p.question.image } },
+      { text: `${name} context (the whole page, background only):` },
+      { inline_data: { mime_type: p.context.mimeType, data: p.context.image } }
+    );
+  }
+  return parts;
 }
 
 /** Validates one `{ image, mimeType }` field of the request body. */

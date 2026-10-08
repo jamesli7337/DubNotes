@@ -10,12 +10,13 @@
  * internals. It listens to the same `Op` stream `NotebookView` already uses
  * for undo/redo (an `add-stroke` op is "new ink") and reads page content
  * through `store` (which works whether or not the page is currently
- * mounted). Send captures *two* images: the violet ink alone (cropped to
- * just those strokes, via `renderItemsImage`) as the actual question, and
- * the whole current page (via `renderPageRegionImage`) as background
- * context — sent to api/gemini.ts as two structurally distinct request
- * fields, not pixels mixed into one picture, so Gemini is never asked to
- * itself pick the question out of a mixed photo. The reply, though, is notebook-wide: it
+ * mounted). A turn is all the violet ink on every page since the last Send
+ * (at most MAX_TURN_PAGES pages). For each of those pages Send captures *two*
+ * images: the violet ink alone (cropped to just those strokes, via
+ * `renderItemsImage`) as the question, and the whole page (via
+ * `renderPageRegionImage`) as background context — sent to api/gemini.ts as
+ * structurally distinct, labeled images, not pixels mixed into one picture,
+ * so Gemini is never asked to itself pick the question out of a mixed photo. The reply, though, is notebook-wide: it
  * renders in a single slide-out chat panel (`mountPanel`/`renderConversation`)
  * rather than as page content, so the conversation reads the same regardless
  * of which page you're looking at or scroll to.
@@ -51,8 +52,19 @@ export const AI_FADE_MS = 150;
 /** Character budget for the history sent with a turn — newest turns kept,
  * oldest dropped first (api/gemini.ts enforces its own, slightly higher cap). */
 const HISTORY_CHAR_BUDGET = 24_000;
-/** Longest side of a stored question thumbnail, in CSS pixels. */
+/** Widest a stored question thumbnail gets, in CSS pixels. */
 const THUMB_MAX = 320;
+/** Pixel area of a stored thumbnail — the budget a single crop had when its
+ * longest side was capped at THUMB_MAX, now shared by a turn's stacked crops. */
+const THUMB_AREA = THUMB_MAX * THUMB_MAX;
+/** Space between two pages' crops in a stacked thumbnail, in source pixels. */
+const THUMB_GAP = 12;
+/** Most pages one turn may include — api/gemini.ts enforces the same cap. */
+const MAX_TURN_PAGES = 6;
+/** Largest request body Send will POST (Vercel rejects a function request body over 4.5 MB). */
+const MAX_BODY_CHARS = 4_000_000;
+/** JPEG quality of each page's whole-page context image (question crops stay PNG). */
+const CONTEXT_JPEG_QUALITY = 0.9;
 const TITLE_MAX = 40;
 /** localStorage key prefix for each notebook's active chat id. */
 const ACTIVE_CHAT_PREFIX = 'noteapp.aichat.';
@@ -100,20 +112,44 @@ function buildHistory(entries: AiConversationEntry[]): { role: 'user' | 'model';
   return out;
 }
 
-/** Downscales the question crop to a small JPEG data URL for the panel and storage. */
-async function questionThumbnail(img: { base64: string; mimeType: string }): Promise<string> {
-  const src = new Image();
-  src.src = `data:${img.mimeType};base64,${img.base64}`;
-  await src.decode();
-  const k = Math.min(1, THUMB_MAX / Math.max(src.naturalWidth, src.naturalHeight, 1));
+interface TurnImage {
+  base64: string;
+  mimeType: string;
+}
+
+/**
+ * A turn's question crops (one per page, in page order) stacked vertically
+ * into one small JPEG data URL for the panel and storage: at most THUMB_MAX
+ * wide and THUMB_AREA in total, with a hairline between pages.
+ */
+async function questionThumbnail(imgs: TurnImage[]): Promise<string> {
+  const srcs = await Promise.all(
+    imgs.map(async (img) => {
+      const src = new Image();
+      src.src = `data:${img.mimeType};base64,${img.base64}`;
+      await src.decode();
+      return src;
+    })
+  );
+  const w = Math.max(1, ...srcs.map((s) => s.naturalWidth));
+  const h = Math.max(1, srcs.reduce((n, s) => n + s.naturalHeight, 0) + THUMB_GAP * (srcs.length - 1));
+  const k = Math.min(1, THUMB_MAX / w, Math.sqrt(THUMB_AREA / (w * h)));
   const c = document.createElement('canvas');
-  c.width = Math.max(1, Math.round(src.naturalWidth * k));
-  c.height = Math.max(1, Math.round(src.naturalHeight * k));
+  c.width = Math.max(1, Math.round(w * k));
+  c.height = Math.max(1, Math.round(h * k));
   const ctx = c.getContext('2d');
   if (!ctx) return '';
   ctx.fillStyle = '#ffffff';
   ctx.fillRect(0, 0, c.width, c.height);
-  ctx.drawImage(src, 0, 0, c.width, c.height);
+  let y = 0;
+  srcs.forEach((src, i) => {
+    if (i) {
+      ctx.fillStyle = '#d4d4d8';
+      ctx.fillRect(0, Math.round((y - THUMB_GAP / 2) * k), c.width, 1);
+    }
+    ctx.drawImage(src, 0, y * k, src.naturalWidth * k, src.naturalHeight * k);
+    y += src.naturalHeight + THUMB_GAP;
+  });
   return c.toDataURL('image/jpeg', 0.8);
 }
 
@@ -134,14 +170,10 @@ interface AiPageState {
    * position on the page is irrelevant now that a turn always captures the
    * whole page, not a region below some remembered line. */
   inkIds: Set<string>;
-  /** This turn's own undo/redo history — only ever holds the 'add-stroke'/
-   * 'add-items' ops that created this page's pending ink (see handleOp),
-   * entirely separate from NotebookView's main undo stack (which never sees
-   * AI ink at all). Cleared whenever the ink itself is cleared: on
-   * deactivation (discardInk) and once sent (submitTurn). */
-  aiUndo: Op[];
-  aiRedo: Op[];
 }
+
+/** Same cap as NotebookView's main undo history (see its pushOp). */
+const MAX_AI_HISTORY = 200;
 
 /** What `AiMode` needs from `NotebookView`, injected rather than imported to avoid a cycle. */
 export interface AiModeHost {
@@ -149,8 +181,8 @@ export interface AiModeHost {
   refreshPage(pageId: string): void;
   /** AI mode's global on/off state changed — lets the app-bar toggle/send buttons refresh. */
   onActiveChanged(active: boolean): void;
-  /** This page's AI-scoped undo/redo stacks changed — lets the app-bar undo/redo buttons refresh (enabled state) if it's the current page. */
-  onAiHistoryChanged(pageId: string): void;
+  /** AI mode's undo/redo history changed — lets the app-bar undo/redo buttons refresh their enabled state. */
+  onAiHistoryChanged(): void;
   /** The chat panel opened or closed — the left island shifts with it, so anything laid out against the islands' edges needs re-checking. */
   onPanelToggled?(): void;
 }
@@ -158,11 +190,23 @@ export interface AiModeHost {
 export class AiMode {
   /** The one global on/off switch — see the module doc comment. */
   private active = false;
-  /** True while a turn is in flight; blocks starting another until it resolves, on any page. */
+  /** True while a turn is being captured or is in flight; blocks starting another until it resolves. */
   private sending = false;
-  /** Which page a send in flight is for, so only that page's status shows "thinking". */
-  private sendingPageId: string | null = null;
+  /** True only while a turn's pages are being rendered (the first part of `sending`); AI undo/redo are paused meanwhile — see canUndo/undo. */
+  private capturing = false;
+  /** The pages a turn in flight was sent from, so only their status shows "thinking". */
+  private sendingPageIds = new Set<string>();
   private readonly pages = new Map<string, AiPageState>();
+  /**
+   * AI mode's own undo/redo history: one for the whole notebook, like
+   * NotebookView's main one, holding every page's AI-ink ops (draw, erase,
+   * partial erase, snapped line/shape — see handleOp) in the order they
+   * happened. Entirely separate from the main history, which never sees AI
+   * ink (and this never sees anything else). Cleared when AI mode turns off,
+   * and per page once that page's ink is sent (submitTurn).
+   */
+  private readonly undoStack: Op[] = [];
+  private readonly redoStack: Op[] = [];
   /** this notebook's chats, most recently updated first */
   private chats: AiChat[] = [];
   /** null = an unsaved "New chat" draft: nothing is persisted until its first Send creates it */
@@ -235,8 +279,6 @@ export class AiMode {
       pageEl,
       statusEl,
       inkIds: new Set(),
-      aiUndo: [],
-      aiRedo: [],
     });
     this.applyVisual(pageId); // a page can mount while AI mode is already on (e.g. scrolling to a new one)
   }
@@ -451,11 +493,12 @@ export class AiMode {
       // stroke — track it the same way so it's discarded the same way too.
       for (const it of op.items) st.inkIds.add(it.id);
     }
-    // this turn's own undo history: a fresh piece of ink invalidates redo,
-    // same convention as NotebookView's main stack (see pushOp).
-    st.aiUndo.push(op);
-    st.aiRedo.length = 0;
-    this.host.onAiHistoryChanged(op.pageId);
+    // AI mode's own history: a fresh piece of ink, on any page, invalidates
+    // redo — same convention (and cap) as NotebookView's main stack (see pushOp).
+    this.undoStack.push(op);
+    if (this.undoStack.length > MAX_AI_HISTORY) this.undoStack.shift();
+    this.redoStack.length = 0;
+    this.host.onAiHistoryChanged();
   }
 
   /**
@@ -484,6 +527,8 @@ export class AiMode {
    */
   private deactivateAll(): void {
     this.active = false;
+    this.undoStack.length = 0;
+    this.redoStack.length = 0;
     for (const [pageId, st] of this.pages) {
       this.discardInk(pageId, st);
       this.applyVisual(pageId);
@@ -515,34 +560,61 @@ export class AiMode {
     return this.pages.get(pageId)?.inkIds.has(itemId) ?? false;
   }
 
-  /** Whether this page has any AI-mode ink left to undo — only meaningful while AI mode is active. */
-  canUndo(pageId: string): boolean {
-    return (this.pages.get(pageId)?.aiUndo.length ?? 0) > 0;
+  /** Whether there is any AI-mode action left to undo, on any page (false while a turn is being captured) — only meaningful while AI mode is active. */
+  canUndo(): boolean {
+    return !this.capturing && this.undoStack.length > 0;
   }
 
-  /** Whether this page has any undone AI-mode ink left to redo — only meaningful while AI mode is active. */
-  canRedo(pageId: string): boolean {
-    return (this.pages.get(pageId)?.aiRedo.length ?? 0) > 0;
+  /** Whether there is any undone AI-mode action left to redo, on any page (false while a turn is being captured) — only meaningful while AI mode is active. */
+  canRedo(): boolean {
+    return !this.capturing && this.redoStack.length > 0;
   }
 
-  /** Removes the most recently created piece of this turn's AI-mode ink. */
-  undo(pageId: string): void {
-    const st = this.pages.get(pageId);
-    if (!st || !st.aiUndo.length) return;
-    const op = st.aiUndo.pop()!;
-    this.invertInk(pageId, st, op);
-    st.aiRedo.push(op);
-    this.host.onAiHistoryChanged(pageId);
+  /**
+   * Reverts the most recent AI-mode action, whichever page it was on. Like
+   * the main Undo, it never scrolls: an off-screen page changes in the store
+   * and repaints when it's next mounted (host.refreshPage is the same
+   * rebuildIfMounted main undo uses, split pane included). An action whose
+   * page has since been torn down is dropped and the next one tried. A
+   * no-op while a turn's pages are being captured (every route — buttons,
+   * keyboard — lands here).
+   */
+  undo(): void {
+    if (this.capturing) return;
+    for (let op = this.undoStack.pop(); op; op = this.undoStack.pop()) {
+      const pageId = (op as { pageId: string }).pageId;
+      const st = this.pages.get(pageId);
+      if (!st) continue;
+      this.invertInk(pageId, st, op);
+      this.redoStack.push(op);
+      break;
+    }
+    this.host.onAiHistoryChanged();
   }
 
-  /** Restores the most recently undone piece of this turn's AI-mode ink. */
-  redo(pageId: string): void {
-    const st = this.pages.get(pageId);
-    if (!st || !st.aiRedo.length) return;
-    const op = st.aiRedo.pop()!;
-    this.forwardInk(pageId, st, op);
-    st.aiUndo.push(op);
-    this.host.onAiHistoryChanged(pageId);
+  /** Reapplies the most recently undone AI-mode action, whichever page it was on — see undo. */
+  redo(): void {
+    if (this.capturing) return;
+    for (let op = this.redoStack.pop(); op; op = this.redoStack.pop()) {
+      const pageId = (op as { pageId: string }).pageId;
+      const st = this.pages.get(pageId);
+      if (!st) continue;
+      this.forwardInk(pageId, st, op);
+      this.undoStack.push(op);
+      break;
+    }
+    this.host.onAiHistoryChanged();
+  }
+
+  /** Drops every AI-history action on these pages (both directions). */
+  private forgetHistory(pageIds: Set<string>): void {
+    const keep = (op: Op): boolean => !pageIds.has((op as { pageId: string }).pageId);
+    const u = this.undoStack.filter(keep);
+    const r = this.redoStack.filter(keep);
+    if (u.length === this.undoStack.length && r.length === this.redoStack.length) return;
+    this.undoStack.splice(0, this.undoStack.length, ...u);
+    this.redoStack.splice(0, this.redoStack.length, ...r);
+    this.host.onAiHistoryChanged();
   }
 
   /** Undoes one AI-ink op — a creation ('add-stroke'/'add-items') or an erase of this turn's ink ('remove-items'/'edit'); see handleOp for why those are the only four. */
@@ -590,18 +662,14 @@ export class AiMode {
     this.host.refreshPage(pageId);
   }
 
-  /** Submits the current page's pending turn immediately — the only way a turn is ever sent, called by the app-bar send button, for whichever page is current. */
-  sendNow(pageId: string): void {
+  /** Sends the current turn — the only way a turn is ever sent, called by the app-bar send button. A turn is every page's pending violet ink at once, whichever page is current or in view. */
+  sendNow(): void {
     if (!this.active || this.sending) return;
-    const st = this.pages.get(pageId);
-    if (!st || !st.inkIds.size) return; // nothing new drawn here to ask about
-    void this.submitTurn(pageId);
+    void this.submitTurn();
   }
 
-  /** Removes whatever ephemeral ink is still tracked (unsent) and repaints if any was; also clears this turn's own undo/redo history, since it referred only to ink that just went away. */
+  /** Removes whatever ephemeral ink is still tracked (unsent) and repaints if any was. (Its undo history goes with AI mode itself — see deactivateAll.) */
   private discardInk(pageId: string, st: AiPageState): void {
-    st.aiUndo.length = 0;
-    st.aiRedo.length = 0;
     if (!st.inkIds.size) return;
     const removed = store.removeItems(pageId, st.inkIds);
     st.inkIds.clear();
@@ -611,23 +679,116 @@ export class AiMode {
   private applyVisual(pageId: string): void {
     const st = this.pages.get(pageId);
     if (!st) return;
-    const busy = this.sending && this.sendingPageId === pageId;
+    const busy = this.sending && this.sendingPageIds.has(pageId);
     st.pageEl.classList.toggle('page--ai-active', this.active);
     st.statusEl.classList.toggle('ai-status--busy', busy);
     st.statusEl.textContent = busy ? 'DubNotes AI is thinking…' : this.active ? 'AI mode' : '';
   }
 
-  private async submitTurn(pageId: string): Promise<void> {
-    const st = this.pages.get(pageId);
-    if (!this.active || this.sending || !st || !st.inkIds.size) return;
+  /** Pages with this turn's violet ink still on them, in page order. Tracked per page whether or not it is mounted. */
+  private turnPages(): { page: Page; st: AiPageState }[] {
+    const out: { page: Page; st: AiPageState }[] = [];
+    for (const [pageId, st] of this.pages) {
+      if (!st.inkIds.size) continue;
+      const page = store.pageById(pageId);
+      if (!page || !store.itemsOf(pageId).some((it) => st.inkIds.has(it.id))) continue;
+      out.push({ page, st });
+    }
+    return out.sort((a, b) => a.page.index - b.page.index);
+  }
 
-    const page = store.pageById(pageId);
-    if (!page) return;
+  /** Shows why Send didn't go. Every page's ink stays where it is, to fix and send again. */
+  private blockSend(message: string): void {
+    this.panelError = message;
+    this.openPanel();
+    this.renderConversation();
+  }
+
+  private endSending(): void {
+    const ids = this.sendingPageIds;
+    this.sending = false;
+    this.sendingPageIds = new Set();
+    for (const id of ids) this.applyVisual(id);
+  }
+
+  private async submitTurn(): Promise<void> {
+    if (!this.active || this.sending) return;
+    const turn = this.turnPages();
+    if (!turn.length) return; // nothing drawn anywhere to ask about
+    this.panelError = '';
+    if (turn.length > MAX_TURN_PAGES) {
+      this.blockSend(
+        `AI ink is on ${turn.length} pages, but one turn can include at most ${MAX_TURN_PAGES}. ` +
+          `Remove the AI ink from ${turn.length - MAX_TURN_PAGES} of them with the eraser, then send again. ` +
+          `(Undo takes back the most recent AI ink, whichever page it's on.)`
+      );
+      return;
+    }
 
     this.sending = true;
-    this.sendingPageId = pageId;
-    this.applyVisual(pageId);
-    this.panelError = '';
+    this.sendingPageIds = new Set(turn.map((t) => t.page.id));
+    for (const id of this.sendingPageIds) this.applyVisual(id);
+
+    // Per page, two separate captures, sent as two separate labeled images
+    // (see api/gemini.ts) — never merged into one. `question` is just the
+    // violet ink (cropped to it, on a blank canvas), the actual thing to
+    // answer; `context` is the whole page (every pre-existing note plus the
+    // ink), there purely as background — a JPEG, which is far smaller than a
+    // PNG for a busy page and reads the same. Captured before the ink is
+    // removed below, since `question` needs it on the page to render. `ids`
+    // snapshots the ink being sent, so a stroke landing mid-capture isn't
+    // discarded unsent — it stays for the next turn.
+    const captured: { page: Page; st: AiPageState; ids: Set<string>; question: TurnImage; context: TurnImage }[] = [];
+    // AI undo/redo pause until the capture finishes or fails: undoing ink the
+    // capture is about to render would pull it out from under the crop
+    this.capturing = true;
+    this.host.onAiHistoryChanged();
+    try {
+      for (const { page, st } of turn) {
+        const ids = new Set(st.inkIds);
+        captured.push({
+          page,
+          st,
+          ids,
+          question: await renderItemsImage(page, ids),
+          context: await renderPageRegionImage(page, undefined, undefined, 'image/jpeg', CONTEXT_JPEG_QUALITY),
+        });
+      }
+    } catch (err) {
+      console.error('AI mode capture failed:', err);
+      this.endSending();
+      this.blockSend('Couldn’t capture this turn’s pages. Try sending again.');
+      return;
+    } finally {
+      this.capturing = false;
+      this.host.onAiHistoryChanged();
+    }
+    // AI mode switched off mid-capture: its ink is already gone, and so is the turn
+    if (!this.active) {
+      this.endSending();
+      return;
+    }
+
+    // history is the active chat as it stands before this turn joins it
+    const history = buildHistory(this.visibleEntries().filter((e) => !e.pending));
+    const body = {
+      pages: captured.map((c) => ({
+        pageIndex: c.page.index,
+        question: { image: c.question.base64, mimeType: c.question.mimeType },
+        context: { image: c.context.base64, mimeType: c.context.mimeType },
+      })),
+      history,
+    };
+    const size = JSON.stringify(body).length; // base64 + JSON: one byte per char
+    if (size > MAX_BODY_CHARS) {
+      this.endSending();
+      const mb = (n: number): string => (n / 1_000_000).toFixed(1);
+      this.blockSend(
+        `This turn is too large to send (${mb(size)} MB; the limit is ${mb(MAX_BODY_CHARS)} MB). ` +
+          `Send fewer pages at a time: erase or undo the ink on some pages, send, then ask about the rest.`
+      );
+      return;
+    }
 
     // bind this turn to its chat now: a draft becomes a real chat on its first
     // Send. Written ahead of the turn (IndexedDB runs readwrite transactions
@@ -646,8 +807,6 @@ export class AiMode {
         this.showSaveError();
       });
     }
-    // history is this chat as it stands before this turn joins it
-    const history = buildHistory(this.visibleEntries().filter((e) => !e.pending));
 
     // a placeholder entry shows immediately — opening the panel is how a
     // sent turn becomes visible at all now that nothing lands on the page.
@@ -655,7 +814,8 @@ export class AiMode {
       id: uid(),
       notebookId: this.notebookId,
       chatId,
-      pageId,
+      pageId: captured[0].page.id,
+      pageIds: captured.map((c) => c.page.id),
       thumbnail: '',
       text: '',
       isError: false,
@@ -666,55 +826,39 @@ export class AiMode {
     this.openPanel();
     this.renderConversation();
 
+    const thumbnail = await questionThumbnail(captured.map((c) => c.question)).catch((err) => {
+      console.error('AI thumbnail failed:', err);
+      return '';
+    });
+
+    // everything is captured — this ink's job is done, on every page it was
+    // on. Discard it (only items we ourselves marked ephemeral; never touches
+    // pre-existing permanent content) so it never persists, regardless of
+    // what the request below does.
+    const sentPages = new Set<string>();
+    for (const { page, st, ids } of captured) {
+      store.removeItems(page.id, ids);
+      for (const id of ids) st.inkIds.delete(id);
+      this.host.refreshPage(page.id);
+      // the AI history's actions on this page referred only to ink that's now
+      // sent (and removed above) — dropped, as AI mode turning off drops them
+      // all (left alone if ink drawn mid-capture is still pending here)
+      if (!st.inkIds.size) sentPages.add(page.id);
+    }
+    this.forgetHistory(sentPages);
+
     let text: string;
     let transcript = '';
     let isError = false;
-    let thumbnail = '';
     try {
-      // Two separate captures, sent as two separate request fields (see
-      // api/gemini.ts) — never merged into one image. `question` is just the
-      // violet ink itself (cropped to it, on a blank canvas), so it's the
-      // actual thing to answer; `context` is the whole page (every
-      // pre-existing note plus the new ink, same as always — see the module
-      // doc comment), there purely as background. Both captured before the
-      // ink is removed below, since `question` needs it to still be on the
-      // page to render.
-      const question = await renderItemsImage(page, st.inkIds);
-      const context = await renderPageRegionImage(page);
-      thumbnail = await questionThumbnail(question).catch((err) => {
-        console.error('AI thumbnail failed:', err);
-        return '';
-      });
-
-      // both images are captured — this ink's job is done. Discard it (only
-      // items we ourselves marked ephemeral; never touches pre-existing
-      // permanent content) so it never persists, regardless of what the
-      // request below does.
-      store.removeItems(pageId, st.inkIds);
-      st.inkIds.clear();
-      this.host.refreshPage(pageId);
-      // this turn's own undo/redo history referred only to ink that's now
-      // sent (and removed above) — matches discardInk's clearing on deactivation.
-      if (st.aiUndo.length || st.aiRedo.length) {
-        st.aiUndo.length = 0;
-        st.aiRedo.length = 0;
-        this.host.onAiHistoryChanged(pageId);
-      }
-
-      ({ text, transcript, isError } = await callGemini({
-        question: { image: question.base64, mimeType: question.mimeType },
-        context: { image: context.base64, mimeType: context.mimeType },
-        history,
-      }));
+      ({ text, transcript, isError } = await callGemini(body));
     } catch (err) {
       console.error('AI mode send failed:', err);
       text = "DubNotes AI error: Couldn't reach the AI, check your internet connection.";
       isError = true;
     }
 
-    this.sending = false;
-    this.sendingPageId = null;
-    this.applyVisual(pageId);
+    this.endSending();
 
     entry.pending = false;
     entry.text = text;
@@ -771,9 +915,17 @@ export class AiMode {
     for (const entry of this.visibleEntries()) {
       const row = el('div', { class: 'ai-panel__entry' });
       // live lookup, not a stored snapshot — stays right if pages are reordered
-      // later; falls back gracefully if the page itself was since deleted.
-      const page = store.pageById(entry.pageId);
-      row.append(el('span', { class: 'ai-panel__page', text: page ? `Page ${page.index + 1}` : 'Page removed' }));
+      // later; falls back gracefully if a page itself was since deleted.
+      const ids = entry.pageIds ?? [entry.pageId];
+      const nums = ids
+        .map((id) => store.pageById(id))
+        .filter((p): p is Page => !!p)
+        .map((p) => p.index + 1)
+        .sort((x, y) => x - y);
+      const label = !nums.length
+        ? ids.length > 1 ? 'Pages removed' : 'Page removed'
+        : ids.length > 1 ? `Pages ${nums.join(', ')}` : `Page ${nums[0]}`;
+      row.append(el('span', { class: 'ai-panel__page', text: label }));
       if (entry.thumbnail) {
         row.append(el('img', { class: 'ai-panel__thumb', src: entry.thumbnail, alt: 'Your question' }));
       }

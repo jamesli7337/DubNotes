@@ -72,19 +72,23 @@ export async function exportPageImage(
 }
 
 /**
- * Rasterizes a page region as base64 PNG data (no `data:` prefix) — for
+ * Rasterizes a page region as base64 image data (no `data:` prefix) — for
  * sending over the network (AI mode), where a data URL would waste bytes
  * re-stating what `mimeType` already says. `scale` is lower than export's
- * default: legible for OCR-style reading without a large upload.
+ * default: legible for OCR-style reading without a large upload. PNG unless
+ * `mimeType` asks for JPEG (at `quality`) — the page is opaque, its paper
+ * filled, so nothing is lost to JPEG's missing alpha.
  */
 export async function renderPageRegionImage(
   page: Page,
   region?: PageRegion,
-  scale = 1.5
+  scale = 1.5,
+  mimeType: 'image/png' | 'image/jpeg' = 'image/png',
+  quality?: number
 ): Promise<{ base64: string; mimeType: string }> {
   const c = await renderPageCanvas(page, scale, region);
-  const dataUrl = c.toDataURL('image/png');
-  return { base64: dataUrl.slice(dataUrl.indexOf(',') + 1), mimeType: 'image/png' };
+  const dataUrl = c.toDataURL(mimeType, quality);
+  return { base64: dataUrl.slice(dataUrl.indexOf(',') + 1), mimeType };
 }
 
 /**

@@ -187,8 +187,9 @@ A notebook has any number of AI chats; each turn belongs to one.
 | `id`         | string  | uuid                                                  |
 | `notebookId` | string  | owning notebook; deleted with it                      |
 | `chatId`     | string  | owning chat; deleted with it                          |
-| `pageId`     | string  | the page the turn was captured from — label only, the page's own content is untouched |
-| `thumbnail`  | string  | `data:` URL — a small JPEG of the question crop (pre-v7 entries: the whole-page capture) |
+| `pageId`     | string  | the (first) page the turn was captured from — label only, the page's own content is untouched |
+| `pageIds`    | string[]? | every page a turn spanning pages was captured from, in page order — label only; absent on older entries |
+| `thumbnail`  | string  | `data:` URL — a small JPEG of the turn's question crops, stacked one per page (pre-v7 entries: the whole-page capture) |
 | `transcript` | string? | Gemini's text rendering of the question; absent on errors and pre-v7 entries |
 | `text`       | string  | Gemini's reply (or an error message)                  |
 | `isError`    | boolean | true if `text` is an error, not a real reply          |

@@ -71,7 +71,7 @@ async function callGeminiOnce(body: object): Promise<Attempt> {
 /**
  * POSTs one request to the Gemini proxy and normalizes the result to either
  * the reply text (plus the question's transcript) or an app-facing error
- * string. `body` is `{question, context, history}` — see api/gemini.ts.
+ * string. `body` is `{pages, history}` — see api/gemini.ts.
  *
  * A 503 (the model temporarily overloaded) is retried automatically, with an
  * increasing delay between attempts, entirely behind this promise — nothing

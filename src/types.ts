@@ -213,9 +213,11 @@ export interface AiConversationEntry {
   notebookId: string;
   /** the `AiChat` this turn belongs to */
   chatId: string;
-  /** the page the turn was captured from — only used to label the entry; the page itself is untouched */
+  /** the (first) page the turn was captured from — only used to label the entry; the page itself is untouched */
   pageId: string;
-  /** data: URL — a small JPEG of the question crop (entries from before chats existed hold the whole-page capture instead) */
+  /** every page a multi-page turn was captured from, in page order — label only; absent on single-page entries from before turns spanned pages */
+  pageIds?: string[];
+  /** data: URL — a small JPEG of the turn's question crops, stacked one per page (entries from before chats existed hold the whole-page capture instead) */
   thumbnail: string;
   /** Gemini's text rendering of the question (plus the page content it refers
    * to) — what stands in for this turn's images in later turns' history.
