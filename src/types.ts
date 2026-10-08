@@ -188,18 +188,40 @@ export interface BackupAsset extends Omit<PdfAsset, 'data'> {
 }
 
 /**
- * One resolved turn of an AI-mode conversation — the captured region (as a
- * thumbnail) and Gemini's cleaned-up reply, or an error in its place. Stored
- * per notebook, independent of any page's content; not part of the backup
+ * One of a notebook's AI-mode chats — a separate conversation whose turns
+ * (`AiConversationEntry.chatId`) are sent to Gemini as each other's history.
+ * Not part of the backup format, same as its entries.
+ */
+export interface AiChat {
+  id: string;
+  notebookId: string;
+  /** the first transcript, truncated; '' until a turn has one */
+  title: string;
+  createdAt: number;
+  /** bumped by every persisted turn — the switcher's order and the default chat */
+  updatedAt: number;
+}
+
+/**
+ * One resolved turn of an AI-mode conversation — the captured question (as a
+ * thumbnail), its transcript and Gemini's reply, or an error in its place.
+ * Stored per chat, independent of any page's content; not part of the backup
  * format (see DATA_FORMAT.md) since it's chat history, not page data.
  */
 export interface AiConversationEntry {
   id: string;
   notebookId: string;
+  /** the `AiChat` this turn belongs to */
+  chatId: string;
   /** the page the turn was captured from — only used to label the entry; the page itself is untouched */
   pageId: string;
-  /** data: URL of the captured region, reused as-is from what was sent to Gemini */
+  /** data: URL — a small JPEG of the question crop (entries from before chats existed hold the whole-page capture instead) */
   thumbnail: string;
+  /** Gemini's text rendering of the question (plus the page content it refers
+   * to) — what stands in for this turn's images in later turns' history.
+   * Absent on error turns and on entries from before chats existed, which are
+   * therefore never sent as history. */
+  transcript?: string;
   text: string;
   isError: boolean;
   createdAt: number;

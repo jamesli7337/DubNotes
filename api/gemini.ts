@@ -13,6 +13,14 @@
  * screenshot, which asked Gemini to reliably notice a colour distinction
  * rather than just being told which image was which.
  *
+ * Multi-turn: an optional `history` of earlier turns in the same chat arrives
+ * as plain text ({ role, text } — the user side is each earlier turn's
+ * transcript, the model side its answer) and goes ahead of the current image
+ * turn in `contents`. Images are only ever sent for the current turn. The
+ * reply is requested as JSON `{ transcript, answer }` (see RESPONSE_SCHEMA):
+ * the transcript is what the client stores to stand in for this turn's images
+ * in later turns' history.
+ *
  * This file lives outside `src/` and outside tsconfig's `include`, so
  * `npm run build`'s `tsc` step does not type-check it — Vercel's own build
  * (esbuild) transpiles it without a type-checking gate. The request/response
@@ -38,8 +46,41 @@ interface ApiResponse {
 const GEMINI_MODEL = 'gemini-3.6-flash';
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
 
+/** Server-side caps on `history`, a little above the client's own budget
+ * (ai-mode.ts's HISTORY_CHAR_BUDGET) so a well-behaved client is never
+ * trimmed here; oldest turn pairs are dropped first. */
+const MAX_HISTORY_ITEMS = 40;
+const MAX_HISTORY_CHARS = 32_000;
+
+/** Output cap per reply. The model's hard limit is 65,536, and on Gemini 3
+ * thinking tokens count against this too, so the default (or a tight cap)
+ * can run out mid-JSON. Half the hard limit leaves ample room for thinking
+ * plus a long answer while still bounding a runaway generation. */
+const MAX_OUTPUT_TOKENS = 32_768;
+
+/**
+ * `code` values on an error response for a reply Gemini itself stopped
+ * short — see finishReasonCode. The client maps each to its own message
+ * (gemini-client.ts's friendlyErrorText); none is worth retrying as-is.
+ */
+type ReplyErrorCode = 'too_long' | 'safety' | 'recitation';
+
+const RESPONSE_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    transcript: { type: 'STRING' },
+    answer: { type: 'STRING' },
+  },
+  required: ['transcript', 'answer'],
+  propertyOrdering: ['transcript', 'answer'],
+};
+
 const SYSTEM_INSTRUCTION =
-  'You will be given two images from a handwritten notebook page. The ' +
+  'Earlier turns of this conversation, if any, arrive as text only: each of ' +
+  "the user's earlier turns is a transcript of what they wrote, and each of " +
+  'your earlier turns is the answer you gave. Only the current (last) turn ' +
+  'has images, and its question may be a follow-up to those earlier turns. ' +
+  'For the current turn you will be given two images from a handwritten notebook page. The ' +
   "first is cropped to show ONLY the page author's actual question or " +
   "instruction to you — that crop is the one thing you must directly " +
   'answer. The second is a photo of the whole page, given purely as ' +
@@ -53,7 +94,12 @@ const SYSTEM_INSTRUCTION =
   'same page: a few sentences, or a short worked answer, not an essay. ' +
   'Use standard LaTeX for math ($...$ for inline, $$...$$ for a displayed ' +
   'equation, \\frac, \\sqrt, ^, _, etc.) and simple markdown for formatting ' +
-  "(**bold**, short bullet lists) — don't overuse either.";
+  "(**bold**, short bullet lists) — don't overuse either. " +
+  'Respond with JSON matching the schema: "transcript" is a concise text ' +
+  'rendering of the handwritten question in the first image, plus whatever ' +
+  'content from the page it refers to (e.g. the equation, list or diagram it ' +
+  'asks about), written so it could stand in for both images in a later turn ' +
+  '— use LaTeX for math; "answer" is your reply, following the rules above.';
 
 /** Every response carries this — the app is a static site on another origin. */
 function setCors(res: ApiResponse, origin: string | string[] | undefined): void {
@@ -92,13 +138,18 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
-  const body = req.body as { question?: unknown; context?: unknown } | null;
+  const body = req.body as { question?: unknown; context?: unknown; history?: unknown } | null;
   const question = parseImage(body?.question);
   const context = parseImage(body?.context);
   if (!question || !context) {
     res
       .status(400)
       .json({ error: 'Missing or invalid "question"/"context" image (each needs a base64 "image" string) in request body.' });
+    return;
+  }
+  const history = parseHistory(body?.history);
+  if (!history) {
+    res.status(400).json({ error: 'Invalid "history": expected alternating user/model { role, text } turns.' });
     return;
   }
 
@@ -109,7 +160,13 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: RESPONSE_SCHEMA,
+          maxOutputTokens: MAX_OUTPUT_TOKENS,
+        },
         contents: [
+          ...history.map((h) => ({ role: h.role, parts: [{ text: h.text }] })),
           {
             role: 'user',
             parts: [
@@ -145,13 +202,71 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
+  // checked before the text: a truncated reply is half a JSON object, and a
+  // blocked one may have no text at all — either would otherwise surface as
+  // the generic "unreadable"/"no text" error below
+  const code = finishReasonCode(data);
+  if (code) {
+    res.status(502).json({ error: `Reply stopped early (${code}).`, code });
+    return;
+  }
+
   const text = extractText(data);
   if (text == null) {
     res.status(502).json({ error: 'Received no response text.' });
     return;
   }
+  const reply = parseReply(text);
+  if (!reply) {
+    res.status(502).json({ error: 'Received an unreadable response.' });
+    return;
+  }
 
-  res.status(200).json({ text });
+  // `text` keeps its old name (the answer) so the client's success check is unchanged
+  res.status(200).json({ text: reply.answer, transcript: reply.transcript });
+}
+
+interface HistoryTurn {
+  role: 'user' | 'model';
+  text: string;
+}
+
+/**
+ * Validates `history` (absent → []): an array of { role, text } turns that
+ * alternates user/model, starting with user and ending with model, so the
+ * current image turn follows a model turn. Null if malformed. Over the caps,
+ * oldest user/model pairs are dropped (pairs, so alternation survives).
+ */
+function parseHistory(v: unknown): HistoryTurn[] | null {
+  if (v == null) return [];
+  if (!Array.isArray(v) || v.length % 2) return null;
+  const turns: HistoryTurn[] = [];
+  for (let i = 0; i < v.length; i++) {
+    const item = v[i] as { role?: unknown; text?: unknown } | null;
+    const role = i % 2 ? 'model' : 'user';
+    if (item?.role !== role || typeof item.text !== 'string' || !item.text.trim()) return null;
+    turns.push({ role, text: item.text });
+  }
+  let chars = turns.reduce((n, t) => n + t.text.length, 0);
+  while (turns.length && (turns.length > MAX_HISTORY_ITEMS || chars > MAX_HISTORY_CHARS)) {
+    const [u, m] = turns.splice(0, 2);
+    chars -= u.text.length + m.text.length;
+  }
+  return turns;
+}
+
+/** Parses the JSON reply requested via RESPONSE_SCHEMA; null if it isn't one. */
+function parseReply(text: string): { transcript: string; answer: string } | null {
+  let obj: { transcript?: unknown; answer?: unknown };
+  try {
+    obj = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  const answer = typeof obj?.answer === 'string' ? obj.answer.trim() : '';
+  if (!answer) return null;
+  const transcript = typeof obj.transcript === 'string' ? obj.transcript.trim() : '';
+  return { transcript, answer };
 }
 
 /** Validates one `{ image, mimeType }` field of the request body. */
@@ -161,6 +276,17 @@ function parseImage(v: unknown): { image: string; mimeType: string } | null {
   if (typeof image !== 'string' || !image) return null;
   const mimeType = typeof obj?.mimeType === 'string' ? obj.mimeType : 'image/png';
   return { image, mimeType };
+}
+
+/** Maps the first candidate's `finishReason` to a ReplyErrorCode, or null if it finished normally (or says nothing). */
+function finishReasonCode(data: unknown): ReplyErrorCode | null {
+  const candidates = (data as { candidates?: unknown })?.candidates;
+  if (!Array.isArray(candidates) || !candidates.length) return null;
+  const reason = (candidates[0] as { finishReason?: unknown })?.finishReason;
+  if (reason === 'MAX_TOKENS') return 'too_long';
+  if (reason === 'SAFETY') return 'safety';
+  if (reason === 'RECITATION') return 'recitation';
+  return null;
 }
 
 /** Pulls the reply text out of a generateContent response, defensively. */

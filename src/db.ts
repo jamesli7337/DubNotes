@@ -1,5 +1,7 @@
 import { AUTO_COLOR } from './canvas/freehand';
+import { uid } from './util';
 import type {
+  AiChat,
   AiConversationEntry,
   Backup,
   BackupAsset,
@@ -21,8 +23,11 @@ const DB_NAME = 'noteapp';
  * branched-AI-thread feature briefly used it for a now-unused index on
  * `aiConversations`) rather than reverted to 5 — downgrading a version
  * number a browser may have already upgraded past would throw a
- * `VersionError` on `indexedDB.open` and block the whole app from opening. */
-const DB_VERSION = 6;
+ * `VersionError` on `indexedDB.open` and block the whole app from opening.
+ * 7 added `aiChats` and a `chatId` index on `aiConversations`; its upgrade
+ * moves each notebook's existing entries into one "Earlier chat" (see
+ * migrateAiEntriesToChats). */
+const DB_VERSION = 7;
 
 /**
  * Logical data-format version, independent of the IndexedDB schema version.
@@ -61,7 +66,7 @@ const DB_VERSION = 6;
  *       anchor node each, plus cached endpoints and the bounding box the board's
  *       spatial index needs. Additive, same as 10.
  *
- * `aiConversations`'s own shape never bumps this: it's outside the backup
+ * `aiConversations`'s (and `aiChats`'s) own shape never bumps this: it's outside the backup
  * format entirely (see ALL_STORES), so nothing about it affects Backup's shape.
  */
 export const FORMAT_VERSION = 11;
@@ -180,7 +185,7 @@ function openDB(): Promise<IDBDatabase> {
   if (dbp) return dbp;
   dbp = new Promise((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (e) => {
       const db = req.result;
       if (!db.objectStoreNames.contains('notebooks')) {
         db.createObjectStore('notebooks', { keyPath: 'id' });
@@ -206,6 +211,12 @@ function openDB(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains('aiConversations')) {
         db.createObjectStore('aiConversations', { keyPath: 'id' }).createIndex('notebookId', 'notebookId');
       }
+      if (!db.objectStoreNames.contains('aiChats')) {
+        db.createObjectStore('aiChats', { keyPath: 'id' }).createIndex('notebookId', 'notebookId');
+      }
+      const aiEntries = req.transaction!.objectStore('aiConversations');
+      if (!aiEntries.indexNames.contains('chatId')) aiEntries.createIndex('chatId', 'chatId');
+      if (e.oldVersion < 7) migrateAiEntriesToChats(aiEntries, req.transaction!.objectStore('aiChats'));
       if (!db.objectStoreNames.contains('meta')) {
         db.createObjectStore('meta', { keyPath: 'key' });
       }
@@ -214,6 +225,42 @@ function openDB(): Promise<IDBDatabase> {
     req.onerror = () => reject(req.error);
   });
   return dbp;
+}
+
+/**
+ * The v7 upgrade: entries from before chats existed get one chat per notebook,
+ * titled "Earlier chat", spanning their own first/last `createdAt`. Runs inside
+ * the versionchange transaction, so it completes before the database opens.
+ * Idempotent — an entry that already has a `chatId` is left alone.
+ */
+function migrateAiEntriesToChats(entries: IDBObjectStore, chats: IDBObjectStore): void {
+  const byNotebook = new Map<string, AiChat>();
+  const cur = entries.openCursor();
+  cur.onsuccess = () => {
+    const c = cur.result;
+    if (!c) {
+      for (const chat of byNotebook.values()) chats.put(chat);
+      return;
+    }
+    const entry = c.value as Omit<AiConversationEntry, 'chatId'> & { chatId?: string };
+    if (!entry.chatId) {
+      let chat = byNotebook.get(entry.notebookId);
+      if (!chat) {
+        chat = {
+          id: uid(),
+          notebookId: entry.notebookId,
+          title: 'Earlier chat',
+          createdAt: entry.createdAt,
+          updatedAt: entry.createdAt,
+        };
+        byNotebook.set(entry.notebookId, chat);
+      }
+      chat.createdAt = Math.min(chat.createdAt, entry.createdAt);
+      chat.updatedAt = Math.max(chat.updatedAt, entry.createdAt);
+      c.update({ ...entry, chatId: chat.id });
+    }
+    c.continue();
+  };
 }
 
 function reqP<T>(r: IDBRequest<T>): Promise<T> {
@@ -333,32 +380,69 @@ export async function getAsset(id: string): Promise<PdfAsset | undefined> {
 }
 
 // ------------------------------------------------------------ AI conversation
-/** Writes one AI-mode chat entry immediately — same reasoning as putAsset: it carries an image, written once, not through the debounced autosave. */
-export async function putAiEntry(e: AiConversationEntry): Promise<void> {
+/** A notebook's AI-mode chats, most recently updated first. */
+export async function getAiChats(notebookId: string): Promise<AiChat[]> {
   const db = await openDB();
-  const t = db.transaction('aiConversations', 'readwrite');
-  t.objectStore('aiConversations').put(e);
+  const t = db.transaction('aiChats', 'readonly');
+  const rows = await reqP(
+    t.objectStore('aiChats').index('notebookId').getAll(IDBKeyRange.only(notebookId)) as IDBRequest<AiChat[]>
+  );
+  return rows.sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+/** Writes one chat record immediately (not through the debounced autosave). */
+export async function putAiChat(chat: AiChat): Promise<void> {
+  const db = await openDB();
+  const t = db.transaction('aiChats', 'readwrite');
+  t.objectStore('aiChats').put(chat);
   return txDone(t);
 }
 
-/** A notebook's AI-mode chat history, oldest first. */
-export async function getAiEntries(notebookId: string): Promise<AiConversationEntry[]> {
+/**
+ * Persists one resolved turn into its chat — but only if that chat still
+ * exists, checked in the same transaction, so a turn that resolves after its
+ * chat was deleted can't resurrect it. Bumps the chat's `updatedAt`, and gives
+ * an untitled chat `title`. Resolves to the updated chat, or null if the chat
+ * was gone and nothing was written.
+ */
+export async function putAiTurn(e: AiConversationEntry, title: string): Promise<AiChat | null> {
+  const db = await openDB();
+  const t = db.transaction(['aiChats', 'aiConversations'], 'readwrite');
+  const done = txDone(t);
+  const chats = t.objectStore('aiChats');
+  let saved: AiChat | null = null;
+  const get = chats.get(e.chatId) as IDBRequest<AiChat | undefined>;
+  get.onsuccess = () => {
+    const chat = get.result;
+    if (!chat) return;
+    saved = { ...chat, updatedAt: Math.max(chat.updatedAt, e.createdAt), title: chat.title || title };
+    chats.put(saved);
+    t.objectStore('aiConversations').put(e);
+  };
+  await done;
+  return saved;
+}
+
+/** One chat's entries, oldest first. */
+export async function getAiEntries(chatId: string): Promise<AiConversationEntry[]> {
   const db = await openDB();
   const t = db.transaction('aiConversations', 'readonly');
   const rows = await reqP(
-    t.objectStore('aiConversations').index('notebookId').getAll(IDBKeyRange.only(notebookId)) as IDBRequest<
+    t.objectStore('aiConversations').index('chatId').getAll(IDBKeyRange.only(chatId)) as IDBRequest<
       AiConversationEntry[]
     >
   );
   return rows.sort((a, b) => a.createdAt - b.createdAt);
 }
 
-/** Clears one notebook's AI-mode chat history ("clear conversation" in the panel). */
-export async function clearAiEntries(notebookId: string): Promise<void> {
+/** Deletes one chat and all its entries ("Delete chat" in the panel). */
+export async function deleteAiChat(chatId: string): Promise<void> {
   const db = await openDB();
-  const t = db.transaction('aiConversations', 'readwrite');
-  await deleteByIndex(t.objectStore('aiConversations'), 'notebookId', notebookId);
-  return txDone(t);
+  const t = db.transaction(['aiChats', 'aiConversations'], 'readwrite');
+  const done = txDone(t);
+  t.objectStore('aiChats').delete(chatId);
+  void deleteByIndex(t.objectStore('aiConversations'), 'chatId', chatId); // no same-key put follows; txDone awaits it
+  return done;
 }
 
 function bytesToBase64(buf: ArrayBuffer): string {
@@ -517,9 +601,9 @@ export async function deleteNotebookCascade(notebookId: string): Promise<void> {
     cur.onerror = () => rej(cur.error);
   });
 
-  // aiConversations is deliberately not in ALL_STORES (kept out of backups/import-clear),
-  // so it's added explicitly here — a deleted notebook must still take its chat history with it.
-  const t = db.transaction([...ALL_STORES, 'aiConversations'], 'readwrite');
+  // aiConversations/aiChats are deliberately not in ALL_STORES (kept out of backups/import-clear),
+  // so they're added explicitly here — a deleted notebook must still take its chat history with it.
+  const t = db.transaction([...ALL_STORES, 'aiConversations', 'aiChats'], 'readwrite');
   t.objectStore('notebooks').delete(notebookId);
   const pages = t.objectStore('pages');
   const strokes = t.objectStore('strokes');
@@ -532,6 +616,7 @@ export async function deleteNotebookCascade(notebookId: string): Promise<void> {
   }
   void deleteByIndex(t.objectStore('assets'), 'notebookId', notebookId);
   void deleteByIndex(t.objectStore('aiConversations'), 'notebookId', notebookId);
+  void deleteByIndex(t.objectStore('aiChats'), 'notebookId', notebookId);
   return txDone(t);
 }
 

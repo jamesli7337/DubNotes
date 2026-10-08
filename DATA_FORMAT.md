@@ -1,15 +1,16 @@
 # DubNotes data format
 
 All data lives on-device in IndexedDB database **`noteapp`**, currently at
-**schema version `6`**: object stores `notebooks`, `pages`, `strokes`,
-`elements`, `folders`, `dividers`, `assets`, `aiConversations`, `meta` (schema
-`4` added `assets`; `5` added `aiConversations`; `6` was a since-removed
-branched-AI-thread feature's index on `aiConversations` — kept at 6 rather
-than reverted, since downgrading a version number a browser may have already
-upgraded past would break it from opening at all). The logical **format
+**schema version `7`**: object stores `notebooks`, `pages`, `strokes`,
+`elements`, `folders`, `dividers`, `assets`, `aiConversations`, `aiChats`,
+`meta` (schema `4` added `assets`; `5` added `aiConversations`; `6` was a
+since-removed branched-AI-thread feature's index on `aiConversations` — kept
+rather than reverted, since downgrading a version number a browser may have
+already upgraded past would break it from opening at all; `7` added `aiChats`
+and a `chatId` index on `aiConversations`). The logical **format
 version** is tracked separately as `FORMAT_VERSION` in
 [`src/db.ts`](src/db.ts) and is currently **`11`** — see "AI conversation"
-below for why `aiConversations` doesn't bump it.
+below for why `aiConversations`/`aiChats` don't bump it.
 
 A notebook is one of two shapes: the original **paged** notebook, or a
 **board** — one unbounded canvas whose `Page` records are storage chunks the
@@ -165,28 +166,49 @@ Stored in the `assets` object store, keyed by `id`, with an index on
 when a page needs rendering. Backups carry each asset once, base64-encoded, so
 a 100-page PDF costs its own file size rather than one image per page.
 
-### AI conversation (schema v5)
+### AI conversation (schema v7)
+
+A notebook has any number of AI chats; each turn belongs to one.
+
+**Chat** (`aiChats` store, keyed by `id`, index on `notebookId`):
 
 | field        | type    | notes                                                |
 | ------------ | ------- | ----------------------------------------------------- |
 | `id`         | string  | uuid                                                  |
 | `notebookId` | string  | owning notebook; deleted with it                      |
+| `title`      | string  | the chat's first transcript, truncated; `''` until it has one |
+| `createdAt`  | number  | epoch ms                                              |
+| `updatedAt`  | number  | epoch ms; bumped per saved turn — the switcher's order |
+
+**Turn** (`aiConversations` store, keyed by `id`, indexes on `notebookId` and `chatId`):
+
+| field        | type    | notes                                                |
+| ------------ | ------- | ----------------------------------------------------- |
+| `id`         | string  | uuid                                                  |
+| `notebookId` | string  | owning notebook; deleted with it                      |
+| `chatId`     | string  | owning chat; deleted with it                          |
 | `pageId`     | string  | the page the turn was captured from — label only, the page's own content is untouched |
-| `thumbnail`  | string  | `data:` URL of the captured region, reused from what was sent to Gemini |
-| `text`       | string  | Gemini's reply, cleaned of Markdown (or an error message) |
+| `thumbnail`  | string  | `data:` URL — a small JPEG of the question crop (pre-v7 entries: the whole-page capture) |
+| `transcript` | string? | Gemini's text rendering of the question; absent on errors and pre-v7 entries |
+| `text`       | string  | Gemini's reply (or an error message)                  |
 | `isError`    | boolean | true if `text` is an error, not a real reply          |
 | `createdAt`  | number  | epoch ms; also the panel's display order              |
 
-Stored in the `aiConversations` object store, keyed by `id`, with an index on
-`notebookId`; read/written directly by `src/ai-mode.ts` (`putAiEntry` /
-`getAiEntries` / `clearAiEntries` in `src/db.ts`), not through the `Store`
-class other data goes through. **Deliberately excluded from `ALL_STORES`**,
-so it is untouched by backup export/import (`Backup` has no
-`aiConversations` field) — it's chat history, not notebook content, and
-importing a backup should not silently wipe every notebook's AI
-conversations. It's still deleted along with its notebook
-(`deleteNotebookCascade`), and clearable per notebook from the AI panel
-("Clear conversation").
+Later turns in a chat send its earlier turns as text-only history (each
+turn's `transcript` + `text`); a turn without a transcript is never sent. The
+v7 upgrade put each notebook's existing turns into one chat titled "Earlier
+chat". Which chat is open is remembered per notebook in `localStorage`
+(`noteapp.aichat.<notebookId>`), not here.
+
+Both stores are read/written directly by `src/ai-mode.ts` (`getAiChats` /
+`putAiChat` / `putAiTurn` / `getAiEntries` / `deleteAiChat` in `src/db.ts`),
+not through the `Store` class other data goes through. **Deliberately
+excluded from `ALL_STORES`**, so they're untouched by backup export/import
+(`Backup` has no field for either) — it's chat history, not notebook content,
+and importing a backup should not silently wipe every notebook's AI
+conversations. Still deleted along with their notebook
+(`deleteNotebookCascade`); a single chat is deleted from the AI panel
+("Delete chat").
 
 **Trailing-blank invariant:** every **paged** notebook always ends with exactly
 one blank page (a page with no strokes). The app appends or removes trailing

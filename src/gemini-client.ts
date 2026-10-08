@@ -10,6 +10,8 @@ const PROXY_SECRET = import.meta.env.VITE_GEMINI_PROXY_SECRET ?? '';
 /** One request's outcome, plus (only on failure) whether it's worth a silent retry — see callGemini. */
 interface Attempt {
   text: string;
+  /** the question's transcript from a successful reply ('' otherwise) — see api/gemini.ts */
+  transcript: string;
   isError: boolean;
   retryable: boolean;
 }
@@ -19,10 +21,14 @@ interface Attempt {
  * again) rather than hammering an already-overloaded endpoint. */
 const RETRY_DELAYS_MS = [1000, 3000, 8000];
 
-/** Turns a failed response's status into a plain-language message — the raw
+/** Turns a failed response's status (or, for a reply Gemini stopped short,
+ * api/gemini.ts's `code`) into a plain-language message — the raw
  * status/reason is logged to the console (see callers) for debugging, but
  * never shown in the UI. */
-function friendlyErrorText(status: number): string {
+function friendlyErrorText(status: number, code?: unknown): string {
+  if (code === 'too_long') return 'Answer was too long and got cut off. Ask for a shorter or step-by-step answer.';
+  if (code === 'safety') return 'The AI declined to answer this for safety reasons. Try rewording the question.';
+  if (code === 'recitation') return 'The AI stopped because its answer was too close to existing published text. Try rewording the question.';
   if (status === 503) return 'The AI is overloaded right now, try again in a bit.';
   if (status === 404) return "The AI service isn't set up correctly right now.";
   if (status === 401 || status === 403) return "The AI isn't configured correctly, this needs a fix on my end, not yours.";
@@ -36,17 +42,26 @@ async function callGeminiOnce(body: object): Promise<Attempt> {
       headers: { 'Content-Type': 'application/json', 'X-NoteApp-Secret': PROXY_SECRET },
       body: JSON.stringify(body),
     });
-    const data: { text?: unknown; error?: unknown } | null = await res.json().catch(() => null);
+    const data: { text?: unknown; transcript?: unknown; error?: unknown; code?: unknown } | null = await res
+      .json()
+      .catch(() => null);
     if (res.ok && typeof data?.text === 'string' && data.text) {
-      return { text: data.text, isError: false, retryable: false };
+      const transcript = typeof data.transcript === 'string' ? data.transcript : '';
+      return { text: data.text, transcript, isError: false, retryable: false };
     }
     const reason = typeof data?.error === 'string' ? data.error : `request failed (${res.status})`;
     console.error(`Gemini request failed: ${reason}`);
-    return { text: `DubNotes AI error: ${friendlyErrorText(res.status)}`, isError: true, retryable: res.status === 503 };
+    return {
+      text: `DubNotes AI error: ${friendlyErrorText(res.status, data?.code)}`,
+      transcript: '',
+      isError: true,
+      retryable: res.status === 503,
+    };
   } catch (err) {
     console.error('Gemini request network error:', err);
     return {
       text: "DubNotes AI error: Couldn't reach the AI, check your internet connection.",
+      transcript: '',
       isError: true,
       retryable: false,
     };
@@ -55,8 +70,8 @@ async function callGeminiOnce(body: object): Promise<Attempt> {
 
 /**
  * POSTs one request to the Gemini proxy and normalizes the result to either
- * the reply text or an app-facing error string. `body` is `{question, context}`
- * — see api/gemini.ts.
+ * the reply text (plus the question's transcript) or an app-facing error
+ * string. `body` is `{question, context, history}` — see api/gemini.ts.
  *
  * A 503 (the model temporarily overloaded) is retried automatically, with an
  * increasing delay between attempts, entirely behind this promise — nothing
@@ -64,11 +79,11 @@ async function callGeminiOnce(body: object): Promise<Attempt> {
  * eventually succeeds resolves exactly as if the first attempt had. Every
  * other failure (network error, 4xx, 500, etc.) still returns immediately.
  */
-export async function callGemini(body: object): Promise<{ text: string; isError: boolean }> {
+export async function callGemini(body: object): Promise<{ text: string; transcript: string; isError: boolean }> {
   let attempt = await callGeminiOnce(body);
   for (let i = 0; attempt.retryable && i < RETRY_DELAYS_MS.length; i++) {
     await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[i]));
     attempt = await callGeminiOnce(body);
   }
-  return { text: attempt.text, isError: attempt.isError };
+  return { text: attempt.text, transcript: attempt.transcript, isError: attempt.isError };
 }

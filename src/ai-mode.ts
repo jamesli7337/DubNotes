@@ -19,22 +19,96 @@
  * renders in a single slide-out chat panel (`mountPanel`/`renderConversation`)
  * rather than as page content, so the conversation reads the same regardless
  * of which page you're looking at or scroll to.
+ *
+ * A notebook has any number of separate chats (`AiChat`), one active at a
+ * time, picked in the panel. Each turn is sent with the active chat's earlier
+ * turns as text-only history (each turn's transcript + answer, never its
+ * images — see buildHistory and api/gemini.ts).
  */
 import { el } from './ui/dom';
 import { icon } from './ui/icon';
 import { confirmDialog } from './ui/dialog';
 import { renderItemsImage, renderPageRegionImage } from './export/raster';
 import { store } from './store';
-import { clearAiEntries, getAiEntries, putAiEntry } from './db';
+import { deleteAiChat, getAiChats, getAiEntries, putAiChat, putAiTurn } from './db';
 import { renderAiReply } from './ai-render';
 import { callGemini } from './gemini-client';
 import type { Op } from './canvas/page-canvas';
-import type { AiConversationEntry, Page } from './types';
+import type { AiChat, AiConversationEntry, Page } from './types';
 import { uid } from './util';
 
 /** The one AI accent colour — the page border and in-progress ink both use
  * exactly this, so "AI mode" reads as one consistent identity. */
 export const AI_COLOR = '#6d28d9';
+
+/** Character budget for the history sent with a turn — newest turns kept,
+ * oldest dropped first (api/gemini.ts enforces its own, slightly higher cap). */
+const HISTORY_CHAR_BUDGET = 24_000;
+/** Longest side of a stored question thumbnail, in CSS pixels. */
+const THUMB_MAX = 320;
+const TITLE_MAX = 40;
+/** localStorage key prefix for each notebook's active chat id. */
+const ACTIVE_CHAT_PREFIX = 'noteapp.aichat.';
+
+function readActiveChat(notebookId: string): string | null {
+  try {
+    return localStorage.getItem(ACTIVE_CHAT_PREFIX + notebookId);
+  } catch {
+    return null;
+  }
+}
+
+function writeActiveChat(notebookId: string, chatId: string | null): void {
+  try {
+    if (chatId) localStorage.setItem(ACTIVE_CHAT_PREFIX + notebookId, chatId);
+    else localStorage.removeItem(ACTIVE_CHAT_PREFIX + notebookId);
+  } catch {
+    // storage unavailable — the chat just isn't remembered
+  }
+}
+
+/** A chat's title from its first transcript: whitespace collapsed, truncated. */
+function titleFrom(transcript: string): string {
+  const t = transcript.replace(/\s+/g, ' ').trim();
+  return t.length > TITLE_MAX ? t.slice(0, TITLE_MAX - 1).trimEnd() + '…' : t;
+}
+
+/**
+ * Earlier turns as text-only history: each resolved, non-error turn with a
+ * transcript becomes a user (transcript) + model (answer) pair. Pairs are
+ * kept newest-first until HISTORY_CHAR_BUDGET runs out, so the oldest are
+ * dropped first. Entries without a transcript (errors, pre-chat entries) are
+ * skipped.
+ */
+function buildHistory(entries: AiConversationEntry[]): { role: 'user' | 'model'; text: string }[] {
+  const out: { role: 'user' | 'model'; text: string }[] = [];
+  let used = 0;
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const { transcript, text, isError } = entries[i];
+    if (isError || !transcript?.trim() || !text.trim()) continue;
+    used += transcript.length + text.length;
+    if (used > HISTORY_CHAR_BUDGET) break;
+    out.unshift({ role: 'user', text: transcript }, { role: 'model', text });
+  }
+  return out;
+}
+
+/** Downscales the question crop to a small JPEG data URL for the panel and storage. */
+async function questionThumbnail(img: { base64: string; mimeType: string }): Promise<string> {
+  const src = new Image();
+  src.src = `data:${img.mimeType};base64,${img.base64}`;
+  await src.decode();
+  const k = Math.min(1, THUMB_MAX / Math.max(src.naturalWidth, src.naturalHeight, 1));
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(src.naturalWidth * k));
+  c.height = Math.max(1, Math.round(src.naturalHeight * k));
+  const ctx = c.getContext('2d');
+  if (!ctx) return '';
+  ctx.fillStyle = '#ffffff';
+  ctx.fillRect(0, 0, c.width, c.height);
+  ctx.drawImage(src, 0, 0, c.width, c.height);
+  return c.toDataURL('image/jpeg', 0.8);
+}
 
 /** One turn's worth of conversation, shown in the panel. The persisted shape
  * (`AiConversationEntry`) plus a transient in-memory-only flag — an entry is
@@ -82,9 +156,23 @@ export class AiMode {
   /** Which page a send in flight is for, so only that page's status shows "thinking". */
   private sendingPageId: string | null = null;
   private readonly pages = new Map<string, AiPageState>();
+  /** this notebook's chats, most recently updated first */
+  private chats: AiChat[] = [];
+  /** null = an unsaved "New chat" draft: nothing is persisted until its first Send creates it */
+  private activeChatId: string | null = null;
+  /** the active chat's persisted entries, oldest first */
   private conversation: ConversationEntry[] = [];
+  /** turns not yet persisted — in flight, or resolved and being written. Each
+   * is bound to its own chat at send, and shown only while that chat is active. */
+  private readonly unsaved = new Set<ConversationEntry>();
+  /** bumped per chat switch, so a slower earlier load can't overwrite a newer one */
+  private loadToken = 0;
+  /** a storage failure to show at the bottom of the panel ('' = none) */
+  private panelError = '';
   private panelEl: HTMLElement | null = null;
   private panelBody: HTMLElement | null = null;
+  private chatSelect: HTMLSelectElement | null = null;
+  private deleteChatBtn: HTMLButtonElement | null = null;
   private panelOpen = false;
   /** the notebook chrome root (`.nb`) — gets `.ai-panel-open` toggled on it so
    * the scroll area can shift out from under the panel; see setPanelOpen. */
@@ -95,11 +183,34 @@ export class AiMode {
     private readonly host: AiModeHost
   ) {}
 
-  /** Loads this notebook's persisted chat history, then repaints the panel if it's already mounted. */
+  /** Loads this notebook's chats and opens the remembered one (else the most recently updated), then repaints the panel if it's already mounted. */
   async loadConversation(): Promise<void> {
-    const rows = await getAiEntries(this.notebookId);
+    this.chats = await getAiChats(this.notebookId);
+    const saved = readActiveChat(this.notebookId);
+    await this.setActiveChat(this.chats.some((c) => c.id === saved) ? saved : (this.chats[0]?.id ?? null));
+  }
+
+  /** Switches the panel to `chatId` (null = a new, unsaved draft) and loads its entries. */
+  private async setActiveChat(chatId: string | null): Promise<void> {
+    this.activeChatId = chatId;
+    this.panelError = '';
+    writeActiveChat(this.notebookId, chatId);
+    const token = ++this.loadToken;
+    this.conversation = [];
+    this.renderChats();
+    this.renderConversation();
+    if (!chatId) return;
+    const rows = await getAiEntries(chatId);
+    if (token !== this.loadToken) return;
     this.conversation = rows.map((r) => ({ ...r, pending: false }));
     this.renderConversation();
+  }
+
+  /** The active chat's entries as shown: persisted ones plus its own unsaved turns, oldest first. */
+  private visibleEntries(): ConversationEntry[] {
+    const ids = new Set(this.conversation.map((e) => e.id));
+    const extra = [...this.unsaved].filter((e) => e.chatId === this.activeChatId && !ids.has(e.id));
+    return [...this.conversation, ...extra].sort((a, b) => a.createdAt - b.createdAt);
   }
 
   /**
@@ -130,24 +241,47 @@ export class AiMode {
     header.append(el('span', { class: 'ai-panel__title', text: 'DubNotes AI' }));
 
     const actions = el('div', { class: 'ai-panel__header-actions' });
-    const clearBtn = el('button', { class: 'iconbtn', title: 'Clear conversation', 'aria-label': 'Clear conversation' });
-    clearBtn.append(icon('delete'));
-    clearBtn.addEventListener('click', () => void this.clearConversation());
+    const newBtn = el('button', { class: 'iconbtn', title: 'New chat', 'aria-label': 'New chat' });
+    newBtn.append(icon('plus'));
+    newBtn.addEventListener('click', () => {
+      if (this.activeChatId !== null) void this.setActiveChat(null);
+    });
+    const deleteBtn = el('button', { class: 'iconbtn', title: 'Delete chat', 'aria-label': 'Delete chat' });
+    deleteBtn.append(icon('delete'));
+    deleteBtn.addEventListener('click', () => void this.deleteActiveChat());
     const closeBtn = el('button', { class: 'iconbtn', title: 'Close', 'aria-label': 'Close AI panel' });
     closeBtn.append(icon('close'));
     closeBtn.addEventListener('click', () => this.closeAll());
-    actions.append(clearBtn, closeBtn);
+    actions.append(newBtn, deleteBtn, closeBtn);
     header.append(actions);
+
+    const select = el('select', { class: 'ai-panel__chat-select', 'aria-label': 'Chat' });
+    select.addEventListener('change', () => void this.setActiveChat(select.value || null));
+    const chatBar = el('div', { class: 'ai-panel__chats' }, select);
 
     const body = el('div', { class: 'ai-panel__body' });
     this.bindSwipeThrough(body);
 
-    panel.append(header, body);
+    panel.append(header, chatBar, body);
     container.append(panel);
     this.panelEl = panel;
     this.panelBody = body;
+    this.chatSelect = select;
+    this.deleteChatBtn = deleteBtn;
     this.hostEl = container;
+    this.renderChats();
     this.renderConversation();
+  }
+
+  /** Rebuilds the chat switcher's options and the delete button's enabled state. */
+  private renderChats(): void {
+    const select = this.chatSelect;
+    if (!select) return;
+    select.replaceChildren();
+    if (this.activeChatId === null) select.append(el('option', { value: '', text: 'New chat' }));
+    for (const chat of this.chats) select.append(el('option', { value: chat.id, text: chat.title || 'New chat' }));
+    select.value = this.activeChatId ?? '';
+    if (this.deleteChatBtn) this.deleteChatBtn.disabled = this.activeChatId === null;
   }
 
   /**
@@ -212,19 +346,28 @@ export class AiMode {
     body.addEventListener('touchcancel', end);
   }
 
-  /** Confirms, then permanently deletes this notebook's whole chat history. */
-  private async clearConversation(): Promise<void> {
-    if (!this.conversation.length) return;
+  /** Confirms, then permanently deletes the active chat and its entries; switches to the most recently updated remaining chat (or a new draft). */
+  private async deleteActiveChat(): Promise<void> {
+    const chatId = this.activeChatId;
+    if (!chatId) return;
     const ok = await confirmDialog({
-      title: 'Clear conversation?',
-      message: 'Deletes this notebook’s AI chat history. The pages themselves are not affected. This can’t be undone.',
-      confirmText: 'Clear',
+      title: 'Delete chat?',
+      message: 'Deletes this AI chat. The pages themselves are not affected. This can’t be undone.',
+      confirmText: 'Delete',
       danger: true,
     });
     if (!ok) return;
-    this.conversation = [];
-    await clearAiEntries(this.notebookId);
-    this.renderConversation();
+    try {
+      await deleteAiChat(chatId);
+    } catch (err) {
+      console.error('AI chat delete failed:', err);
+      this.panelError = 'Couldn’t delete this chat.';
+      this.renderConversation();
+      return;
+    }
+    this.chats = this.chats.filter((c) => c.id !== chatId);
+    if (this.activeChatId === chatId) await this.setActiveChat(this.chats[0]?.id ?? null);
+    else this.renderChats();
   }
 
   /** Removes the panel from the DOM (called when the notebook view is torn down). */
@@ -233,6 +376,8 @@ export class AiMode {
     this.hostEl?.classList.remove('ai-panel-open');
     this.panelEl = null;
     this.panelBody = null;
+    this.chatSelect = null;
+    this.deleteChatBtn = null;
     this.hostEl = null;
   }
 
@@ -475,12 +620,34 @@ export class AiMode {
     this.sending = true;
     this.sendingPageId = pageId;
     this.applyVisual(pageId);
+    this.panelError = '';
+
+    // bind this turn to its chat now: a draft becomes a real chat on its first
+    // Send. Written ahead of the turn (IndexedDB runs readwrite transactions
+    // on the same store in order), so putAiTurn below finds it.
+    let chatId = this.activeChatId;
+    if (!chatId) {
+      const now = Date.now();
+      const chat: AiChat = { id: uid(), notebookId: this.notebookId, title: '', createdAt: now, updatedAt: now };
+      chatId = chat.id;
+      this.chats.unshift(chat);
+      this.activeChatId = chatId;
+      writeActiveChat(this.notebookId, chatId);
+      this.renderChats();
+      putAiChat(chat).catch((err) => {
+        console.error('AI chat save failed:', err);
+        this.showSaveError();
+      });
+    }
+    // history is this chat as it stands before this turn joins it
+    const history = buildHistory(this.visibleEntries().filter((e) => !e.pending));
 
     // a placeholder entry shows immediately — opening the panel is how a
     // sent turn becomes visible at all now that nothing lands on the page.
     const entry: ConversationEntry = {
       id: uid(),
       notebookId: this.notebookId,
+      chatId,
       pageId,
       thumbnail: '',
       text: '',
@@ -488,11 +655,12 @@ export class AiMode {
       createdAt: Date.now(),
       pending: true,
     };
-    this.conversation.push(entry);
+    this.unsaved.add(entry);
     this.openPanel();
     this.renderConversation();
 
     let text: string;
+    let transcript = '';
     let isError = false;
     let thumbnail = '';
     try {
@@ -506,7 +674,10 @@ export class AiMode {
       // page to render.
       const question = await renderItemsImage(page, st.inkIds);
       const context = await renderPageRegionImage(page);
-      thumbnail = `data:${context.mimeType};base64,${context.base64}`;
+      thumbnail = await questionThumbnail(question).catch((err) => {
+        console.error('AI thumbnail failed:', err);
+        return '';
+      });
 
       // both images are captured — this ink's job is done. Discard it (only
       // items we ourselves marked ephemeral; never touches pre-existing
@@ -523,9 +694,10 @@ export class AiMode {
         this.host.onAiHistoryChanged(pageId);
       }
 
-      ({ text, isError } = await callGemini({
+      ({ text, transcript, isError } = await callGemini({
         question: { image: question.base64, mimeType: question.mimeType },
         context: { image: context.base64, mimeType: context.mimeType },
+        history,
       }));
     } catch (err) {
       console.error('AI mode send failed:', err);
@@ -541,25 +713,62 @@ export class AiMode {
     entry.text = text;
     entry.isError = isError;
     entry.thumbnail = thumbnail;
+    if (!isError && transcript) entry.transcript = transcript;
     this.renderConversation();
-    // written once, resolved — never while pending (see ConversationEntry's doc
-    // comment); `pending` itself is transient UI state, left out of storage.
+    void this.persistTurn(entry);
+  }
+
+  /**
+   * Writes a resolved turn to its own chat — skipped by putAiTurn if that chat
+   * was deleted meanwhile. Joins the visible list only if its chat is still
+   * the active one; otherwise it simply shows up when that chat is next opened.
+   */
+  private async persistTurn(entry: ConversationEntry): Promise<void> {
+    // `pending` is transient UI state, left out of storage
     const { pending: _pending, ...persisted } = entry;
-    void putAiEntry(persisted);
+    let saved: AiChat | null = null;
+    let failed = false;
+    try {
+      saved = await putAiTurn(persisted, entry.transcript ? titleFrom(entry.transcript) : '');
+    } catch (err) {
+      console.error('AI turn save failed:', err);
+      failed = true;
+    }
+    // no chat to write into, though it was never deleted here: its own
+    // creation failed (putAiChat), which is a failed save, not a discard
+    if (!saved && this.chats.some((c) => c.id === entry.chatId)) failed = true;
+    this.unsaved.delete(entry);
+    if (saved) {
+      const chat = saved;
+      this.chats = [chat, ...this.chats.filter((c) => c.id !== chat.id)].sort((a, b) => b.updatedAt - a.updatedAt);
+      this.renderChats();
+    }
+    // a failed write still keeps the reply on screen for this session (it
+    // won't survive a reload — the error says so)
+    if ((saved || failed) && entry.chatId === this.activeChatId && !this.conversation.some((e) => e.id === entry.id)) {
+      this.conversation.push(entry);
+    }
+    if (failed) this.showSaveError();
+    else this.renderConversation();
+  }
+
+  private showSaveError(): void {
+    this.panelError = 'Couldn’t save this reply on this device — it won’t be here after a reload.';
+    this.renderConversation();
   }
 
   private renderConversation(): void {
     const body = this.panelBody;
     if (!body) return;
     body.replaceChildren();
-    for (const entry of this.conversation) {
+    for (const entry of this.visibleEntries()) {
       const row = el('div', { class: 'ai-panel__entry' });
       // live lookup, not a stored snapshot — stays right if pages are reordered
       // later; falls back gracefully if the page itself was since deleted.
       const page = store.pageById(entry.pageId);
       row.append(el('span', { class: 'ai-panel__page', text: page ? `Page ${page.index + 1}` : 'Page removed' }));
       if (entry.thumbnail) {
-        row.append(el('img', { class: 'ai-panel__thumb', src: entry.thumbnail, alt: 'Captured handwriting' }));
+        row.append(el('img', { class: 'ai-panel__thumb', src: entry.thumbnail, alt: 'Your question' }));
       }
       const cls =
         'ai-panel__reply' + (entry.isError ? ' ai-panel__reply--error' : '') + (entry.pending ? ' ai-panel__reply--pending' : '');
@@ -570,6 +779,7 @@ export class AiMode {
       row.append(replyEl);
       body.append(row);
     }
+    if (this.panelError) body.append(el('div', { class: 'ai-panel__reply ai-panel__reply--error', text: this.panelError }));
     body.scrollTop = body.scrollHeight;
   }
 }
