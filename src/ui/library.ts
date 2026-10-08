@@ -576,10 +576,6 @@ function buildFeatured(nb: Notebook): HTMLElement {
 function buildCard(nb: Notebook, root: HTMLElement, folder: Folder | null): HTMLElement {
   const card = el('div', { class: 'nb-card' });
   card.dataset.notebookId = nb.id;
-  const accent = el('div', { class: `nb-card__accent nb-card__accent--${firstTemplate(nb)}` });
-  if (nb.cover) accent.style.background = nb.cover.color; // the cover colour wins over the template accent
-  card.append(accent);
-
   const thumb = el('div', { class: 'nb-card__thumb' + (nb.cover ? ' has-cover' : '') });
   if (nb.cover) thumb.style.background = coverBackground(nb.cover);
   lazyThumb(thumb, nb);

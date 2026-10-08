@@ -746,10 +746,6 @@ select {
 .nb-items--grid .nb-card:hover {
   box-shadow: var(--sh-2);
 }
-.nb-items--grid .nb-card__accent {
-  border-radius: 0;
-  z-index: 2;
-}
 /* the page preview becomes the tile's cover, full-bleed */
 .nb-items--grid .nb-card__thumb {
   width: 100%;
@@ -823,27 +819,6 @@ select {
   border-color: color-mix(in srgb, var(--lib-accent) 30%, var(--lib-border));
   box-shadow: var(--sh-1);
 }
-.nb-card__accent {
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 4px;
-  border-radius: var(--r) 0 0 var(--r);
-}
-.nb-card__accent--blank {
-  background: var(--lib-text-faint);
-}
-.nb-card__accent--ruled {
-  background: #38bdf8;
-}
-.nb-card__accent--grid {
-  background: #fbbf24;
-}
-.nb-card__accent--dot {
-  background: #a78bfa;
-}
-
 .nb-card__thumb {
   width: 72px;
   height: 92px;
