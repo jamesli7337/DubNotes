@@ -3280,6 +3280,12 @@ select {
   -webkit-user-select: none;
   user-select: none;
   pointer-events: none; /* the stage owns every gesture; nothing here is a drop/drag target */
+  transition: opacity var(--ai-fade-ms, 150ms) ease;
+}
+/* AI mode's fade (see NotebookView.animateAiFade): the reference pages fade
+   toward their page box's own paper background, same as the main pages */
+.nb-split.ai-fade .pane__canvas {
+  opacity: var(--ai-fade-opacity);
 }
 
 /* resize grip, floating only: a corner triangle in the bottom-right */

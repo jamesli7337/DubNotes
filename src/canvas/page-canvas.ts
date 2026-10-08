@@ -114,6 +114,8 @@ export type Op =
 export interface PageHooks extends SurfaceHooks {
   /** Whether this item is part of the current AI turn's ephemeral ink on this page — only consulted while AI mode is active, to confine the eraser to it (see `erasable`). */
   isAiInk: (itemId: string) => boolean;
+  /** Opacity the page's non-AI content (paper, background, items) is shown at — below 1 only while AI mode fades it (see blit). Display only. */
+  contentOpacity: () => number;
   /** A cross-page drag (see endTransform) just changed another page's items directly in the store — repaint that page's own PageCanvas if it's mounted (a no-op otherwise; it'll read the fresh store on its next mount). */
   refreshPage: (pageId: string) => void;
   /**
@@ -245,6 +247,13 @@ export class PageCanvas implements ItemSurface {
   private cache: HTMLCanvasElement | null = null;
   private vctx: CanvasRenderingContext2D | null = null;
   private cctx: CanvasRenderingContext2D | null = null;
+  /**
+   * AI ink this canvas committed itself while AI mode was on. `hooks.isAiInk`
+   * only learns of a new item from the `onOp` raised *after* the commit's own
+   * rebuild, so without this the rebuild would bake it into the faded cache.
+   * Cleared once AI mode is off (see isAiItem).
+   */
+  private readonly aiCommitted = new Set<string>();
   /** The shared, notebook-level camera { x, y, zoom } — see geom.ts's own doc comment. A stable object reference NotebookView mutates in place; PageCanvas never writes to it, only reads. */
   private readonly camera: Camera;
   /**
@@ -580,6 +589,7 @@ export class PageCanvas implements ItemSurface {
     }
     for (const it of store.itemsOf(this.page.id)) {
       if (hidden?.has(it.id)) continue;
+      if (this.isAiItem(it.id)) continue; // painted over the faded cache instead — see blit
       this.paintItem(c, it, pending?.has(it.id) ? PENDING_OPACITY : 1);
     }
     this.blit();
@@ -608,12 +618,41 @@ export class PageCanvas implements ItemSurface {
     else drawElement(ctx, it, this.page.paper, opacity, () => this.rebuild(this.lastDim), this.peeled);
   }
 
+  /**
+   * The cache onto the view — at `contentOpacity` (AI mode's fade; 1
+   * otherwise, i.e. exactly as before), with the current AI turn's ink, which
+   * the cache leaves out while AI mode is on, painted over it at full opacity.
+   * The fade lives only here: nothing in the store or the cache changes.
+   */
   private blit(): void {
     const v = this.vctx;
     if (!v || !this.view || !this.cache) return;
     v.setTransform(1, 0, 0, 1, 0, 0);
     v.clearRect(0, 0, this.view.width, this.view.height);
+    v.globalAlpha = this.hooks.contentOpacity();
     v.drawImage(this.cache, 0, 0);
+    v.globalAlpha = 1;
+    if (!this.hooks.isAiActive()) return;
+    v.setTransform(this.pf, 0, 0, this.pf, 0, 0);
+    const hidden = this.hiddenIds();
+    for (const it of store.itemsOf(this.page.id)) {
+      if (!this.isAiItem(it.id) || hidden?.has(it.id)) continue;
+      this.paintItem(v, it, this.lastDim?.has(it.id) ? PENDING_OPACITY : 1);
+    }
+  }
+
+  /** Whether this item is the current AI turn's ink, which stays unfaded on top (see blit). */
+  private isAiItem(id: string): boolean {
+    if (!this.hooks.isAiActive()) {
+      if (this.aiCommitted.size) this.aiCommitted.clear();
+      return false;
+    }
+    return this.aiCommitted.has(id) || this.hooks.isAiInk(id);
+  }
+
+  /** Repaints the view (not the cache) on the next frame — for a change in `contentOpacity`. */
+  refreshView(): void {
+    this.schedule();
   }
 
   private frame = (): void => {
@@ -1371,7 +1410,10 @@ export class PageCanvas implements ItemSurface {
       createdAt: Date.now(),
     };
     store.addStroke(stroke);
-    if (this.cctx) {
+    if (this.hooks.isAiActive()) {
+      // AI ink: kept out of the (faded) cache — blit paints it on top
+      this.aiCommitted.add(stroke.id);
+    } else if (this.cctx) {
       this.cctx.setTransform(this.pf, 0, 0, this.pf, 0, 0);
       drawStroke(this.cctx, stroke, this.page.paper);
     }
@@ -1479,6 +1521,7 @@ export class PageCanvas implements ItemSurface {
     this.dropShapeEdit();
     const shape = this.shapeFromFit(se.fit, se.color, se.size);
     store.addItems([shape]);
+    if (se.aiInk && this.hooks.isAiActive()) this.aiCommitted.add(shape.id);
     this.rebuild();
     this.hooks.onOp({ kind: 'add-items', pageId: this.page.id, items: [shape], aiInk: se.aiInk });
     return true;
@@ -1640,6 +1683,7 @@ export class PageCanvas implements ItemSurface {
     this.dropLineEdit();
     const shape = this.lineElement(le);
     store.addItems([shape]);
+    if (le.color === AI_COLOR && this.hooks.isAiActive()) this.aiCommitted.add(shape.id);
     this.rebuild();
     // le.color was set from aiInkColor() when the stroke that became this
     // line started — same violet-means-ephemeral-turn-ink signal add-stroke
@@ -1797,6 +1841,8 @@ export class PageCanvas implements ItemSurface {
       store.removeItems(pageId, new Set(removed.map((it) => it.id)));
       store.addItems(added);
     }
+    // while AI mode is on the eraser only reaches AI ink (see `erasable`), so the survivors are AI ink too
+    if (this.hooks.isAiActive()) for (const s of added) this.aiCommitted.add(s.id);
     this.rebuild();
     if (removed.length) this.hooks.onOp({ kind: 'edit', pageId, removed, added });
   }

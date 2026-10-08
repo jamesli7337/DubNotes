@@ -41,6 +41,13 @@ import { uid } from './util';
  * exactly this, so "AI mode" reads as one consistent identity. */
 export const AI_COLOR = '#6d28d9';
 
+/** While AI mode is on, every page's own (non-AI) content is shown at this
+ * opacity so the violet question ink stands out — display only; captures
+ * and exports render from the store at full opacity. */
+export const AI_FADE_OPACITY = 0.25;
+/** How long the fade in/out takes on toggle. */
+export const AI_FADE_MS = 150;
+
 /** Character budget for the history sent with a turn — newest turns kept,
  * oldest dropped first (api/gemini.ts enforces its own, slightly higher cap). */
 const HISTORY_CHAR_BUDGET = 24_000;

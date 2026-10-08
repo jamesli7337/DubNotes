@@ -1,4 +1,4 @@
-import { AiMode } from '../ai-mode';
+import { AI_FADE_MS, AI_FADE_OPACITY, AiMode } from '../ai-mode';
 import { AUTO_COLOR, resolveInkColor, setPaperOverlayVars } from '../canvas/freehand';
 import { itemBounds, rotateAround, unionRects, worldToScreen, type Camera, type Frame } from '../canvas/geom';
 import type { GuideKind } from '../canvas/guide';
@@ -416,6 +416,9 @@ class NotebookView {
   private readonly onLeave: () => void;
 
   private readonly aiMode: AiMode;
+  /** Opacity pages show their non-AI content at — 1, or easing to/at AI_FADE_OPACITY while AI mode is on (see animateAiFade). */
+  private aiFade = 1;
+  private aiFadeRaf = 0;
 
   /** `.nb-split`: the flex row holding `.nb-scroll` and, when one is open, the read-only secondary pane. */
   private splitEl!: HTMLElement;
@@ -437,7 +440,10 @@ class NotebookView {
     }
     this.aiMode = new AiMode(nb.id, {
       refreshPage: (pageId) => this.rebuildIfMounted(pageId),
-      onActiveChanged: () => this.refreshAiControls(),
+      onActiveChanged: () => {
+        this.refreshAiControls();
+        this.animateAiFade();
+      },
       onAiHistoryChanged: (pageId) => {
         if (pageId === this.currentPageId) this.syncHistory();
       },
@@ -530,6 +536,7 @@ class NotebookView {
       this.destroyScrollbarThumb();
       this.pane.destroy(); // takes the pane down but keeps its saved state, so coming back here restores it
       this.aiMode.destroyPanel();
+      cancelAnimationFrame(this.aiFadeRaf);
       store.flushNow();
       resetActiveColorsToPrimary();
     };
@@ -3733,6 +3740,7 @@ class NotebookView {
         onEmptyLassoSelection: (s, frame) => this.showEmptyLassoCallout(s, frame),
         isAiActive: () => this.aiMode.isActive(),
         isAiInk: (itemId) => this.aiMode.isAiInk(page.id, itemId),
+        contentOpacity: () => this.aiFade,
         onPendingLine: () => this.syncHistory(),
         refreshPage: (pageId) => this.rebuildIfMounted(pageId),
         adoptCrossPageLasso: (pageId, ids, lassoPath) => {
@@ -3897,6 +3905,34 @@ class NotebookView {
     const on = this.board ? this.board.mindMap : mindMapEnabled(this.nb.id);
     btn.classList.toggle('active', on);
     btn.setAttribute('aria-pressed', String(on));
+  }
+
+  /**
+   * Fades every page's own content toward AI_FADE_OPACITY while AI mode is on,
+   * and back to full on leaving it, over AI_FADE_MS. Display only: mounted
+   * pages repaint their view from the unchanged cache each frame (a page
+   * mounting mid-way reads `aiFade` as it is), and the split pane's canvases
+   * follow by CSS (`.nb-split.ai-fade`), on the same duration.
+   */
+  private animateAiFade(): void {
+    const target = this.aiMode.isActive() ? AI_FADE_OPACITY : 1;
+    this.splitEl.style.setProperty('--ai-fade-opacity', String(AI_FADE_OPACITY));
+    this.splitEl.style.setProperty('--ai-fade-ms', `${AI_FADE_MS}ms`);
+    this.splitEl.classList.toggle('ai-fade', target < 1);
+    cancelAnimationFrame(this.aiFadeRaf);
+    const from = this.aiFade;
+    // timed from the first frame, not the toggle: the same click slides the
+    // chat panel and relayouts `.nb-scroll`, and a clock started before that
+    // stall would spend most of the fade inside it and jump straight to the end
+    let t0 = -1;
+    const step = (now: number): void => {
+      if (t0 < 0) t0 = now;
+      const k = Math.min(1, (now - t0) / AI_FADE_MS);
+      this.aiFade = from + (target - from) * k;
+      for (const pc of this.pcByPage.values()) pc.refreshView();
+      this.aiFadeRaf = k < 1 ? requestAnimationFrame(step) : 0;
+    };
+    this.aiFadeRaf = requestAnimationFrame(step);
   }
 
   /** Reflects AI mode's global state on the single app-bar toggle + send buttons, and on undo/redo (which switch to AI-scoped history while active). */
