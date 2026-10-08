@@ -447,6 +447,11 @@ class NotebookView {
         this.animateAiFade();
       },
       onAiHistoryChanged: () => this.syncHistory(),
+      goToAdjacentPage: (delta) => {
+        const pages = store.pagesOf(this.nb.id);
+        const next = pages[pages.findIndex((p) => p.id === this.currentPageId) + delta];
+        if (next) this.goToPage(next.id);
+      },
       // the left island's margin changes at once with `.ai-panel-open` (only the
       // panel itself slides), so its edge is already final when this runs
       onPanelToggled: () => {

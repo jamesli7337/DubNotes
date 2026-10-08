@@ -50,6 +50,39 @@ function renderMath(t: MathToken): HTMLElement {
   }
 }
 
+/**
+ * Renders a chat title on one line: plain text, with $...$ / $$...$$ (and
+ * \[...\]) through the same KaTeX call as a reply, but always inline — a
+ * display block would break the single line. If any math fails to parse, or
+ * a delimiter is left unclosed (a title truncated mid-math), the whole title
+ * falls back to plain text with its $ signs stripped. Overflow ("…") is the
+ * caller's CSS.
+ */
+export function renderChatTitle(container: HTMLElement, text: string): void {
+  container.replaceChildren();
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  const plain = (): void => {
+    container.replaceChildren(oneLine.replace(/\$/g, '').replace(/\s+/g, ' ').trim());
+  };
+  const nodes: Node[] = [];
+  for (const t of tokenize(oneLine)) {
+    if (t.kind === 'text') {
+      if (t.value.includes('$')) return plain(); // an unclosed delimiter
+      nodes.push(document.createTextNode(t.value));
+      continue;
+    }
+    try {
+      const span = document.createElement('span');
+      span.className = 'ai-math ai-math--inline';
+      span.innerHTML = katex.renderToString(t.src, { throwOnError: true, displayMode: false, output: 'htmlAndMathml' });
+      nodes.push(span);
+    } catch {
+      return plain();
+    }
+  }
+  container.append(...nodes);
+}
+
 /** One line of the original text: either a display-math block, or a run of plain-text/inline-math pieces. A line with a single empty-string piece is an explicit blank-line marker (a hard block boundary) — see toLines. */
 type Piece = string | MathToken;
 type Line = { display: MathToken } | { pieces: Piece[] };

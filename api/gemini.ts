@@ -47,8 +47,18 @@ interface ApiResponse {
   end(): void;
 }
 
-const GEMINI_MODEL = 'gemini-3.6-flash';
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+/**
+ * Tried in order: the primary, then — only when the primary is overloaded
+ * (503 UNAVAILABLE) or rate-limited (429 RESOURCE_EXHAUSTED) — the fallback,
+ * immediately and once. Both are stable (non-preview) models that take image
+ * input, JSON-schema output and multi-turn `contents`. This is the only retry
+ * anywhere: the client (gemini-client.ts) makes one request and doesn't retry.
+ */
+const MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash'] as const;
+const modelUrl = (model: string): string =>
+  `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
+/** Upstream statuses that mean "this model can't take it right now" rather than "this request is wrong". */
+const FALLBACK_STATUSES = new Set([503, 429]);
 
 /** Server-side caps on `history`, a little above the client's own budget
  * (ai-mode.ts's HISTORY_CHAR_BUDGET) so a well-behaved client is never
@@ -71,6 +81,15 @@ const MAX_OUTPUT_TOKENS = 32_768;
  * (gemini-client.ts's friendlyErrorText); none is worth retrying as-is.
  */
 type ReplyErrorCode = 'too_long' | 'safety' | 'recitation';
+
+/**
+ * Error-response `code` for a request no model could take because the API
+ * key's quota is used up (a daily quota, not a short-term rate limit — see
+ * readUpstreamError). Sent with HTTP 429; mapped by gemini-client.ts.
+ */
+const QUOTA_CODE = 'quota';
+/** Longest Gemini error message logged — enough to diagnose, never a dump. */
+const MAX_LOGGED_MESSAGE = 500;
 
 const RESPONSE_SCHEMA = {
   type: 'OBJECT',
@@ -169,36 +188,70 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
-  let upstream: Response;
-  try {
-    upstream = await fetch(`${GEMINI_URL}?key=${apiKey}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
-        generationConfig: {
-          responseMimeType: 'application/json',
-          responseSchema: RESPONSE_SCHEMA,
-          maxOutputTokens: MAX_OUTPUT_TOKENS,
-        },
-        contents: [
-          ...history.map((h) => ({ role: h.role, parts: [{ text: h.text }] })),
-          { role: 'user', parts: turnParts(pages) },
-        ],
-      }),
-    });
-  } catch {
-    res.status(502).json({ error: 'Could not reach the AI service.' });
-    return;
+  // serialized once — the same request goes to the fallback if it's needed
+  const upstreamBody = JSON.stringify({
+    system_instruction: { parts: [{ text: SYSTEM_INSTRUCTION }] },
+    generationConfig: {
+      responseMimeType: 'application/json',
+      responseSchema: RESPONSE_SCHEMA,
+      maxOutputTokens: MAX_OUTPUT_TOKENS,
+    },
+    contents: [
+      ...history.map((h) => ({ role: h.role, parts: [{ text: h.text }] })),
+      { role: 'user', parts: turnParts(pages) },
+    ],
+  });
+
+  let upstream: Response | null = null;
+  let model: string = MODELS[0];
+  // one per failed try: for the error message, and whether it was quota exhaustion
+  const attempts: { label: string; quota: boolean }[] = [];
+  for (const m of MODELS) {
+    model = m;
+    try {
+      upstream = await fetch(`${modelUrl(m)}?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: upstreamBody,
+      });
+    } catch (err) {
+      // the request URL carries the API key — logged as the error's name and
+      // message only, with any key=… that might appear in them redacted
+      const why = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+      console.error(`Gemini attempt failed: model=${m} network error — ${why.replace(/key=[^&\s]+/g, 'key=…')}`);
+      res.status(502).json({ error: 'Could not reach the AI service.' });
+      return;
+    }
+    if (upstream.ok) break;
+    const info = await readUpstreamError(upstream);
+    console.error(
+      `Gemini attempt failed: model=${m} http=${upstream.status} status=${info.status ?? '-'}` +
+        (info.quotaIds.length ? ` quotaIds=${info.quotaIds.join(',')}` : '') +
+        ` message=${JSON.stringify(info.message ?? '')}`
+    );
+    attempts.push({ label: `${m} ${upstream.status}`, quota: info.quotaExhausted });
+    if (!FALLBACK_STATUSES.has(upstream.status)) break; // a real error, not capacity: no fallback
   }
 
-  if (!upstream.ok) {
-    // Passed through as this response's own status (rather than a flat 502)
-    // so the client can tell a 503 (temporary overload — see gemini-client.ts's
-    // retry) apart from anything else without parsing the message text.
-    // Gemini's own error body may include request details worth not echoing
-    // back verbatim to an untrusted caller; a short status-coded message is enough.
-    res.status(upstream.status).json({ error: `Request failed (${upstream.status}).` });
+  if (!upstream?.ok) {
+    const label = attempts.map((a) => a.label).join(', then ');
+    // Every model that was tried had its quota used up: retrying in a bit
+    // won't help, so this gets its own code (and message) rather than
+    // "overloaded". A quota-exhausted primary still falls back first — each
+    // model has its own daily quota.
+    if (attempts.length && attempts.every((a) => a.quota)) {
+      res.status(429).json({ error: `Quota exhausted (${label}).`, code: QUOTA_CODE });
+      return;
+    }
+    // Two failed attempts means the primary was overloaded and the fallback
+    // failed too (with any status): reported as the overload it started as,
+    // so the client shows its "overloaded, try again in a bit" message. A
+    // single failed attempt passes its upstream status through as this
+    // response's own (rather than a flat 502). Gemini's own error body may
+    // include request details worth not echoing back verbatim to an untrusted
+    // caller; a short status-coded message is enough.
+    const status = attempts.length > 1 ? 503 : (upstream?.status ?? 502);
+    res.status(status).json({ error: `Request failed (${label}).` });
     return;
   }
 
@@ -230,8 +283,9 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
-  // `text` keeps its old name (the answer) so the client's success check is unchanged
-  res.status(200).json({ text: reply.answer, transcript: reply.transcript });
+  // `text` keeps its old name (the answer) so the client's success check is
+  // unchanged; `model` is whichever of MODELS answered
+  res.status(200).json({ text: reply.answer, transcript: reply.transcript, model });
 }
 
 interface HistoryTurn {
@@ -332,6 +386,44 @@ function parseImage(v: unknown): { image: string; mimeType: string } | null {
   if (typeof image !== 'string' || !image) return null;
   const mimeType = typeof obj?.mimeType === 'string' ? obj.mimeType : 'image/png';
   return { image, mimeType };
+}
+
+/**
+ * What a failed upstream response says about itself — Google's standard error
+ * envelope, `{ error: { code, message, status, details[] } }`. A 429 is
+ * RESOURCE_EXHAUSTED either way; whether it's a short-term rate limit or a
+ * used-up quota is only told apart by `details`' QuotaFailure violations:
+ * each `quotaId` names its window (e.g.
+ * "GenerateRequestsPerMinutePerProjectPerModel-FreeTier" for a rate limit,
+ * "GenerateRequestsPerDayPerProjectPerModel-FreeTier" for the daily quota).
+ * A per-day violation counts as quota exhausted; anything else — a per-minute
+ * one, or a bare 429 with no details — as a rate limit. Never throws.
+ */
+async function readUpstreamError(
+  r: Response
+): Promise<{ status?: string; message?: string; quotaIds: string[]; quotaExhausted: boolean }> {
+  let body: unknown;
+  try {
+    body = await r.json();
+  } catch {
+    return { quotaIds: [], quotaExhausted: false };
+  }
+  const err = (body as { error?: { status?: unknown; message?: unknown; details?: unknown } } | null)?.error;
+  const status = typeof err?.status === 'string' ? err.status : undefined;
+  const message = typeof err?.message === 'string' ? err.message.slice(0, MAX_LOGGED_MESSAGE) : undefined;
+  const quotaIds: string[] = [];
+  if (Array.isArray(err?.details)) {
+    for (const d of err.details) {
+      const violations = (d as { violations?: unknown } | null)?.violations;
+      if (!Array.isArray(violations)) continue;
+      for (const v of violations) {
+        const id = (v as { quotaId?: unknown } | null)?.quotaId;
+        if (typeof id === 'string') quotaIds.push(id);
+      }
+    }
+  }
+  const quotaExhausted = r.status === 429 && quotaIds.some((id) => /PerDay/i.test(id));
+  return { status, message, quotaIds, quotaExhausted };
 }
 
 /** Maps the first candidate's `finishReason` to a ReplyErrorCode, or null if it finished normally (or says nothing). */

@@ -32,7 +32,7 @@ import { confirmDialog } from './ui/dialog';
 import { renderItemsImage, renderPageRegionImage } from './export/raster';
 import { store } from './store';
 import { deleteAiChat, getAiChats, getAiEntries, putAiChat, putAiTurn } from './db';
-import { renderAiReply } from './ai-render';
+import { renderAiReply, renderChatTitle } from './ai-render';
 import { callGemini } from './gemini-client';
 import type { Op } from './canvas/page-canvas';
 import type { AiChat, AiConversationEntry, Page } from './types';
@@ -66,6 +66,10 @@ const MAX_BODY_CHARS = 4_000_000;
 /** JPEG quality of each page's whole-page context image (question crops stay PNG). */
 const CONTEXT_JPEG_QUALITY = 0.9;
 const TITLE_MAX = 40;
+/** How far (px) a one-finger vertical swipe on the empty chat body has to travel to change page — see bindSwipeThrough. */
+const SWIPE_PAGE_MIN_PX = 40;
+/** An untitled chat's label in the picker: when it was started, e.g. "Oct 8, 2:37 PM". */
+const CHAT_DATE_FORMAT = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 /** localStorage key prefix for each notebook's active chat id. */
 const ACTIVE_CHAT_PREFIX = 'noteapp.aichat.';
 
@@ -185,6 +189,8 @@ export interface AiModeHost {
   onAiHistoryChanged(): void;
   /** The chat panel opened or closed — the left island shifts with it, so anything laid out against the islands' edges needs re-checking. */
   onPanelToggled?(): void;
+  /** Jumps one page forward (1) or back (-1) from the current one, the way the page manager jumps to a page — a no-op past either end. */
+  goToAdjacentPage(delta: 1 | -1): void;
 }
 
 export class AiMode {
@@ -222,8 +228,10 @@ export class AiMode {
   private panelError = '';
   private panelEl: HTMLElement | null = null;
   private panelBody: HTMLElement | null = null;
-  private chatSelect: HTMLSelectElement | null = null;
-  private deleteChatBtn: HTMLButtonElement | null = null;
+  private chatPicker: HTMLButtonElement | null = null;
+  private chatPickerLabel: HTMLElement | null = null;
+  private chatMenu: HTMLElement | null = null;
+  private chatMenuOpen = false;
   private panelOpen = false;
   /** the notebook chrome root (`.nb`) — gets `.ai-panel-open` toggled on it so
    * the scroll area can shift out from under the panel; see setPanelOpen. */
@@ -290,23 +298,25 @@ export class AiMode {
     header.append(el('span', { class: 'ai-panel__title', text: 'DubNotes AI' }));
 
     const actions = el('div', { class: 'ai-panel__header-actions' });
-    const newBtn = el('button', { class: 'iconbtn', title: 'New chat', 'aria-label': 'New chat' });
-    newBtn.append(icon('plus'));
-    newBtn.addEventListener('click', () => {
-      if (this.activeChatId !== null) void this.setActiveChat(null);
-    });
-    const deleteBtn = el('button', { class: 'iconbtn', title: 'Delete chat', 'aria-label': 'Delete chat' });
-    deleteBtn.append(icon('delete'));
-    deleteBtn.addEventListener('click', () => void this.deleteActiveChat());
     const closeBtn = el('button', { class: 'iconbtn', title: 'Close', 'aria-label': 'Close AI panel' });
     closeBtn.append(icon('close'));
     closeBtn.addEventListener('click', () => this.closeAll());
-    actions.append(newBtn, deleteBtn, closeBtn);
+    actions.append(closeBtn);
     header.append(actions);
 
-    const select = el('select', { class: 'ai-panel__chat-select', 'aria-label': 'Chat' });
-    select.addEventListener('change', () => void this.setActiveChat(select.value || null));
-    const chatBar = el('div', { class: 'ai-panel__chats' }, select);
+    // chat picker: a button showing the active chat's title, opening a custom
+    // menu right under it (new chat, every chat with its own delete)
+    const pickerLabel = el('span', { class: 'ai-chatpick__label' });
+    const picker = el(
+      'button',
+      { class: 'ai-chatpick', 'aria-label': 'Chat', 'aria-haspopup': 'listbox', 'aria-expanded': 'false' },
+      pickerLabel,
+      icon('chevron-down')
+    );
+    picker.addEventListener('click', () => this.setChatMenuOpen(!this.chatMenuOpen));
+    const menu = el('div', { class: 'ai-chatmenu', role: 'listbox' });
+    menu.hidden = true;
+    const chatBar = el('div', { class: 'ai-panel__chats' }, picker, menu);
 
     const body = el('div', { class: 'ai-panel__body' });
     this.bindSwipeThrough(body);
@@ -315,26 +325,85 @@ export class AiMode {
     container.append(panel);
     this.panelEl = panel;
     this.panelBody = body;
-    this.chatSelect = select;
-    this.deleteChatBtn = deleteBtn;
+    this.chatPicker = picker;
+    this.chatPickerLabel = pickerLabel;
+    this.chatMenu = menu;
     this.hostEl = container;
     this.renderChats();
     this.renderConversation();
   }
 
-  /** Rebuilds the chat switcher's options and the delete button's enabled state. */
+  /** Rebuilds the chat picker's label and its menu's rows. */
   private renderChats(): void {
-    const select = this.chatSelect;
-    if (!select) return;
-    select.replaceChildren();
-    if (this.activeChatId === null) select.append(el('option', { value: '', text: 'New chat' }));
-    for (const chat of this.chats) select.append(el('option', { value: chat.id, text: chat.title || 'New chat' }));
-    select.value = this.activeChatId ?? '';
-    if (this.deleteChatBtn) this.deleteChatBtn.disabled = this.activeChatId === null;
+    const menu = this.chatMenu;
+    if (!menu || !this.chatPickerLabel) return;
+    this.renderChatLabel(this.chatPickerLabel, this.chats.find((c) => c.id === this.activeChatId) ?? null);
+
+    const newRow = el('button', { class: 'ai-chatmenu__new' }, icon('plus'), el('span', { text: 'New chat' }));
+    newRow.addEventListener('click', () => {
+      this.setChatMenuOpen(false);
+      if (this.activeChatId !== null) void this.setActiveChat(null);
+    });
+    menu.replaceChildren(newRow);
+
+    for (const chat of this.chats) {
+      const isActive = chat.id === this.activeChatId;
+      const pick = el(
+        'button',
+        { class: 'ai-chatmenu__pick', role: 'option', 'aria-selected': String(isActive) },
+        icon('check', 'ai-chatmenu__check'),
+        this.renderChatLabel(el('span', { class: 'ai-chatmenu__title' }), chat)
+      );
+      pick.addEventListener('click', () => {
+        this.setChatMenuOpen(false);
+        if (!isActive) void this.setActiveChat(chat.id);
+      });
+      const del = el('button', { class: 'iconbtn ai-chatmenu__delete', title: 'Delete chat', 'aria-label': 'Delete chat' });
+      del.append(icon('delete'));
+      del.addEventListener('click', () => {
+        this.setChatMenuOpen(false);
+        void this.deleteChat(chat.id);
+      });
+      menu.append(el('div', { class: 'ai-chatmenu__row' + (isActive ? ' ai-chatmenu__row--active' : '') }, pick, del));
+    }
   }
 
   /**
-   * Lets a vertical drag on the (short, common-case) chat body still switch
+   * A chat's label, the same in the picker and every menu row (display only):
+   * its title, with any $…$ math rendered (see renderChatTitle); or, untitled,
+   * when it was started. "New chat" is only for a chat with no messages yet —
+   * the unsaved draft (`null`); a saved chat always has at least one turn, as
+   * it's created by its first Send.
+   */
+  private renderChatLabel(target: HTMLElement, chat: AiChat | null): HTMLElement {
+    if (!chat) target.replaceChildren('New chat');
+    else if (chat.title) renderChatTitle(target, chat.title);
+    else target.replaceChildren(CHAT_DATE_FORMAT.format(chat.createdAt));
+    return target;
+  }
+
+  /** Opens/closes the chat picker's menu; while open, a tap anywhere outside it (or the picker) closes it. */
+  private setChatMenuOpen(open: boolean): void {
+    if (!this.chatMenu || !this.chatPicker) return;
+    this.chatMenuOpen = open;
+    this.chatMenu.hidden = !open;
+    this.chatPicker.setAttribute('aria-expanded', String(open));
+    if (open) {
+      this.chatMenu.scrollTop = 0;
+      document.addEventListener('pointerdown', this.onChatMenuOutside, true);
+    } else {
+      document.removeEventListener('pointerdown', this.onChatMenuOutside, true);
+    }
+  }
+
+  private readonly onChatMenuOutside = (e: PointerEvent): void => {
+    const t = e.target as Node | null;
+    if (t && (this.chatMenu?.contains(t) || this.chatPicker?.contains(t))) return;
+    this.setChatMenuOpen(false);
+  };
+
+  /**
+   * Lets a vertical swipe on the (short, common-case) chat body still switch
    * notebook pages instead of doing nothing. `.ai-panel` is `position: fixed`
    * and sits to the left of `.nb-scroll` (a sibling, not an ancestor) — a
    * touch never falls through one element to whatever's visually behind it,
@@ -353,26 +422,30 @@ export class AiMode {
    * claim it — the same non-passive-listener technique page-canvas.ts's
    * blockNativeGesture uses for the analogous "own this touch before iOS
    * does" problem.
+   *
+   * The page change goes through the camera, as a jump to the next/previous
+   * page on release (host.goToAdjacentPage, the page manager's jump) — never
+   * through `.nb-scroll`'s scroll position. That element isn't a scroller any
+   * more, but its overflowing camera layer still lets scrollTop take effect,
+   * which slid the pages out from under the camera (scrollbar, mounted pages
+   * and current page all going stale, and the offset never reset).
    */
   private bindSwipeThrough(body: HTMLElement): void {
     let dragging = false;
     let startY = 0;
-    let startScrollTop = 0;
+    let lastY = 0;
 
-    const scroller = (): HTMLElement | null => this.hostEl?.querySelector<HTMLElement>('.nb-scroll') ?? null;
     const hasOwnScroll = (): boolean => body.scrollHeight > body.clientHeight + 1;
 
     body.addEventListener(
       'touchstart',
       (e) => {
-        const s = scroller();
-        if (hasOwnScroll() || e.touches.length !== 1 || !s) {
+        if (hasOwnScroll() || e.touches.length !== 1) {
           dragging = false;
           return;
         }
         dragging = true;
-        startY = e.touches[0].clientY;
-        startScrollTop = s.scrollTop;
+        startY = lastY = e.touches[0].clientY;
         e.preventDefault();
       },
       { passive: false }
@@ -381,24 +454,25 @@ export class AiMode {
       'touchmove',
       (e) => {
         if (!dragging) return;
-        const s = scroller();
-        if (!s) return;
-        s.scrollTop = startScrollTop - (e.touches[0].clientY - startY);
+        lastY = e.touches[0].clientY;
         e.preventDefault();
       },
       { passive: false }
     );
-    const end = (): void => {
+    body.addEventListener('touchend', () => {
+      if (!dragging) return;
       dragging = false;
-    };
-    body.addEventListener('touchend', end);
-    body.addEventListener('touchcancel', end);
+      const dy = lastY - startY;
+      // swiping up moves on to the next page, as dragging a page up would
+      if (Math.abs(dy) >= SWIPE_PAGE_MIN_PX) this.host.goToAdjacentPage(dy < 0 ? 1 : -1);
+    });
+    body.addEventListener('touchcancel', () => {
+      dragging = false;
+    });
   }
 
-  /** Confirms, then permanently deletes the active chat and its entries; switches to the most recently updated remaining chat (or a new draft). */
-  private async deleteActiveChat(): Promise<void> {
-    const chatId = this.activeChatId;
-    if (!chatId) return;
+  /** Confirms, then permanently deletes `chatId` and its entries; if it was the active chat, switches to the most recently updated remaining chat (or a new draft). */
+  private async deleteChat(chatId: string): Promise<void> {
     const ok = await confirmDialog({
       title: 'Delete chat?',
       message: 'Deletes this AI chat. The pages themselves are not affected. This can’t be undone.',
@@ -425,8 +499,10 @@ export class AiMode {
     this.hostEl?.classList.remove('ai-panel-open');
     this.panelEl = null;
     this.panelBody = null;
-    this.chatSelect = null;
-    this.deleteChatBtn = null;
+    this.setChatMenuOpen(false);
+    this.chatPicker = null;
+    this.chatPickerLabel = null;
+    this.chatMenu = null;
     this.hostEl = null;
   }
 
@@ -447,6 +523,7 @@ export class AiMode {
    */
   private setPanelOpen(open: boolean): void {
     this.panelOpen = open;
+    if (!open) this.setChatMenuOpen(false);
     this.panelEl?.classList.toggle('ai-panel--open', open);
     this.hostEl?.classList.toggle('ai-panel-open', open);
     this.host.onPanelToggled?.();
@@ -849,9 +926,10 @@ export class AiMode {
 
     let text: string;
     let transcript = '';
+    let model = '';
     let isError = false;
     try {
-      ({ text, transcript, isError } = await callGemini(body));
+      ({ text, transcript, model, isError } = await callGemini(body));
     } catch (err) {
       console.error('AI mode send failed:', err);
       text = "DubNotes AI error: Couldn't reach the AI, check your internet connection.";
@@ -865,6 +943,7 @@ export class AiMode {
     entry.isError = isError;
     entry.thumbnail = thumbnail;
     if (!isError && transcript) entry.transcript = transcript;
+    if (!isError && model) entry.model = model;
     this.renderConversation();
     void this.persistTurn(entry);
   }
@@ -936,6 +1015,8 @@ export class AiMode {
       else if (entry.isError) replyEl.textContent = entry.text; // an app-generated message, not Gemini markdown/LaTeX
       else renderAiReply(replyEl, entry.text);
       row.append(replyEl);
+      // which model answered — the server may have fallen back from its primary
+      if (!entry.pending && !entry.isError && entry.model) row.append(el('div', { class: 'ai-panel__model', text: entry.model }));
       body.append(row);
     }
     if (this.panelError) body.append(el('div', { class: 'ai-panel__reply ai-panel__reply--error', text: this.panelError }));

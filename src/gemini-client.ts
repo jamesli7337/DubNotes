@@ -7,19 +7,15 @@
 const GEMINI_ENDPOINT = import.meta.env.VITE_GEMINI_ENDPOINT?.trim() || '/api/gemini';
 const PROXY_SECRET = import.meta.env.VITE_GEMINI_PROXY_SECRET ?? '';
 
-/** One request's outcome, plus (only on failure) whether it's worth a silent retry — see callGemini. */
-interface Attempt {
+/** One request's outcome — see callGemini. */
+export interface GeminiResult {
   text: string;
   /** the question's transcript from a successful reply ('' otherwise) — see api/gemini.ts */
   transcript: string;
+  /** which model answered a successful reply ('' otherwise) — the server may have fallen back from its primary */
+  model: string;
   isError: boolean;
-  retryable: boolean;
 }
-
-/** 503 specifically means the model is temporarily overloaded — worth quietly
- * trying again. Delays increase each time (short, then longer, then longer
- * again) rather than hammering an already-overloaded endpoint. */
-const RETRY_DELAYS_MS = [1000, 3000, 8000];
 
 /** Turns a failed response's status (or, for a reply Gemini stopped short,
  * api/gemini.ts's `code`) into a plain-language message — the raw
@@ -29,61 +25,54 @@ function friendlyErrorText(status: number, code?: unknown): string {
   if (code === 'too_long') return 'Answer was too long and got cut off. Ask for a shorter or step-by-step answer.';
   if (code === 'safety') return 'The AI declined to answer this for safety reasons. Try rewording the question.';
   if (code === 'recitation') return 'The AI stopped because its answer was too close to existing published text. Try rewording the question.';
+  if (code === 'quota') return 'The free AI quota is used up for now. Try again later.';
   if (status === 503) return 'The AI is overloaded right now, try again in a bit.';
   if (status === 404) return "The AI service isn't set up correctly right now.";
   if (status === 401 || status === 403) return "The AI isn't configured correctly, this needs a fix on my end, not yours.";
   return 'Something went wrong with the AI, try again in a bit.';
 }
 
-async function callGeminiOnce(body: object): Promise<Attempt> {
+/**
+ * POSTs one request to the Gemini proxy and normalizes the result to either
+ * the reply text (plus the question's transcript and the model that
+ * answered) or an app-facing error string. `body` is `{pages, history}` —
+ * see api/gemini.ts.
+ *
+ * One request, no retries here: an overloaded (503) or rate-limited (429)
+ * primary model is retried once on a fallback model by the server itself,
+ * and retrying on top of that would stack the two. A 503 that still reaches
+ * this point means both models failed, and shows as "overloaded".
+ */
+export async function callGemini(body: object): Promise<GeminiResult> {
   try {
     const res = await fetch(GEMINI_ENDPOINT, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-NoteApp-Secret': PROXY_SECRET },
       body: JSON.stringify(body),
     });
-    const data: { text?: unknown; transcript?: unknown; error?: unknown; code?: unknown } | null = await res
+    const data: { text?: unknown; transcript?: unknown; model?: unknown; error?: unknown; code?: unknown } | null = await res
       .json()
       .catch(() => null);
     if (res.ok && typeof data?.text === 'string' && data.text) {
       const transcript = typeof data.transcript === 'string' ? data.transcript : '';
-      return { text: data.text, transcript, isError: false, retryable: false };
+      const model = typeof data.model === 'string' ? data.model : '';
+      return { text: data.text, transcript, model, isError: false };
     }
     const reason = typeof data?.error === 'string' ? data.error : `request failed (${res.status})`;
     console.error(`Gemini request failed: ${reason}`);
     return {
       text: `DubNotes AI error: ${friendlyErrorText(res.status, data?.code)}`,
       transcript: '',
+      model: '',
       isError: true,
-      retryable: res.status === 503,
     };
   } catch (err) {
     console.error('Gemini request network error:', err);
     return {
       text: "DubNotes AI error: Couldn't reach the AI, check your internet connection.",
       transcript: '',
+      model: '',
       isError: true,
-      retryable: false,
     };
   }
-}
-
-/**
- * POSTs one request to the Gemini proxy and normalizes the result to either
- * the reply text (plus the question's transcript) or an app-facing error
- * string. `body` is `{pages, history}` — see api/gemini.ts.
- *
- * A 503 (the model temporarily overloaded) is retried automatically, with an
- * increasing delay between attempts, entirely behind this promise — nothing
- * is shown to the caller until every attempt has failed, and a retry that
- * eventually succeeds resolves exactly as if the first attempt had. Every
- * other failure (network error, 4xx, 500, etc.) still returns immediately.
- */
-export async function callGemini(body: object): Promise<{ text: string; transcript: string; isError: boolean }> {
-  let attempt = await callGeminiOnce(body);
-  for (let i = 0; attempt.retryable && i < RETRY_DELAYS_MS.length; i++) {
-    await new Promise((resolve) => setTimeout(resolve, RETRY_DELAYS_MS[i]));
-    attempt = await callGeminiOnce(body);
-  }
-  return { text: attempt.text, transcript: attempt.transcript, isError: attempt.isError };
 }

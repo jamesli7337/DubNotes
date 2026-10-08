@@ -191,6 +191,7 @@ A notebook has any number of AI chats; each turn belongs to one.
 | `pageIds`    | string[]? | every page a turn spanning pages was captured from, in page order — label only; absent on older entries |
 | `thumbnail`  | string  | `data:` URL — a small JPEG of the turn's question crops, stacked one per page (pre-v7 entries: the whole-page capture) |
 | `transcript` | string? | Gemini's text rendering of the question; absent on errors and pre-v7 entries |
+| `model`      | string? | the Gemini model that answered (the server may fall back from its primary); absent on errors and older entries |
 | `text`       | string  | Gemini's reply (or an error message)                  |
 | `isError`    | boolean | true if `text` is an error, not a real reply          |
 | `createdAt`  | number  | epoch ms; also the panel's display order              |

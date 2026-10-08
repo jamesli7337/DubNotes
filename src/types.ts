@@ -224,6 +224,8 @@ export interface AiConversationEntry {
    * Absent on error turns and on entries from before chats existed, which are
    * therefore never sent as history. */
   transcript?: string;
+  /** the Gemini model that answered (api/gemini.ts may fall back from its primary); absent on errors and older entries */
+  model?: string;
   text: string;
   isError: boolean;
   createdAt: number;

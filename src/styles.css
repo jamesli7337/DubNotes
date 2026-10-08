@@ -2216,15 +2216,102 @@ select {
   align-items: center;
   gap: 2px;
 }
-/* chat switcher row, under the header */
+.ai-panel__header .iconbtn {
+  width: 44px;
+  height: 44px;
+}
+/* chat switcher row, under the header; anchors the picker's menu */
 .ai-panel__chats {
+  position: relative;
+  z-index: 1; /* the open menu paints over .ai-panel__body below */
   padding: 8px 12px;
   border-bottom: 1px solid var(--outline-variant);
   flex: none;
 }
-.ai-panel__chat-select {
+.ai-chatpick {
   width: 100%;
+  min-height: 44px;
+  justify-content: space-between;
+  padding: 0 12px 0 16px;
+  color: var(--ai);
+  border-color: var(--ai-tint-strong);
+  background: var(--ai-tint);
+}
+.ai-chatpick .icon {
+  flex: none;
+  transition: transform 0.15s ease;
+}
+.ai-chatpick[aria-expanded='true'] .icon {
+  transform: rotate(180deg);
+}
+.ai-chatpick__label,
+.ai-chatmenu__title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
   text-overflow: ellipsis;
+}
+.ai-chatmenu {
+  position: absolute;
+  top: calc(100% - 4px);
+  left: 12px;
+  right: 12px;
+  max-height: min(360px, 60vh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  touch-action: pan-y;
+  padding: 6px;
+  background: var(--surface-c-lowest);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-3), 0 0 0 1px var(--ai-tint-strong);
+}
+.ai-chatmenu[hidden] {
+  display: none;
+}
+.ai-chatmenu__new,
+.ai-chatmenu__pick {
+  min-height: 44px;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r-lg);
+  background: transparent;
+  text-align: left;
+}
+.ai-chatmenu__new {
+  width: 100%;
+  color: var(--ai);
+}
+.ai-chatmenu__row {
+  display: flex;
+  align-items: center;
+  border-radius: var(--r-lg);
+}
+.ai-chatmenu__row--active {
+  background: var(--ai-tint);
+}
+.ai-chatmenu__pick {
+  flex: 1;
+  min-width: 0;
+  color: var(--on-surface);
+  font-weight: 500;
+}
+.ai-chatmenu__row--active .ai-chatmenu__pick {
+  color: var(--ai);
+  font-weight: 700;
+}
+.ai-chatmenu__check {
+  flex: none;
+  visibility: hidden;
+}
+.ai-chatmenu__row--active .ai-chatmenu__check {
+  visibility: visible;
+}
+.ai-chatmenu__delete {
+  flex: none;
+  width: 44px;
+  height: 44px;
 }
 .ai-panel__body {
   flex: 1;
@@ -2275,6 +2362,12 @@ select {
 .ai-panel__reply--pending {
   font-style: italic;
   animation: ai-pulse 1.1s ease-in-out infinite;
+}
+/* which model answered, under the reply */
+.ai-panel__model {
+  font-size: 11px;
+  color: var(--on-surface-variant);
+  padding: 0 2px;
 }
 /* markdown-lite + KaTeX content rendered by ai-render.ts (see its own doc
  * comment) — spacing between the block elements it builds; text colour keeps
