@@ -3,15 +3,15 @@
 /* ============================================================= design tokens
  * Ported from the NoteCraft mockups (Material 3 light palette + type scale). */
 :root {
-  /* surface ramp */
-  --surface: #faf9f4;
-  --surface-dim: #dbdad5;
-  --surface-bright: #faf9f4;
+  /* surface ramp — neutral, slightly cool (hue ~220°) */
+  --surface: #ffffff;
+  --surface-dim: #d8dce3;
+  --surface-bright: #ffffff;
   --surface-c-lowest: #ffffff;
-  --surface-c-low: #f5f4ef;
-  --surface-c: #efeee9;
-  --surface-c-high: #e9e8e3;
-  --surface-c-highest: #e3e3de;
+  --surface-c-low: #f6f7f9;
+  --surface-c: #f1f3f6;
+  --surface-c-high: #eceef2;
+  --surface-c-highest: #e6e9ee;
 
   /* primary — deep navy */
   --primary: #041534;
@@ -32,11 +32,11 @@
   --tertiary-fixed-dim: #5cd8e3;
   --on-tertiary-container: #00a1ac;
 
-  /* text / lines */
-  --on-surface: #1b1c19;
-  --on-surface-variant: #45464e;
-  --outline: #75777f;
-  --outline-variant: #c5c6cf;
+  /* text / lines — same cool hue, each at its previous contrast against --surface */
+  --on-surface: #1d2127;
+  --on-surface-variant: #434a59;
+  --outline: #707b93;
+  --outline-variant: #c7cbd5;
 
   /* error */
   --error: #ba1a1a;
@@ -60,7 +60,9 @@
   --page-edge: rgba(4, 21, 52, 0.06);
   --guide-body: rgba(255, 255, 255, 0.72);
   --code-bg: rgba(0, 0, 0, 0.08);
-  --pane-stage-bg: #f3f5f9;
+  /* behind pages (notebook viewport, split pane): grey enough that white paper reads as separate sheets */
+  --stage-bg: #eceef2;
+  --pane-stage-bg: #eceef2;
   --size-dot: #000;
   --toast-bg: rgba(16, 24, 43, 0.92);
   --toast-fg: #fff;
@@ -354,12 +356,14 @@ select {
 .lib {
   --lib-accent: #2550eb;
   --lib-accent-dark: #1d40d7;
-  --lib-bg: #f3f5f9;
+  /* white page; cards separate by border + shadow, not by a grey fill */
+  --lib-bg: #ffffff;
   --lib-card: #ffffff;
-  --lib-border: rgba(15, 23, 42, 0.09);
-  --lib-text: #10182b;
-  --lib-text-dim: #57647d;
-  --lib-text-faint: #93a0b8;
+  --lib-border: rgba(112, 123, 147, 0.2);
+  /* cool-neutral (hue ~220°), each at its previous contrast on a white card */
+  --lib-text: #16181d;
+  --lib-text-dim: #5a6477;
+  --lib-text-faint: #97a0b1;
   /* text/lines/tints on top of the accent fill (active tree row, pick banner, header mark) */
   --lib-on-accent: #fff;
   --lib-on-accent-dim: rgba(255, 255, 255, 0.85);
@@ -1847,6 +1851,7 @@ select {
   overflow: hidden;
   touch-action: none;
   position: relative;
+  background: var(--stage-bg);
 }
 /* Hand tool active: a grab cursor for the pointer drag-to-pan path (see
    bindHandToolGestures, which pans the pencil and the mouse) — a finger goes
