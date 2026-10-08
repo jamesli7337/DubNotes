@@ -48,7 +48,7 @@ import {
   type Frame,
   type Rect,
 } from './geom';
-import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
+import { densifyStrokePoints, drawStroke, paperOverlay, resolveInkColor, setPaperOverlayVars } from './freehand';
 import { InkSmoother, type ClientSample } from './ink-smoothing';
 import {
   drawElement,
@@ -84,7 +84,6 @@ import {
   type SurfaceHooks,
 } from './item-surface';
 import { drawTemplate, SPACING_PX } from './templates';
-import { uiColors } from './ui-colors';
 import { TAPE_MIN, rubOut, type Rubbed } from './page-canvas';
 
 /**
@@ -474,6 +473,7 @@ export class BoardCanvas implements ItemSurface {
     const cam = document.createElement('div');
     cam.className = 'board-editor-camera';
     layer.appendChild(cam);
+    setPaperOverlayVars(layer, this.paper()); // the text caret's colour
     host.appendChild(layer);
     this.editorLayer = layer;
     this.editorCam = cam;
@@ -525,6 +525,7 @@ export class BoardCanvas implements ItemSurface {
 
   /** The paper template changed — the settled copy has it baked in. */
   paperChanged(): void {
+    if (this.editorLayer) setPaperOverlayVars(this.editorLayer, this.paper());
     this.invalidate();
   }
 
@@ -691,7 +692,7 @@ export class BoardCanvas implements ItemSurface {
     }
     if (this.lineEdit) {
       drawElement(v, this.lineElement(this.lineEdit), paper);
-      paintLineHandles(v, this.lineEdit, this.zoom());
+      paintLineHandles(v, this.lineEdit, this.zoom(), this.paper());
     }
     for (const [id, rub] of this.partial) {
       const st = this.strokeById(id);
@@ -716,12 +717,12 @@ export class BoardCanvas implements ItemSurface {
       if (this.laser.length) this.schedule(); // keep fading
     }
     if (this.mode === 'lasso' && this.lasso.length > 1) {
-      strokeLassoPath(v, this.lasso, toolState.lassoShape !== 'free', this.zoom());
+      strokeLassoPath(v, this.lasso, toolState.lassoShape !== 'free', this.zoom(), this.paper());
     } else if (this.lastLassoPath && this.lastLassoPath.length > 1) {
       // decorative echo of the finalized selection's shape — unlike a page,
       // this stays on the one canvas even mid-drag, because that canvas is the
       // whole viewport and nothing can be clipped by leaving a page's bitmap
-      strokeLassoPath(v, this.lastLassoPath, true, this.zoom());
+      strokeLassoPath(v, this.lastLassoPath, true, this.zoom(), this.paper());
     }
   };
 
@@ -1846,13 +1847,14 @@ export class BoardCanvas implements ItemSurface {
     const r = NODE_R / z;
     ctx.save();
     ctx.lineWidth = 1.5 / z;
+    const o = paperOverlay(this.paper());
     for (const { node, pt } of bubbleNodes(b)) {
       const isSource = this.connect?.fromId === b.id && this.connect.fromNode === node;
       ctx.beginPath();
       ctx.arc(pt[0], pt[1], isSource ? r * 1.4 : r, 0, Math.PI * 2);
-      ctx.fillStyle = isSource ? uiColors().handleStroke : uiColors().handleFill;
+      ctx.fillStyle = isSource ? o.accent : o.handleFill;
       ctx.fill();
-      ctx.strokeStyle = uiColors().handleStroke;
+      ctx.strokeStyle = o.accent;
       ctx.stroke();
     }
     ctx.restore();
@@ -1868,7 +1870,7 @@ export class BoardCanvas implements ItemSurface {
     const z = this.zoom();
     const [ax, ay] = bubbleNodePoint(from, drag.fromNode);
     ctx.save();
-    ctx.strokeStyle = uiColors().handleStroke;
+    ctx.strokeStyle = paperOverlay(this.paper()).accent;
     ctx.lineWidth = Math.max(from.size, 1.5 / z);
     ctx.setLineDash([6 / z, 4 / z]);
     ctx.beginPath();

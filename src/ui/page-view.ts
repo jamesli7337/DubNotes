@@ -128,7 +128,7 @@ export class PageView {
     const onReady = (): void => this.refresh();
     try {
       drawTemplate(ctx, this.page.paper, this.pw, this.ph);
-      if (this.page.background) drawBackground(ctx, this.page.background, this.pw, this.ph, onReady);
+      if (this.page.background) drawBackground(ctx, this.page.background, this.pw, this.ph, this.page.paper, onReady);
       for (const it of store.itemsOf(this.page.id)) {
         if (isStroke(it)) drawStroke(ctx, it, this.page.paper);
         else drawElement(ctx, it, this.page.paper, 1, onReady);

@@ -10,9 +10,8 @@ import type {
   TapeElement,
   TextElement,
 } from '../types';
-import { resolveInkColor } from './freehand';
+import { paperOverlay, resolveInkColor } from './freehand';
 import { bubbleRadius } from './geom';
-import { uiColors } from './ui-colors';
 
 /** Default strip colour for a new tape element. */
 export const TAPE_COLOR = '#fbbf24';
@@ -149,21 +148,25 @@ export function backgroundBitmap(
  * `isPdfPageFailed` — an unsupported image codec resolves "successfully"
  * with nothing painted, so this can't rely on an exception alone), a more
  * visible placeholder says so, rather than leaving what would otherwise look
- * like a page that silently imported empty.
+ * like a page that silently imported empty. That placeholder's colours come
+ * from `paper` (never the app theme), so exports and AI captures don't vary
+ * with it.
  */
 export function drawBackground(
   ctx: CanvasRenderingContext2D,
   bg: PageBackground,
   w: number,
   h: number,
+  paper: Paper,
   onReady?: () => void
 ): void {
   const bmp = backgroundBitmap(bg, onReady);
   if (!bmp) {
     if (bg.assetId && isPdfPageFailed(bg.assetId, bg.page)) {
-      ctx.fillStyle = uiColors().placeholderBg;
+      const o = paperOverlay(paper);
+      ctx.fillStyle = o.placeholderBg;
       ctx.fillRect(0, 0, w, h);
-      ctx.fillStyle = uiColors().placeholderText;
+      ctx.fillStyle = o.placeholderText;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.font = textFont(22);

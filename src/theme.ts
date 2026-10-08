@@ -4,8 +4,9 @@
  * `<html data-theme="light|dark">`, which the inline script in index.html
  * already set before first paint and this module keeps current.
  *
- * Anything that paints chrome colours itself (canvases — see
- * canvas/ui-colors.ts) listens for the window `themechange` event and repaints.
+ * Every change is announced as a window `themechange` event. Nothing needs it
+ * today: chrome is styled through CSS tokens, and colours drawn on paper come
+ * from the paper itself (canvas/freehand.ts paperOverlay), never the theme.
  */
 export type ThemePref = 'system' | 'light' | 'dark';
 export type Theme = 'light' | 'dark';

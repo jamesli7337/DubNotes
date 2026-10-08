@@ -1,5 +1,5 @@
 import { AiMode } from '../ai-mode';
-import { AUTO_COLOR, resolveInkColor } from '../canvas/freehand';
+import { AUTO_COLOR, resolveInkColor, setPaperOverlayVars } from '../canvas/freehand';
 import { itemBounds, rotateAround, unionRects, worldToScreen, type Camera, type Frame } from '../canvas/geom';
 import type { GuideKind } from '../canvas/guide';
 import { BoardCanvas, mindMapEnabled } from '../canvas/board-canvas';
@@ -399,12 +399,6 @@ class NotebookView {
     this.dragPreviewCanvas.style.height = `${h}px`;
   };
 
-  /** Repaints the chrome colours the canvases draw themselves (canvas/ui-colors.ts) on a theme switch — bound for add/remove on `window`, same as repositionCallout. */
-  private readonly onThemeChange = (): void => {
-    for (const id of this.mounted) this.pcByPage.get(id)?.themeChanged();
-    this.board?.invalidate();
-  };
-
   private readonly onKey: (e: KeyboardEvent) => void;
   private readonly onLeave: () => void;
 
@@ -500,7 +494,6 @@ class NotebookView {
       window.removeEventListener('pointerup', this.onAnyPointerUp, true);
       window.removeEventListener('pointercancel', this.onAnyPointerUp, true);
       window.removeEventListener('blur', this.onPointersLost);
-      window.removeEventListener('themechange', this.onThemeChange);
       this.hideSelectionCallout();
       this.deactivateAll(); // commit an open text edit before the canvases go away
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
@@ -522,7 +515,6 @@ class NotebookView {
     window.addEventListener('pointerup', this.onAnyPointerUp, true);
     window.addEventListener('pointercancel', this.onAnyPointerUp, true);
     window.addEventListener('blur', this.onPointersLost);
-    window.addEventListener('themechange', this.onThemeChange);
   }
 
   // --------------------------------------------------------------- chrome
@@ -3490,7 +3482,7 @@ class NotebookView {
             this.overlayPc = s;
             // board items are already in world coordinates, so the overlay's
             // origin is the world origin and a frame *is* a world rect
-            this.overlay.show(frame, opts, { origin: { x: 0, y: 0 }, pw: 0, ph: 0 });
+            this.overlay.show(frame, opts, { origin: { x: 0, y: 0 }, pw: 0, ph: 0, paper: store.boardPaper(this.nb.id) });
           },
           updateSelection: (s, frame) => {
             if (this.overlayPc === s) this.overlay.update(frame);
@@ -3561,6 +3553,7 @@ class NotebookView {
     const pageEl = el('div', { class: 'page' });
     pageEl.dataset.pageId = page.id;
     pageEl.style.background = paperBg(page.paper);
+    setPaperOverlayVars(pageEl, page.paper); // for the overlays drawn inside the page: ruler/protractor, text caret
     blockGestures(pageEl);
     this.aiMode.attachPage(page, headActions, pageEl);
 
@@ -3607,7 +3600,7 @@ class NotebookView {
         },
         showSelection: (s, frame, opts) => {
           this.overlayPc = s;
-          this.overlay.show(frame, opts, { origin: { x: pageEl.offsetLeft, y: pageEl.offsetTop }, pw: pageW(page), ph: pageH(page) });
+          this.overlay.show(frame, opts, { origin: { x: pageEl.offsetLeft, y: pageEl.offsetTop }, pw: pageW(page), ph: pageH(page), paper: store.pageById(page.id)?.paper ?? page.paper });
         },
         updateSelection: (s, frame) => {
           if (this.overlayPc === s) this.overlay.update(frame);
@@ -3654,6 +3647,7 @@ class NotebookView {
     if (!pageEl) return;
     const bg = paperBg(page.paper);
     if (pageEl.style.background !== bg) pageEl.style.background = bg;
+    setPaperOverlayVars(pageEl, page.paper);
   }
 
   /** Re-applies a single page's paper: background now, cache canvas if it is mounted. */

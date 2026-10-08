@@ -45,7 +45,7 @@ export async function renderPageCanvas(page: Page, scale = 2, region?: PageRegio
   ctx.scale(scale, scale);
   if (top) ctx.translate(0, -top);
   drawTemplate(ctx, page.paper, pw, ph);
-  if (page.background) drawBackground(ctx, page.background, pw, ph);
+  if (page.background) drawBackground(ctx, page.background, pw, ph, page.paper);
   for (const it of store.itemsOf(page.id)) {
     if (isStroke(it)) drawStroke(ctx, it, page.paper);
     else drawElement(ctx, it, page.paper);

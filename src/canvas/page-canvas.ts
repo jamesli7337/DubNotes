@@ -34,7 +34,7 @@ import {
   TEXT_LINE_HEIGHT,
   textHeight,
 } from './elements';
-import { densifyStrokePoints, drawStroke, resolveInkColor } from './freehand';
+import { densifyStrokePoints, drawStroke, paperOverlay, resolveInkColor } from './freehand';
 import { InkSmoother, type ClientSample } from './ink-smoothing';
 import { Guide, projectOnEdge, type EdgeLine, type GuideKind } from './guide';
 import { lineEnds, lineFit, recognizeLine, type ShapeFit } from './recognize';
@@ -92,7 +92,6 @@ import {
   type SurfaceHooks,
 } from './item-surface';
 import { drawTemplate } from './templates';
-import { uiColors } from './ui-colors';
 
 /** Undo-able edits a page can produce. Page add/delete is handled by NotebookView. */
 export type Op =
@@ -577,7 +576,7 @@ export class PageCanvas implements ItemSurface {
     c.setTransform(this.pf, 0, 0, this.pf, 0, 0);
     drawTemplate(c, this.page.paper, this.pw, this.ph);
     if (this.page.background) {
-      drawBackground(c, this.page.background, this.pw, this.ph, () => this.rebuild(this.lastDim));
+      drawBackground(c, this.page.background, this.pw, this.ph, this.page.paper, () => this.rebuild(this.lastDim));
     }
     for (const it of store.itemsOf(this.page.id)) {
       if (hidden?.has(it.id)) continue;
@@ -655,7 +654,7 @@ export class PageCanvas implements ItemSurface {
         // page's own `v` is a fixed bitmap bounded to its own width/height,
         // so the outline would otherwise vanish the moment it crossed into
         // the gray gap or another page's screen area, well before the drop.
-        if (this.lastLassoPath && this.lastLassoPath.length > 1) strokeLassoPath(dv, this.lastLassoPath, true, this.zoom());
+        if (this.lastLassoPath && this.lastLassoPath.length > 1) strokeLassoPath(dv, this.lastLassoPath, true, this.zoom(), this.page.paper);
       }
     }
     if (this.mode === 'tape' && this.live.length > 1) {
@@ -680,7 +679,7 @@ export class PageCanvas implements ItemSurface {
       // lasso is not closePath()ed either: the visible outline is only the
       // dashed line along the path actually drawn, with no straight segment
       // connecting end to start. A box / circle is a closed figure, so it is.
-      strokeLassoPath(v, this.lasso, toolState.lassoShape !== 'free', this.zoom());
+      strokeLassoPath(v, this.lasso, toolState.lassoShape !== 'free', this.zoom(), this.page.paper);
     } else if (!this.xfLive && this.lastLassoPath && this.lastLassoPath.length > 1) {
       // decorative echo of the finalized selection's lasso shape (page-space
       // points, so pan/zoom are already handled the same way as the live
@@ -689,7 +688,7 @@ export class PageCanvas implements ItemSurface {
       // or resized afterwards, and goes stale once that happens. Only while
       // not mid-drag — the xfLive block above already painted it on the
       // shared drag-preview canvas instead for that case (see its comment).
-      strokeLassoPath(v, this.lastLassoPath, true, this.zoom());
+      strokeLassoPath(v, this.lastLassoPath, true, this.zoom(), this.page.paper);
     }
   };
 
@@ -1493,8 +1492,9 @@ export class PageCanvas implements ItemSurface {
     const z = this.zoom();
     v.save();
     v.lineWidth = 2 / z;
-    v.strokeStyle = uiColors().handleStroke;
-    v.fillStyle = uiColors().handleFill;
+    const o = paperOverlay(this.page.paper);
+    v.strokeStyle = o.accent;
+    v.fillStyle = o.handleFill;
     const grip = shapeRotateGrip(se.fit, z, { w: this.pw, h: this.ph });
     v.lineWidth = 1.5 / z;
     v.beginPath(); // the stem, from the outline out to the grip dot
@@ -1568,7 +1568,7 @@ export class PageCanvas implements ItemSurface {
     const le = this.lineEdit;
     if (!le) return;
     drawElement(v, this.lineElement(le), this.page.paper);
-    paintLineHandles(v, le, this.zoom());
+    paintLineHandles(v, le, this.zoom(), this.page.paper);
   }
 
   /** Which endpoint handle of the pending line a press lands on, if any (the nearer wins). */
@@ -2362,11 +2362,6 @@ export class PageCanvas implements ItemSurface {
   paperChanged(): void {
     this.rebuild();
     this.syncEditor();
-  }
-
-  /** Called on `themechange`: repaint the chrome colours (ui-colors.ts) baked into the cache, keeping any eraser dimming; rebuild reschedules the view layer's overlays too. */
-  themeChanged(): void {
-    this.rebuild(this.lastDim);
   }
 
   /** Builds a copy of `el` for another page/position; used by paste and duplicate. */

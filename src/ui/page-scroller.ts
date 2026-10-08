@@ -179,11 +179,6 @@ export class PageScroller {
   private thumbH = 0;
   private thumbRange = 0;
 
-  /** Repaints mounted pages on a theme switch — their placeholders use chrome colours (canvas/ui-colors.ts). */
-  private readonly onThemeChange = (): void => {
-    for (const s of this.slots) s.handle?.refresh();
-  };
-
   constructor(source: PageSource, hooks: ScrollerHooks) {
     this.source = source;
     this.hooks = hooks;
@@ -224,7 +219,6 @@ export class PageScroller {
     this.buildThumb(host);
     this.resizeObserver = new ResizeObserver(() => this.onResize());
     this.resizeObserver.observe(host);
-    window.addEventListener('themechange', this.onThemeChange);
 
     this.layoutThumb();
     this.applyCamera();
@@ -240,7 +234,6 @@ export class PageScroller {
     this.qualityQueue = [];
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
-    window.removeEventListener('themechange', this.onThemeChange);
     for (const s of this.slots) this.unmountSlot(s);
     this.slots = [];
     this.cameraEl?.remove();

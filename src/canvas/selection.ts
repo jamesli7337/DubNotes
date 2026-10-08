@@ -1,5 +1,7 @@
 import { TAP_SLOP } from '../tools';
+import type { Paper } from '../types';
 import { icon } from '../ui/icon';
+import { setPaperOverlayVars } from './freehand';
 import { rotateAround, screenToWorld, worldToScreen, type Camera, type Frame } from './geom';
 
 type Handle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
@@ -36,6 +38,8 @@ export interface OverlayPage {
   origin: { x: number; y: number };
   pw: number;
   ph: number;
+  /** the paper the selection sits on — the box and handles take its overlay colours (paperOverlay), not the app theme's */
+  paper: Paper;
 }
 
 /**
@@ -119,6 +123,7 @@ export class SelectionOverlay {
     this.frame = { ...frame };
     this.page = page;
     this.opts = opts;
+    setPaperOverlayVars(this.box, page.paper);
     this.box.hidden = false;
     this.box.classList.toggle('sel-box--pass', opts.passThrough);
     this.rotEl.hidden = !opts.rotate;

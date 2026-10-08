@@ -1,6 +1,6 @@
 import { paperBg } from '../canvas/templates';
-import { uiColors } from '../canvas/ui-colors';
-import { canvasPixelFactor, pageH, pageW } from '../const';
+import { paperOverlay } from '../canvas/freehand';
+import { canvasPixelFactor, DEFAULT_PAPER, pageH, pageW } from '../const';
 import { getPdfPage, isPdfPageFailed, pdfPageSizes, registerPdfBytes, releasePdfBytes } from '../pdf-render';
 import { store } from '../store';
 import { el } from './dom';
@@ -141,9 +141,10 @@ class PdfPageHandle implements PageHandle {
       return;
     }
     if (isPdfPageFailed(this.key, this.pageNum)) {
-      ctx.fillStyle = uiColors().placeholderBg;
+      const o = paperOverlay(DEFAULT_PAPER); // a reference PDF sits on plain white (filled above), never a notebook's paper
+      ctx.fillStyle = o.placeholderBg;
       ctx.fillRect(0, 0, this.w, this.h);
-      ctx.fillStyle = uiColors().placeholderText;
+      ctx.fillStyle = o.placeholderText;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.font = `${Math.round(this.w / 26)}px system-ui, sans-serif`;

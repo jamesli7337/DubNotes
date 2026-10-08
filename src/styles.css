@@ -57,8 +57,14 @@
   --scrim: rgba(4, 21, 52, 0.34);
   --thumb-bg: #fff;
   --badge-bg: rgba(255, 255, 255, 0.85);
+  /* the page-manager check badge sits on a paper thumbnail, so it is fixed in both themes */
+  --badge-accent: #041534;
+  --badge-on-accent: #ffffff;
+  /* active dock tool / mind-map toggle: a dedicated pair, since the light design puts white on the
+     primary container (M3 would use --on-primary-container, a different light colour) */
+  --tool-active-bg: #1b2a4a;
+  --tool-active-fg: #ffffff;
   --page-edge: rgba(4, 21, 52, 0.06);
-  --guide-body: rgba(255, 255, 255, 0.72);
   --code-bg: rgba(0, 0, 0, 0.08);
   /* behind pages (notebook viewport, split pane): grey enough that white paper reads as separate sheets */
   --stage-bg: #eceef2;
@@ -97,8 +103,70 @@
 }
 
 /* Dark theme — set on <html> by the inline script in index.html and by
-   theme.ts. Intentionally empty until the dark palette lands. */
+   theme.ts. Material 3 dark roles over the same cool-neutral family as the
+   light palette. */
 :root[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* surface ramp — neutral palette (hue 260, chroma 6) */
+  --surface: #111318;
+  --surface-dim: #111318;
+  --surface-bright: #37393e;
+  --surface-c-lowest: #0c0e13;
+  --surface-c-low: #191c20;
+  --surface-c: #1d2024;
+  --surface-c-high: #282a2f;
+  --surface-c-highest: #32353a;
+
+  /* primary / secondary / tertiary: M3 dark roles off each light token's own hue (fixed roles keep their light values) */
+  --primary: #afc6ff;
+  --on-primary: #142f60;
+  --primary-container: #2d4578;
+  --on-primary-container: #d9e2ff;
+  --secondary: #ffb782;
+  --on-secondary: #4f2500;
+  --secondary-container: #703800;
+  --on-tertiary-container: #80f4ff;
+
+  /* text / lines — neutral-variant palette (hue 260, chroma 8) */
+  --on-surface: #e1e2e9;
+  --on-surface-variant: #c4c6cf;
+  --outline: #8d9199;
+  --outline-variant: #43474e;
+
+  /* error */
+  --error: #ffb4ab;
+  --error-container: #930009;
+  --on-error-container: #ffdad5;
+  --error-tint: rgba(255, 180, 171, 0.12);
+  --danger: #ffb4ab;
+  --danger-tint: rgba(255, 180, 171, 0.12);
+
+  /* AI accent: a lighter violet for dark surfaces (AI_COLOR ink is unaffected) */
+  --ai: #d3bbff;
+  --ai-tint: rgba(211, 187, 255, 0.12);
+  --ai-tint-strong: rgba(211, 187, 255, 0.18);
+
+  /* chrome fills (thumb/badge/page-edge stay light: they frame paper) */
+  --scrim: rgba(0, 0, 0, 0.5);
+  --code-bg: rgba(255, 255, 255, 0.1);
+  --stage-bg: #0c0e13;
+  --pane-stage-bg: #0c0e13;
+  --size-dot: #e1e2e9;
+  --toast-bg: rgba(225, 226, 233, 0.92);
+  --toast-fg: #2e3035;
+  --tool-active-bg: #2d4578;
+  --tool-active-fg: #d9e2ff;
+  --cpick-preview-edge: rgba(255, 255, 255, 0.2);
+
+  /* elevation: black, at 0.75x the light alphas */
+  --sh-1: 0 1px 4px rgba(0, 0, 0, 0.06);
+  --sh-2: 0 4px 20px -4px rgba(0, 0, 0, 0.075);
+  --sh-3: 0 8px 30px rgba(0, 0, 0, 0.09);
+  --sh-modal: 0 20px 60px -12px rgba(0, 0, 0, 0.3);
+  --sh-ghost: 0 18px 40px -8px rgba(0, 0, 0, 0.34);
+  --sh-pscroll: 0 1px 6px rgba(0, 0, 0, 0.135);
+  --sh-toast: 0 6px 24px rgba(0, 0, 0, 0.21);
 }
 
 * {
@@ -382,8 +450,25 @@ select {
   background: var(--lib-bg);
   color: var(--lib-text);
 }
-/* the library's own tokens under the dark theme — empty until the dark palette lands */
+/* the library's own tokens under the dark theme (thumb fill stays light — it frames paper) */
 :root[data-theme='dark'] .lib {
+  --lib-accent: #b9c3ff;
+  --lib-accent-dark: #94a6ff;
+  --lib-bg: #111318;
+  --lib-card: #1d2024;
+  --lib-border: rgba(141, 145, 153, 0.28);
+  --lib-text: #e1e2e9;
+  --lib-text-dim: #c4c6cf;
+  --lib-text-faint: #8d9199;
+  --lib-on-accent: #002389;
+  --lib-on-accent-dim: rgba(0, 35, 137, 0.85);
+  --lib-on-accent-tint: rgba(0, 35, 137, 0.22);
+  --lib-on-accent-hover: rgba(0, 35, 137, 0.16);
+  --lib-on-accent-line: rgba(0, 35, 137, 0.55);
+  --lib-mark-glow: #dde1ff;
+  --lib-fab-border: rgba(255, 255, 255, 0.08);
+  --lib-sh-cover: 0 1px 3px rgba(0, 0, 0, 0.19);
+  --lib-sh-fab: 0 14px 32px -8px rgba(0, 0, 0, 0.21), 0 4px 10px -4px rgba(0, 0, 0, 0.09);
 }
 .lib-main {
   flex: 1;
@@ -1390,8 +1475,8 @@ select {
   }
 }
 .nb-dock .tool.active {
-  background: var(--primary-container);
-  color: var(--on-primary);
+  background: var(--tool-active-bg);
+  color: var(--tool-active-fg);
 }
 /* drag-to-reorder, same mechanism as the colour swatches (see
    enableReorderDrag). `--slide` is the offset a displaced tool animates from.
@@ -2056,15 +2141,15 @@ select {
    own the toggle would paint nothing at all: `.iconbtn` has no `.active`
    state. */
 .mindmap-toggle.active {
-  background: var(--primary-container);
-  color: var(--on-primary);
+  background: var(--tool-active-bg);
+  color: var(--tool-active-fg);
 }
 /* .iconbtn:hover:not(:disabled) is the more specific selector, so on hover it
    would otherwise drop the toggle back to the default tint — the same guard
    .ai-toggle.active:hover needs. */
 .mindmap-toggle.active:hover {
-  background: var(--primary-container);
-  color: var(--on-primary);
+  background: var(--tool-active-bg);
+  color: var(--tool-active-fg);
 }
 /* the send button always matches the AI accent (AI_COLOR in ai-mode.ts) rather
    than the default .iconbtn tint, since it only ever appears while AI mode is
@@ -2337,7 +2422,7 @@ select {
   position: absolute;
   z-index: 3;
   box-sizing: border-box;
-  border: 1.5px dashed var(--on-tertiary-container);
+  border: 1.5px dashed var(--paper-accent);
   transform-origin: center;
   touch-action: none;
   cursor: move;
@@ -2355,8 +2440,8 @@ select {
   height: 14px;
   margin: -7px 0 0 -7px;
   border-radius: 50%;
-  background: var(--surface-c-lowest);
-  border: 2px solid var(--on-tertiary-container);
+  background: var(--paper-handle-fill);
+  border: 2px solid var(--paper-accent);
   box-shadow: var(--sh-1);
   touch-action: none;
 }
@@ -2389,9 +2474,9 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--surface-c-lowest);
-  border: 2px solid var(--on-tertiary-container);
-  color: var(--on-tertiary-container);
+  background: var(--paper-handle-fill);
+  border: 2px solid var(--paper-accent);
+  color: var(--paper-accent);
   box-shadow: var(--sh-1);
   cursor: grab;
   touch-action: none;
@@ -2523,9 +2608,9 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: var(--surface-c-lowest);
-  border: 2px solid var(--primary); /* matches the angle readout pill, not the old orange */
-  color: var(--primary);
+  background: var(--paper-handle-fill);
+  border: 2px solid var(--paper-guide-accent); /* matches the angle readout pill, not the old orange */
+  color: var(--paper-guide-accent);
   box-shadow: var(--sh-1);
   cursor: grab;
   touch-action: none;
@@ -2548,21 +2633,21 @@ select {
 /* frosted, neutral instruments: the page shows through, the scales read in
    the ordinary text colours rather than an accent tint */
 .guide__body {
-  fill: var(--guide-body);
-  stroke: var(--outline);
+  fill: var(--paper-guide-body);
+  stroke: var(--paper-guide-edge);
   stroke-width: 1.5;
   pointer-events: auto;
   cursor: move;
 }
 .guide__tick {
-  stroke: var(--on-surface-variant);
+  stroke: var(--paper-guide-ink);
   stroke-width: 1;
 }
 .guide__tick--major {
   stroke-width: 1.5;
 }
 .guide__label {
-  fill: var(--on-surface-variant);
+  fill: var(--paper-guide-ink);
   font: 700 12px var(--font-body);
   text-anchor: middle;
   dominant-baseline: middle;
@@ -2572,7 +2657,7 @@ select {
   font-weight: 600;
 }
 .guide__ray {
-  stroke: var(--on-surface-variant);
+  stroke: var(--paper-guide-ink);
   stroke-width: 1;
   opacity: 0.32;
 }
@@ -2581,11 +2666,11 @@ select {
   opacity: 0.7;
 }
 .guide__origin {
-  fill: var(--primary);
+  fill: var(--paper-guide-accent);
 }
 .guide__origin-ring {
   fill: none;
-  stroke: var(--primary);
+  stroke: var(--paper-guide-accent);
   stroke-width: 1.5;
 }
 .guide__label--unit {
@@ -2606,8 +2691,8 @@ select {
   transform: translateX(-50%) rotate(var(--guide-unrot, 0rad));
   padding: 2px 9px;
   border-radius: var(--r-full);
-  background: var(--primary);
-  color: var(--on-primary);
+  background: var(--paper-guide-accent);
+  color: var(--paper-guide-on-accent);
   font-size: 12px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -2636,7 +2721,7 @@ select {
   transform-origin: center;
   -webkit-user-select: text;
   user-select: text;
-  caret-color: var(--on-tertiary-container);
+  caret-color: var(--paper-accent);
 }
 
 @media (max-width: 380px) {
@@ -2962,7 +3047,7 @@ select {
   align-items: center;
   justify-content: center;
   background: var(--badge-bg);
-  border: 2px solid var(--primary);
+  border: 2px solid var(--badge-accent);
   color: transparent;
   pointer-events: none;
 }
@@ -2971,8 +3056,8 @@ select {
   height: 16px;
 }
 .pagemgr__card--selected .pagemgr__check {
-  background: var(--primary);
-  color: var(--on-primary);
+  background: var(--badge-accent);
+  color: var(--badge-on-accent);
 }
 .pagemgr__card--selected .pagemgr__thumb {
   border-color: var(--primary);

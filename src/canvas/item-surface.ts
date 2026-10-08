@@ -1,10 +1,10 @@
 import { HOLD_DRIFT_PX, LASER_COLOR, LASER_FADE_MS, SHAPE_CUE_MS, SHAPE_HOLD_MS } from '../tools';
-import type { PageItem, PageElement, ShapeElement, TapeElement, TextElement } from '../types';
+import type { PageItem, PageElement, Paper, ShapeElement, TapeElement, TextElement } from '../types';
 import { isStroke, nearPolyline, uid } from '../util';
+import { paperOverlay } from './freehand';
 import { aabb, itemsFrame, nearConnector, pointInElement, type Frame } from './geom';
 import type { Op } from './page-canvas';
 import type { OverlayOptions } from './selection';
-import { uiColors } from './ui-colors';
 
 /**
  * What a page and a board have in common as a place items live on.
@@ -302,7 +302,7 @@ export function sameText(a: PageElement, b: TextElement): boolean {
  * Dash size and line width are screen-px constants counter-scaled by `zoom`,
  * so the outline stays a uniform on-screen dotted line at any magnification.
  */
-export function strokeLassoPath(v: CanvasRenderingContext2D, path: number[][], closed: boolean, zoom: number): void {
+export function strokeLassoPath(v: CanvasRenderingContext2D, path: number[][], closed: boolean, zoom: number, paper: Paper): void {
   v.save();
   v.beginPath();
   v.moveTo(path[0][0], path[0][1]);
@@ -322,7 +322,8 @@ export function strokeLassoPath(v: CanvasRenderingContext2D, path: number[][], c
   const z = zoom > 0 ? zoom : 1;
   v.setLineDash([6 / z, 4 / z]);
   v.lineWidth = 1.5 / z;
-  v.strokeStyle = uiColors().lasso;
+  v.strokeStyle = paperOverlay(paper).accent;
+  v.globalAlpha *= 0.9; // the outline has always been the accent at 90%
   v.stroke();
   v.restore();
 }
@@ -426,12 +427,13 @@ export function holdDrifted(anchor: number[] | null, tip: number[], zoom: number
 }
 
 /** The pending line's two endpoint handles, drawn at a constant on-screen size. */
-export function paintLineHandles(v: CanvasRenderingContext2D, le: LineEdit, zoom: number): void {
+export function paintLineHandles(v: CanvasRenderingContext2D, le: LineEdit, zoom: number, paper: Paper): void {
   const z = zoom > 0 ? zoom : 1;
+  const o = paperOverlay(paper);
   v.save();
   v.lineWidth = 2 / z;
-  v.strokeStyle = uiColors().handleStroke;
-  v.fillStyle = uiColors().handleFill;
+  v.strokeStyle = o.accent;
+  v.fillStyle = o.handleFill;
   for (const p of [le.a, le.b]) {
     v.beginPath();
     v.arc(p[0], p[1], LINE_HANDLE_R / z, 0, Math.PI * 2);

@@ -31,6 +31,83 @@ export function resolveInkColor(color: string, paper: Paper): string {
   return AUTO_INK[paper.color] ?? AUTO_INK_FALLBACK;
 }
 
+/** The paper-darkness test auto ink is keyed on: true when this paper takes the light ink. */
+function isDarkPaper(paper: Paper): boolean {
+  return (AUTO_INK[paper.color] ?? AUTO_INK_FALLBACK) === AUTO_INK.dark;
+}
+
+/**
+ * Colours for anything drawn *over* paper — selection, edit handles, the
+ * ruler/protractor, the text caret, a failed-PDF placeholder. Keyed on the
+ * paper (never the app theme), so they read on the sheet they sit on and an
+ * export or AI capture comes out the same whatever theme is active.
+ */
+export interface PaperOverlay {
+  /** selection box/handles, lasso, line-snap and shape-edit handles, mind-map nodes, text caret */
+  accent: string;
+  /** the inside of those handles */
+  handleFill: string;
+  /** ruler/protractor body */
+  guideBody: string;
+  /** ruler/protractor body outline */
+  guideEdge: string;
+  /** ruler/protractor ticks, rays and labels */
+  guideInk: string;
+  /** protractor origin, rotate grip and angle readout pill */
+  guideAccent: string;
+  /** text on the angle readout pill */
+  guideOnAccent: string;
+  /** a background PDF page that failed to render: the box... */
+  placeholderBg: string;
+  /** ...and its message */
+  placeholderText: string;
+  /** hairline frame round a library thumbnail, so an empty page still reads as a page */
+  thumbFrame: string;
+}
+
+const LIGHT_PAPER_OVERLAY: PaperOverlay = {
+  accent: '#2563eb',
+  handleFill: '#ffffff',
+  guideBody: 'rgba(255, 255, 255, 0.72)',
+  guideEdge: '#707b93',
+  guideInk: '#434a59',
+  guideAccent: '#041534',
+  guideOnAccent: '#ffffff',
+  placeholderBg: '#e3e1da',
+  placeholderText: '#79766c',
+  thumbFrame: 'rgba(4, 21, 52, 0.14)',
+};
+
+const DARK_PAPER_OVERLAY: PaperOverlay = {
+  accent: '#8ca8ff',
+  handleFill: '#1e2330',
+  guideBody: 'rgba(30, 35, 48, 0.72)',
+  guideEdge: '#8e9099',
+  guideInk: '#c4c6d0',
+  guideAccent: '#afc6ff',
+  guideOnAccent: '#142f60',
+  placeholderBg: '#2c3140',
+  placeholderText: '#a3a9b8',
+  thumbFrame: 'rgba(255, 255, 255, 0.14)',
+};
+
+export function paperOverlay(paper: Paper): PaperOverlay {
+  return isDarkPaper(paper) ? DARK_PAPER_OVERLAY : LIGHT_PAPER_OVERLAY;
+}
+
+/** Publishes `paperOverlay(paper)` as `--paper-*` custom properties on `el`, for the CSS-drawn overlays inside it. */
+export function setPaperOverlayVars(el: HTMLElement, paper: Paper): void {
+  const o = paperOverlay(paper);
+  const s = el.style;
+  s.setProperty('--paper-accent', o.accent);
+  s.setProperty('--paper-handle-fill', o.handleFill);
+  s.setProperty('--paper-guide-body', o.guideBody);
+  s.setProperty('--paper-guide-edge', o.guideEdge);
+  s.setProperty('--paper-guide-ink', o.guideInk);
+  s.setProperty('--paper-guide-accent', o.guideAccent);
+  s.setProperty('--paper-guide-on-accent', o.guideOnAccent);
+}
+
 /** perfect-freehand's own default for a sample that carries no usable pressure. */
 const DEFAULT_PRESSURE = 0.5;
 /** ...and the one it gives the very first sample, which has no velocity behind it yet. */
