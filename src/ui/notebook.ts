@@ -190,6 +190,10 @@ class NotebookView {
   private aiSendBtn!: HTMLButtonElement;
   /** The app bar's right-hand button group (everything but back/title) — queried in applyAiToolbarLockdown to disable every button there but aiToggleBtn/aiSendBtn while AI mode is on. */
   private appBarRightGroup!: HTMLElement;
+  /** `.nb-appbar`: the fixed, pointer-transparent row holding the two floating islands — measured by refreshTopClearance, since `.nb-scroll` now runs up behind it. */
+  private appBarEl!: HTMLElement;
+  /** Re-measures the clearance when the island row's size changes (resize, wrapping); disconnected in onLeave. */
+  private appBarObserver: ResizeObserver | null = null;
   /** The dock's own Pen button — the one tool button AI mode leaves enabled (and turns violet); set fresh by renderTools each rebuild. */
   private penToolBtn!: HTMLButtonElement;
   /** The dock's own Eraser button — also left enabled by AI mode's lockdown; set fresh by renderTools each rebuild. */
@@ -455,6 +459,12 @@ class NotebookView {
       const b = store.boardBounds(this.nb.id);
       this.camera.x = b ? b.x + b.w / 2 - this.scrollEl.clientWidth / 2 : -this.scrollEl.clientWidth / 2;
       this.camera.y = b ? b.y + b.h / 2 - this.scrollEl.clientHeight / 2 : -this.scrollEl.clientHeight / 2;
+      if (b) {
+        // `.nb-scroll` runs up behind the islands: if centring left the content's
+        // top edge under them (zoom is 1 here), slide it down to just clear them
+        const inset = this.appBarEl.getBoundingClientRect().bottom - this.scrollEl.getBoundingClientRect().top + TOP_GAP;
+        if (b.y - this.camera.y < inset) this.camera.y = b.y - inset;
+      }
       this.setZoom(1);
     } else {
       const first = store.pagesOf(this.nb.id)[0];
@@ -508,6 +518,8 @@ class NotebookView {
       this.stopMomentum();
       this.stopQuality();
       this.board?.unmount();
+      this.appBarObserver?.disconnect();
+      this.appBarObserver = null;
       if (this.dockSettleTimer) clearTimeout(this.dockSettleTimer);
       this.dockSettleTimer = null;
       this.destroyScrollbarThumb();
@@ -529,7 +541,9 @@ class NotebookView {
   private buildChrome(): void {
     const view = el('div', { class: 'nb' });
 
-    const bar = el('header', { class: 'nb-appbar' });
+    // two floating islands (back + title | actions) in a fixed, pointer-transparent row
+    const bar = el('div', { class: 'nb-appbar' });
+    const leftIsland = el('div', { class: 'nb-appbar__island nb-appbar__left' });
 
     const back = el('button', {
       class: 'iconbtn',
@@ -652,11 +666,8 @@ class NotebookView {
       void this.openPageManager();
     });
 
-    // three grid zones (back | title | actions) so the title sits truly
-    // centered in the bar regardless of how many buttons end up on each side
-    // — undo/redo used to live in the right zone; now that they're in the
-    // dock's top row instead, this keeps the bar from reading lopsided.
-    const rightGroup = el('div', { class: 'nb-appbar__right' });
+    // the right island: the actions (undo/redo live in the dock's top row)
+    const rightGroup = el('div', { class: 'nb-appbar__island nb-appbar__right' });
     // A board has no page list to manage, and AI mode and export land in later
     // phases — so those buttons are left out entirely rather than shown doing
     // nothing. Split stays (a board can host a reference pane exactly like a
@@ -685,7 +696,9 @@ class NotebookView {
       rightGroup.append(this.mindMapBtn, this.splitBtn, importBtn, paperBtn);
     }
     else rightGroup.append(this.aiToggleBtn, this.aiSendBtn, this.splitBtn, importBtn, exportBtn, pagesBtn, paperBtn);
-    bar.append(back, this.titleEl, rightGroup);
+    leftIsland.append(back, this.titleEl);
+    bar.append(leftIsland, rightGroup);
+    this.appBarEl = bar;
     this.appBarRightGroup = rightGroup;
 
     // Notability-style dock: a fixed top row (tools + undo/redo, never reflows)
@@ -767,6 +780,21 @@ class NotebookView {
     // has to wait until scrollEl is actually attached and laid out —
     // clientWidth/Height (and so the canvas's own pixel size) read 0 before that.
     this.layoutDragPreviewCanvas();
+
+    // `.nb-scroll` runs up behind the islands, so their bottom edge feeds the
+    // top clearance. The row is fixed to the viewport edges, so this fires on
+    // a window resize as well as on the row growing or shrinking. The first
+    // callback is the initial observation — pages don't exist yet — so skip it.
+    let islandsH = -1;
+    this.appBarObserver = new ResizeObserver(() => {
+      const h = this.appBarEl.offsetHeight;
+      const first = islandsH < 0;
+      islandsH = h;
+      if (first) return;
+      if (this.isBoard) this.refreshTopClearance();
+      else this.settleTopClearance();
+    });
+    this.appBarObserver.observe(this.appBarEl);
 
     // Opening/closing/floating the pane resizes `.nb-scroll` without a window
     // `resize` to announce it, and the shared drag-preview canvas is sized by
@@ -1035,18 +1063,20 @@ class NotebookView {
     const dockRect = this.toolsEl.getBoundingClientRect();
     const head = this.wrapById.values().next().value?.querySelector<HTMLElement>('.page-head');
     const headH = head ? head.offsetHeight : 0;
+    // `.nb-scroll` runs up behind the floating islands, so page 1 must also rest below their bottom edge
+    const islands = this.appBarEl.getBoundingClientRect().bottom - scrollTop + TOP_GAP;
     if (toolState.dockPosition === 'bottom') {
       // Mirror image: the dock is at the bottom, so it supplies the clearance
-      // below the last page and nothing sits over the top of page 1. A board
-      // keeps the viewport-fraction fallback, as it does for the top clearance.
-      this.topClearance = TOP_GAP;
+      // below the last page and only the islands sit over the top of page 1. A
+      // board keeps the viewport-fraction fallback, as it does for the top clearance.
+      this.topClearance = Math.max(TOP_GAP, islands);
       this.bottomClearance = this.isBoard
         ? null
         : Math.max(TOP_GAP, this.scrollEl.getBoundingClientRect().bottom - dockRect.top + TOP_GAP);
       return;
     }
     this.bottomClearance = null;
-    this.topClearance = Math.max(TOP_GAP, dockRect.bottom - scrollTop + TOP_GAP - headH * this.camera.zoom);
+    this.topClearance = Math.max(TOP_GAP, dockRect.bottom - scrollTop + TOP_GAP - headH * this.camera.zoom, islands);
   }
 
   /** The greatest `camera.y` allowed: the last page's own bottom can't be dragged more than the bottom clearance above the viewport's bottom — the dock's own footprint when it is bottom-docked, else `BOTTOM_CLEARANCE_VH` of screen height. */
