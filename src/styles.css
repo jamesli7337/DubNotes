@@ -447,7 +447,6 @@ select {
   --lib-on-accent-hover: rgba(255, 255, 255, 0.16);
   --lib-on-accent-line: rgba(255, 255, 255, 0.55);
   --lib-mark-glow: #6ea1ff;
-  --lib-featured-stripe: #fbbf24;
   --lib-thumb-bg: #fff;
   --lib-fab-border: rgba(255, 255, 255, 0.7);
   --lib-sh-cover: 0 1px 3px rgba(4, 21, 52, 0.25);
@@ -567,7 +566,7 @@ select {
   gap: 16px;
   padding: 18px 20px 18px 22px;
   background: var(--lib-card);
-  border: 1px solid color-mix(in srgb, var(--lib-accent) 18%, var(--lib-border));
+  border: 1px solid var(--lib-border);
   border-radius: var(--r-xl);
   box-shadow: var(--sh-1);
   cursor: pointer;
@@ -576,15 +575,6 @@ select {
 }
 .featured:hover {
   box-shadow: var(--sh-2);
-}
-.featured::before {
-  content: '';
-  position: absolute;
-  left: 0;
-  top: 0;
-  bottom: 0;
-  width: 5px;
-  background: linear-gradient(to bottom, var(--lib-featured-stripe), var(--lib-accent) 55%, var(--lib-accent-dark));
 }
 .featured:active {
   transform: scale(0.99);
@@ -781,9 +771,8 @@ select {
   left: 11px;
   right: 11px;
   z-index: 2;
-  justify-content: space-between;
+  justify-content: flex-end;
 }
-.nb-items--grid .nb-card__toprow .tag,
 .nb-items--grid .nb-card__pages {
   padding: 2px 8px;
   border-radius: var(--r);
@@ -872,20 +861,6 @@ select {
   align-items: center;
   gap: 8px;
 }
-.tag {
-  padding: 2px 9px;
-  border-radius: var(--r) ;
-  background: color-mix(in srgb, var(--lib-text-faint) 14%, transparent);
-  color: var(--lib-text-dim);
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  text-transform: capitalize;
-}
-.tag--tpl {
-  background: color-mix(in srgb, var(--lib-accent) 12%, transparent);
-  color: var(--lib-accent-dark);
-}
 .nb-card__pages {
   font-size: 11px;
   font-weight: 600;
@@ -950,12 +925,6 @@ select {
 .featured__thumb.has-cover canvas {
   border-radius: 4px;
   box-shadow: var(--lib-sh-cover);
-}
-.featured {
-  --cover: var(--lib-accent);
-}
-.featured::before {
-  background: var(--cover);
 }
 
 /* folder tree */

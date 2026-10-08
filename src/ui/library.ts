@@ -262,7 +262,7 @@ function buildContent(root: HTMLElement, folder: Folder | null): HTMLElement {
   if (!folder && recent) {
     // featured — most recently edited, anywhere
     const featSection = el('div');
-    featSection.append(el('div', { class: 'section-label accent', text: 'Resume drawing' }));
+    featSection.append(el('div', { class: 'section-label accent', text: 'Continue work' }));
     featSection.append(buildFeatured(recent));
     content.append(featSection);
   }
@@ -544,7 +544,6 @@ function openActionMenu(
 // ------------------------------------------------------------------- cards
 function buildFeatured(nb: Notebook): HTMLElement {
   const card = el('div', { class: 'featured', role: 'button', tabindex: '0' });
-  if (nb.cover) card.style.setProperty('--cover', nb.cover.color);
 
   const thumb = el('div', { class: 'featured__thumb' + (nb.cover ? ' has-cover' : '') });
   if (nb.cover) thumb.style.background = coverBackground(nb.cover);
@@ -552,10 +551,7 @@ function buildFeatured(nb: Notebook): HTMLElement {
 
   const inner = el('div', { class: 'featured__body' });
   const top = el('div', { class: 'nb-card__toprow' });
-  top.append(
-    el('span', { class: 'tag tag--tpl', text: firstTemplate(nb) }),
-    el('span', { class: 'nb-card__pages', text: sizeLabel(nb) })
-  );
+  top.append(el('span', { class: 'nb-card__pages', text: sizeLabel(nb) }));
   inner.append(
     top,
     el('h3', { class: 'featured__title', text: nb.name }),
@@ -586,10 +582,7 @@ function buildCard(nb: Notebook, root: HTMLElement, folder: Folder | null): HTML
   const body = el('div', { class: 'nb-card__body' });
   const main = el('button', { class: 'nb-card__main' });
   const top = el('div', { class: 'nb-card__toprow' });
-  top.append(
-    el('span', { class: 'tag', text: firstTemplate(nb) }),
-    el('span', { class: 'nb-card__pages', text: sizeLabel(nb) })
-  );
+  top.append(el('span', { class: 'nb-card__pages', text: sizeLabel(nb) }));
 
   const foot = el('div', { class: 'nb-card__foot' });
   foot.append(el('span', { class: 'nb-card__date', text: relDate(nb.updatedAt) }));
@@ -933,11 +926,6 @@ function buildFab(root: HTMLElement, folder: Folder | null): HTMLElement {
 }
 
 // ------------------------------------------------------------------- helpers
-/** Paper template of the notebook's first page, for the card accent + tag. */
-function firstTemplate(nb: Notebook): PaperTemplate {
-  return store.pagesOf(nb.id)[0]?.paper.template ?? 'blank';
-}
-
 /** What to call one item in UI text — a board is not a notebook. */
 function typeName(nb: Notebook): 'Board' | 'Notebook' {
   return nb.kind === 'board' ? 'Board' : 'Notebook';
