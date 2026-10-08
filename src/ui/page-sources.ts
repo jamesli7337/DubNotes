@@ -1,4 +1,5 @@
 import { paperBg } from '../canvas/templates';
+import { uiColors } from '../canvas/ui-colors';
 import { canvasPixelFactor, pageH, pageW } from '../const';
 import { getPdfPage, isPdfPageFailed, pdfPageSizes, registerPdfBytes, releasePdfBytes } from '../pdf-render';
 import { store } from '../store';
@@ -140,9 +141,9 @@ class PdfPageHandle implements PageHandle {
       return;
     }
     if (isPdfPageFailed(this.key, this.pageNum)) {
-      ctx.fillStyle = '#e3e1da';
+      ctx.fillStyle = uiColors().placeholderBg;
       ctx.fillRect(0, 0, this.w, this.h);
-      ctx.fillStyle = '#79766c';
+      ctx.fillStyle = uiColors().placeholderText;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.font = `${Math.round(this.w / 26)}px system-ui, sans-serif`;

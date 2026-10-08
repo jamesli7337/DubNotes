@@ -1,6 +1,7 @@
 import { drawBackground, drawElement } from '../canvas/elements';
 import { drawStroke } from '../canvas/freehand';
 import { drawTemplate } from '../canvas/templates';
+import { uiColors } from '../canvas/ui-colors';
 import { DEFAULT_PAPER, PAGE_H, PAGE_W, pageH, pageW } from '../const';
 import { store } from '../store';
 import type { Notebook } from '../types';
@@ -38,7 +39,7 @@ export function renderThumb(nb: Notebook, wPx = 168, onReady?: () => void): HTML
     /* keep whatever managed to paint */
   }
   // hairline frame so an empty page still reads as a page
-  ctx.strokeStyle = 'rgba(4, 21, 52, 0.14)';
+  ctx.strokeStyle = uiColors().thumbFrame;
   ctx.lineWidth = 2;
   ctx.strokeRect(1, 1, pw - 2, ph - 2);
   return c;
@@ -46,6 +47,9 @@ export function renderThumb(nb: Notebook, wPx = 168, onReady?: () => void): HTML
 
 /** Fills `host` with a thumbnail once the main thread is idle, so lists paint instantly. */
 export function lazyThumb(host: HTMLElement, nb: Notebook, wPx = 168): void {
+  // tagged so a theme switch can find and repaint it (see the listener below)
+  host.dataset.thumbNb = nb.id;
+  host.dataset.thumbW = String(wPx);
   let redrawn = false;
   const run = (): void => {
     host.replaceChildren(
@@ -61,3 +65,13 @@ export function lazyThumb(host: HTMLElement, nb: Notebook, wPx = 168): void {
   if (ric) ric(run, { timeout: 800 });
   else setTimeout(run, 0);
 }
+
+// The frame is a chrome colour (canvas/ui-colors.ts): repaint every thumbnail
+// on screen when the theme switches. Found through the DOM rather than a
+// registry, so nothing holds on to hosts from a library that's been replaced.
+window.addEventListener('themechange', () => {
+  for (const host of document.querySelectorAll<HTMLElement>('[data-thumb-nb]')) {
+    const nb = store.notebooks.get(host.dataset.thumbNb ?? '');
+    if (nb) lazyThumb(host, nb, Number(host.dataset.thumbW) || undefined);
+  }
+});

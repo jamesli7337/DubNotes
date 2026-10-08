@@ -84,6 +84,7 @@ import {
   type SurfaceHooks,
 } from './item-surface';
 import { drawTemplate, SPACING_PX } from './templates';
+import { uiColors } from './ui-colors';
 import { TAPE_MIN, rubOut, type Rubbed } from './page-canvas';
 
 /**
@@ -369,7 +370,6 @@ export class BoardCanvas implements ItemSurface {
 
   /** view-only: which tape strips are peeled back. Never stored, same as a page. */
   private readonly peeled = new Set<string>();
-  private tapeResizeOrig: TapeElement | null = null;
 
   /** selection + transform state, mirroring PageCanvas's own */
   private selected = new Set<string>();
@@ -814,6 +814,7 @@ export class BoardCanvas implements ItemSurface {
       const entersExisting =
         kind === 'lasso' ||
         (kind === 'shapes' && this.topShapeAt(pt[0], pt[1]) !== null) ||
+        (kind === 'tape' && this.topTapeAt(pt[0], pt[1]) !== null) ||
         (kind === 'text' && this.topTextAt(pt[0], pt[1]) !== null);
       if (!entersExisting) {
         this.commitEdit(); // an open text editor is state this press dismisses too
@@ -1849,9 +1850,9 @@ export class BoardCanvas implements ItemSurface {
       const isSource = this.connect?.fromId === b.id && this.connect.fromNode === node;
       ctx.beginPath();
       ctx.arc(pt[0], pt[1], isSource ? r * 1.4 : r, 0, Math.PI * 2);
-      ctx.fillStyle = isSource ? '#2563eb' : '#ffffff';
+      ctx.fillStyle = isSource ? uiColors().handleStroke : uiColors().handleFill;
       ctx.fill();
-      ctx.strokeStyle = '#2563eb';
+      ctx.strokeStyle = uiColors().handleStroke;
       ctx.stroke();
     }
     ctx.restore();
@@ -1867,7 +1868,7 @@ export class BoardCanvas implements ItemSurface {
     const z = this.zoom();
     const [ax, ay] = bubbleNodePoint(from, drag.fromNode);
     ctx.save();
-    ctx.strokeStyle = '#2563eb';
+    ctx.strokeStyle = uiColors().handleStroke;
     ctx.lineWidth = Math.max(from.size, 1.5 / z);
     ctx.setLineDash([6 / z, 4 / z]);
     ctx.beginPath();
@@ -2310,39 +2311,11 @@ export class BoardCanvas implements ItemSurface {
       this.toggleTape(id);
       return;
     }
-    const t = this.getTape(id);
-    if (t) this.hooks.onTapeTap(this, id, { x: t.x, y: t.y, w: t.w, h: t.h, rot: t.rotation });
+    this.setSelection([id]);
   }
 
   isPeeled(id: string): boolean {
     return this.peeled.has(id);
-  }
-
-  beginTapeResize(id: string): TapeElement | null {
-    const t = this.getTape(id);
-    this.tapeResizeOrig = t ? { ...t } : null;
-    return this.tapeResizeOrig;
-  }
-
-  previewTapeResize(id: string, w: number, h: number): void {
-    const t = this.getTape(id);
-    if (!t) return;
-    store.replaceItems(t.pageId, [{ ...t, w: Math.max(TAPE_MIN, w), h: Math.max(TAPE_MIN, h) }]);
-    this.invalidate();
-  }
-
-  commitTapeResize(id: string): void {
-    const before = this.tapeResizeOrig;
-    this.tapeResizeOrig = null;
-    if (!before) return;
-    const after = this.getTape(id);
-    if (!after || (after.w === before.w && after.h === before.h)) return;
-    this.hooks.onOp({ kind: 'replace-items', pageId: before.pageId, before: [before], after: [after] });
-  }
-
-  tapeGeometry(id: string): { w: number; h: number } | null {
-    const t = this.getTape(id);
-    return t ? { w: t.w, h: t.h } : null;
   }
 
   deleteTape(id: string): void {
@@ -2353,12 +2326,6 @@ export class BoardCanvas implements ItemSurface {
     this.peeled.delete(id);
     this.invalidate();
     this.hooks.onOp({ kind: 'remove-items', pageId: t.pageId, items: removed });
-  }
-
-  /** A board has no page to bound a strip by, so the slider spans what is on screen. */
-  tapeSizeLimit(): { w: number; h: number } {
-    const v = this.visibleRect();
-    return { w: Math.max(TAPE_MIN * 4, v.w), h: Math.max(TAPE_MIN * 4, v.h) };
   }
 
   // -------------------------------------------------------------- selection

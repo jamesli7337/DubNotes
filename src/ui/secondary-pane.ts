@@ -912,36 +912,16 @@ export class SecondaryPane {
   }
 
   /**
-   * A brief, non-blocking notice. Built here with inline styles rather than a
-   * shared component because the app has no toast of its own and adding one
-   * would mean a stylesheet rule; this is the only thing in the pane that
-   * needs one. Never interactive (`pointer-events: none`), so it can't eat a
-   * touch meant for the page underneath, and it sits above the dock but below
-   * the AI panel and any modal.
+   * A brief, non-blocking notice, styled by `.split-toast` (themed tokens);
+   * this is the only thing in the pane that needs one. Never interactive
+   * (`pointer-events: none`), so it can't eat a touch meant for the page
+   * underneath, and it sits above the dock but below the AI panel and any
+   * modal. Only the fade's opacity is driven inline.
    */
   private toast(message: string): void {
     this.toastEl?.remove();
     if (this.toastTimer) clearTimeout(this.toastTimer);
     const t = el('div', { class: 'split-toast', role: 'status', text: message });
-    t.style.cssText = [
-      'position:fixed',
-      'left:50%',
-      'transform:translateX(-50%)',
-      'bottom:calc(32px + env(safe-area-inset-bottom))',
-      'z-index:58',
-      'pointer-events:none',
-      'max-width:min(420px,86vw)',
-      'padding:10px 18px',
-      'border-radius:9999px',
-      'background:rgba(16,24,43,0.92)',
-      'color:#fff',
-      'font-size:14px',
-      'font-weight:600',
-      'text-align:center',
-      'box-shadow:0 6px 24px rgba(4,21,52,0.28)',
-      'opacity:0',
-      'transition:opacity 0.18s ease',
-    ].join(';');
     this.container.append(t);
     this.toastEl = t;
     requestAnimationFrame(() => {

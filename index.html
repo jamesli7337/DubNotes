@@ -11,6 +11,21 @@
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="DubNotes" />
+    <script>
+      // Resolve the chrome theme before first paint (see src/theme.ts, which
+      // shares the 'dubnotes-theme' key and keeps this in sync afterwards).
+      (function () {
+        var pref = 'system';
+        try {
+          pref = localStorage.getItem('dubnotes-theme') || 'system';
+        } catch (e) {}
+        var theme = pref === 'light' || pref === 'dark' ? pref : 'system';
+        if (theme === 'system') {
+          theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+        document.documentElement.setAttribute('data-theme', theme);
+      })();
+    </script>
     <link rel="manifest" href="./manifest.webmanifest" />
     <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
     <link rel="icon" type="image/png" href="./icons/icon-192.png" />

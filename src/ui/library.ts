@@ -3,6 +3,7 @@ import { IMPORT_ACCEPT, importFile } from '../import-file';
 import { DEFAULT_PAPER } from '../const';
 import { store, type FolderItem } from '../store';
 import type { Backup, Divider, Folder, Notebook, NotebookCover, Paper, PaperColor, PaperSpacing, PaperTemplate } from '../types';
+import { getThemePref, setThemePref, type ThemePref } from '../theme';
 import { download, timestamp } from '../util';
 import { COVER_COLORS, COVER_PATTERNS, coverBackground } from './covers';
 import { alertDialog, confirmDialog, openAnchoredModal, openModal, textPrompt, type Modal } from './dialog';
@@ -184,9 +185,48 @@ function buildHeader(folder: Folder | null): HTMLElement {
     await importFile(file, folder?.id ?? null);
   });
 
-  actions.append(fileBtn, exportBtn, importBtn, importInput, fileInput);
+  // the rightmost header control; icon-only, with a 44px hit area (see .lib-hdrbtn--icon)
+  const settingsBtn = el('button', { class: 'lib-hdrbtn lib-hdrbtn--icon', title: 'Settings', 'aria-label': 'Settings' });
+  settingsBtn.append(icon('settings'));
+  settingsBtn.addEventListener('click', () => openSettings());
+
+  actions.append(fileBtn, exportBtn, importBtn, settingsBtn, importInput, fileInput);
   header.append(brand, actions);
   return header;
+}
+
+// ----------------------------------------------------------------- settings
+/**
+ * The Settings sheet: a titled list of rows, one setting per row (label on
+ * the left, its control on the right). Appearance is the only one so far.
+ */
+function openSettings(): void {
+  const box = el('div', { class: 'dlg settings' });
+
+  const head = el('div', { class: 'settings__head' });
+  const closeBtn = el('button', { type: 'button', class: 'iconbtn', title: 'Close', 'aria-label': 'Close' });
+  closeBtn.append(icon('close'));
+  head.append(el('h2', { class: 'dlg__title', text: 'Settings' }), closeBtn);
+
+  const THEMES: ThemePref[] = ['system', 'light', 'dark'];
+  const list = el('div', { class: 'settings__list' });
+  list.append(
+    settingsRow(
+      'Appearance',
+      segmented(['System', 'Light', 'Dark'], THEMES.indexOf(getThemePref()), (i) => setThemePref(THEMES[i]))
+    )
+  );
+
+  box.append(head, list);
+  const modal = openModal(box);
+  closeBtn.addEventListener('click', () => modal.close());
+}
+
+/** One row of the Settings sheet. */
+function settingsRow(label: string, control: HTMLElement): HTMLElement {
+  const row = el('div', { class: 'settings__row' });
+  row.append(el('span', { class: 'settings__label', text: label }), control);
+  return row;
 }
 
 // --------------------------------------------------------------------- main

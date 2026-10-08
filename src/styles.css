@@ -42,6 +42,32 @@
   --error: #ba1a1a;
   --error-container: #ffdad6;
   --on-error-container: #93000a;
+  --error-tint: rgba(186, 26, 26, 0.1);
+  /* destructive hover (split pane close) */
+  --danger: #dc2626;
+  --danger-tint: rgba(220, 38, 38, 0.1);
+
+  /* AI mode accent — matches AI_COLOR in ai-mode.ts, which stays a fixed ink
+     value; this is only the chrome's copy of it */
+  --ai: #6d28d9;
+  --ai-tint: rgba(109, 40, 217, 0.1);
+  --ai-tint-strong: rgba(109, 40, 217, 0.15);
+
+  /* chrome fills */
+  --scrim: rgba(4, 21, 52, 0.34);
+  --thumb-bg: #fff;
+  --badge-bg: rgba(255, 255, 255, 0.85);
+  --page-edge: rgba(4, 21, 52, 0.06);
+  --guide-body: rgba(255, 255, 255, 0.72);
+  --code-bg: rgba(0, 0, 0, 0.08);
+  --pane-stage-bg: #f3f5f9;
+  --size-dot: #000;
+  --toast-bg: rgba(16, 24, 43, 0.92);
+  --toast-fg: #fff;
+  --cpick-ring: #fff;
+  --cpick-dot-edge: rgba(0, 0, 0, 0.5);
+  --cpick-thumb-edge: rgba(0, 0, 0, 0.35);
+  --cpick-preview-edge: rgba(0, 0, 0, 0.15);
 
   /* radii */
   --r: 6px;
@@ -53,11 +79,24 @@
   --sh-1: 0 1px 4px rgba(4, 21, 52, 0.08);
   --sh-2: 0 4px 20px -4px rgba(27, 42, 74, 0.1);
   --sh-3: 0 8px 30px rgba(27, 42, 74, 0.12);
+  --sh-modal: 0 20px 60px -12px rgba(4, 21, 52, 0.4);
+  --sh-ghost: 0 18px 40px -8px rgba(27, 42, 74, 0.45);
+  --sh-pscroll: 0 1px 6px rgba(4, 21, 52, 0.18);
+  --sh-toast: 0 6px 24px rgba(4, 21, 52, 0.28);
 
   --font-head: 'Epilogue', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
   --font-body: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
 
   --header-h: 60px;
+
+  /* Light is the only palette so far: pinned so a dark OS doesn't restyle
+     native controls before the dark tokens exist. */
+  color-scheme: light;
+}
+
+/* Dark theme — set on <html> by the inline script in index.html and by
+   theme.ts. Intentionally empty until the dark palette lands. */
+:root[data-theme='dark'] {
 }
 
 * {
@@ -211,8 +250,8 @@ select {
   width: 34px;
   height: 34px;
   border-radius: var(--r-lg);
-  background: linear-gradient(135deg, var(--lib-accent-dark), var(--lib-accent) 60%, #6ea1ff);
-  color: #fff;
+  background: linear-gradient(135deg, var(--lib-accent-dark), var(--lib-accent) 60%, var(--lib-mark-glow));
+  color: var(--lib-on-accent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -288,6 +327,25 @@ select {
     padding: 8px;
   }
 }
+/* Settings (gear): the same pill, icon-only at every width — the size the
+   labelled pills collapse to under 560px. The pill stays ~33px to match its
+   neighbours; ::before widens the hit area to 44px without moving anything
+   (5.5px overhang per side, inside the 6px gap and the header's padding).
+   The right margin keeps it clear of a landscape notch. */
+.lib-hdrbtn--icon {
+  position: relative;
+  padding: 8px;
+  margin-right: env(safe-area-inset-right, 0px);
+}
+.lib-hdrbtn--icon::before {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 44px;
+  height: 44px;
+  transform: translate(-50%, -50%);
+}
 
 /* ==================================================================== Library
  * A few extra tokens layered on the shared design system, just for this
@@ -302,11 +360,26 @@ select {
   --lib-text: #10182b;
   --lib-text-dim: #57647d;
   --lib-text-faint: #93a0b8;
+  /* text/lines/tints on top of the accent fill (active tree row, pick banner, header mark) */
+  --lib-on-accent: #fff;
+  --lib-on-accent-dim: rgba(255, 255, 255, 0.85);
+  --lib-on-accent-tint: rgba(255, 255, 255, 0.22);
+  --lib-on-accent-hover: rgba(255, 255, 255, 0.16);
+  --lib-on-accent-line: rgba(255, 255, 255, 0.55);
+  --lib-mark-glow: #6ea1ff;
+  --lib-featured-stripe: #fbbf24;
+  --lib-thumb-bg: #fff;
+  --lib-fab-border: rgba(255, 255, 255, 0.7);
+  --lib-sh-cover: 0 1px 3px rgba(4, 21, 52, 0.25);
+  --lib-sh-fab: 0 14px 32px -8px rgba(15, 23, 42, 0.28), 0 4px 10px -4px rgba(15, 23, 42, 0.12);
   height: 100%;
   display: flex;
   flex-direction: column;
   background: var(--lib-bg);
   color: var(--lib-text);
+}
+/* the library's own tokens under the dark theme — empty until the dark palette lands */
+:root[data-theme='dark'] .lib {
 }
 .lib-main {
   flex: 1;
@@ -411,7 +484,7 @@ select {
   top: 0;
   bottom: 0;
   width: 5px;
-  background: linear-gradient(to bottom, #fbbf24, var(--lib-accent) 55%, var(--lib-accent-dark));
+  background: linear-gradient(to bottom, var(--lib-featured-stripe), var(--lib-accent) 55%, var(--lib-accent-dark));
 }
 .featured:active {
   transform: scale(0.99);
@@ -420,7 +493,7 @@ select {
   width: 84px;
   height: 108px;
   border-radius: var(--r-lg);
-  background: #fff;
+  background: var(--lib-thumb-bg);
   flex: none;
   overflow: hidden;
   border: 1px solid var(--lib-border);
@@ -675,7 +748,7 @@ select {
   width: 72px;
   height: 92px;
   border-radius: var(--r-lg);
-  background: #fff;
+  background: var(--lib-thumb-bg);
   flex: none;
   overflow: hidden;
   border: 1px solid var(--lib-border);
@@ -801,7 +874,7 @@ select {
 .nb-card__thumb.has-cover canvas,
 .featured__thumb.has-cover canvas {
   border-radius: 4px;
-  box-shadow: 0 1px 3px rgba(4, 21, 52, 0.25);
+  box-shadow: var(--lib-sh-cover);
 }
 .featured {
   --cover: var(--lib-accent);
@@ -840,7 +913,7 @@ select {
   transition: transform 0.15s ease;
 }
 .tree__row.active .tree__toggle {
-  color: #fff;
+  color: var(--lib-on-accent);
 }
 .tree__toggle.open {
   transform: rotate(90deg);
@@ -859,13 +932,13 @@ select {
   color: var(--lib-text-dim);
 }
 .tree__row.active .tree__main {
-  color: #fff;
+  color: var(--lib-on-accent);
 }
 .tree__main .icon {
   color: var(--lib-text-faint);
 }
 .tree__row.active .tree__main .icon {
-  color: #fff;
+  color: var(--lib-on-accent);
 }
 .tree__name {
   flex: 1;
@@ -884,8 +957,8 @@ select {
   background: color-mix(in srgb, var(--lib-text-faint) 16%, transparent);
 }
 .tree__row.active .tree__count {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.22);
+  color: var(--lib-on-accent);
+  background: var(--lib-on-accent-tint);
 }
 .tree__more {
   width: 30px;
@@ -893,11 +966,11 @@ select {
   color: var(--lib-text-faint);
 }
 .tree__row.active .tree__more {
-  color: rgba(255, 255, 255, 0.85);
+  color: var(--lib-on-accent-dim);
 }
 .tree__row.active .tree__more:hover:not(:disabled) {
-  color: #fff;
-  background: rgba(255, 255, 255, 0.22);
+  color: var(--lib-on-accent);
+  background: var(--lib-on-accent-tint);
 }
 .tree__more .icon {
   width: 16px;
@@ -1012,9 +1085,9 @@ select {
   background: color-mix(in srgb, var(--lib-card) 85%, transparent);
   backdrop-filter: blur(18px);
   -webkit-backdrop-filter: blur(18px);
-  border: 1px solid rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--lib-fab-border);
   border-radius: var(--r-full);
-  box-shadow: 0 14px 32px -8px rgba(15, 23, 42, 0.28), 0 4px 10px -4px rgba(15, 23, 42, 0.12);
+  box-shadow: var(--lib-sh-fab);
 }
 .fab-dock button:active {
   transform: scale(0.95);
@@ -1163,6 +1236,49 @@ select {
 }
 .nb-dock--collapsed {
   gap: 0;
+}
+/* bottom-docked: mirrored — tool row against the screen edge, options row
+   above it, grip (last child) on the edge facing the page. */
+.nb-dock--bottom {
+  top: auto;
+  bottom: calc(env(safe-area-inset-bottom) + 16px);
+  flex-direction: column-reverse;
+}
+/* mid-drag: JS sets an inline `top`; the bottom anchor must not fight it */
+.nb-dock--dragging {
+  bottom: auto;
+  transition: none;
+}
+.nb-dock__grip {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 12px;
+  margin: -2px 0;
+  touch-action: none;
+  flex: none;
+  position: relative;
+}
+/* Enlarged touch target (~28px) with no visible change: the grip's own 12px
+   box sits against the rows, so the extra height extends outward past the dock
+   edge instead of back over the tool buttons / swatches / options row. */
+.nb-dock__grip::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  bottom: -16px;
+}
+.nb-dock--bottom .nb-dock__grip::before {
+  top: -16px;
+  bottom: 0;
+}
+.nb-dock__grip-pill {
+  width: 36px;
+  height: 4px;
+  border-radius: var(--r-full);
+  background: var(--outline-variant);
 }
 /* each row is a single line — never wraps to a second line — so a row's
    height stays constant regardless of its content; a row too wide for the
@@ -1320,11 +1436,11 @@ select {
    (see applyAiToolbarLockdown); wins over .active's own colouring too, since
    the pen is usually still the selected tool at that point. */
 .nb-dock .tool--ai {
-  color: #6d28d9;
+  color: var(--ai);
 }
 .nb-dock .tool--ai.active {
-  background: rgba(109, 40, 217, 0.15);
-  color: #6d28d9;
+  background: var(--ai-tint-strong);
+  color: var(--ai);
 }
 .nb-dock .dock-group {
   display: flex;
@@ -1500,8 +1616,8 @@ select {
   height: 14px;
   margin: -7px 0 0 -7px;
   border-radius: 50%;
-  border: 2px solid #fff;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.5);
+  border: 2px solid var(--cpick-ring);
+  box-shadow: 0 0 0 1px var(--cpick-dot-edge);
   pointer-events: none;
 }
 .cpick__hue {
@@ -1521,16 +1637,16 @@ select {
   height: 18px;
   border-radius: 50%;
   background: var(--hue-thumb, #f00);
-  border: 2px solid #fff;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  border: 2px solid var(--cpick-ring);
+  box-shadow: 0 0 0 1px var(--cpick-thumb-edge);
 }
 .cpick__hue::-moz-range-thumb {
   width: 18px;
   height: 18px;
   border-radius: 50%;
   background: var(--hue-thumb, #f00);
-  border: 2px solid #fff;
-  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.35);
+  border: 2px solid var(--cpick-ring);
+  box-shadow: 0 0 0 1px var(--cpick-thumb-edge);
 }
 .cpick__row {
   display: flex;
@@ -1541,7 +1657,7 @@ select {
   width: 34px;
   height: 34px;
   border-radius: var(--r-lg);
-  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.15);
+  box-shadow: inset 0 0 0 1px var(--cpick-preview-edge);
   flex: none;
 }
 .cpick__hex {
@@ -1625,6 +1741,7 @@ select {
 }
 .size-btn__dot {
   display: block;
+  background: var(--size-dot);
 }
 
 /* slider popover panel */
@@ -1921,12 +2038,12 @@ select {
    head. Violet is used nowhere else in the chrome, so an active AI page —
    and an active toggle — read as unmistakably different at a glance. */
 .ai-toggle.active {
-  color: #6d28d9;
+  color: var(--ai);
 }
 /* .iconbtn:hover's own colour would otherwise win over .active on hover (equal
    specificity, declared earlier) and flash the toggle back to the default tint. */
 .ai-toggle.active:hover {
-  color: #6d28d9;
+  color: var(--ai);
 }
 /* Mind-map mode (boards only): a persistent on/off switch, not an action, so
    it takes the same filled treatment the dock gives the active tool rather
@@ -1948,10 +2065,10 @@ select {
    than the default .iconbtn tint, since it only ever appears while AI mode is
    active on the current page. */
 .ai-send {
-  color: #6d28d9;
+  color: var(--ai);
 }
 .ai-send:hover:not(:disabled) {
-  color: #6d28d9;
+  color: var(--ai);
 }
 /* the bare `button { display: inline-flex }` rule above is an author-origin
    style, so it silently wins over the UA stylesheet's `[hidden] { display:
@@ -1963,7 +2080,7 @@ select {
 .ai-status {
   font-size: 10px;
   font-weight: 600;
-  color: #6d28d9;
+  color: var(--ai);
   white-space: nowrap;
 }
 .ai-status--busy {
@@ -1981,7 +2098,7 @@ select {
 /* the active-page indicator itself — a colored ring, distinct from the page's
    own drop shadow so it doesn't compete with .page--capturing (touch-action). */
 .page--ai-active {
-  outline: 3px solid #6d28d9;
+  outline: 3px solid var(--ai);
   outline-offset: 3px;
 }
 /* AI chat panel: slides in from the left, fixed to the viewport (not the
@@ -2038,7 +2155,7 @@ select {
   font-family: var(--font-head);
   font-weight: 700;
   font-size: 15px;
-  color: #6d28d9;
+  color: var(--ai);
 }
 .ai-panel__header-actions {
   display: flex;
@@ -2081,14 +2198,14 @@ select {
 .ai-panel__reply {
   padding: 10px 12px;
   border-radius: var(--r-lg);
-  background: rgba(109, 40, 217, 0.1);
-  color: #6d28d9;
+  background: var(--ai-tint);
+  color: var(--ai);
   font-size: 14px;
   line-height: 1.5;
   white-space: pre-wrap;
 }
 .ai-panel__reply--error {
-  background: rgba(186, 26, 26, 0.1);
+  background: var(--error-tint);
   color: var(--error);
 }
 .ai-panel__reply--pending {
@@ -2128,7 +2245,7 @@ select {
 .ai-panel__reply code {
   font-family: ui-monospace, 'SF Mono', Consolas, monospace;
   font-size: 0.9em;
-  background: rgba(0, 0, 0, 0.08);
+  background: var(--code-bg);
   border-radius: 4px;
   padding: 0.1em 0.35em;
 }
@@ -2150,7 +2267,7 @@ select {
   height: var(--ph);
   background: #fff;
   border-radius: var(--r-lg);
-  box-shadow: var(--sh-3), inset 0 0 0 1px rgba(4, 21, 52, 0.06);
+  box-shadow: var(--sh-3), inset 0 0 0 1px var(--page-edge);
   touch-action: pan-x pan-y; /* default: a finger drag scrolls the notebook — see .page--capturing below */
   -webkit-user-select: none;
   user-select: none;
@@ -2359,44 +2476,6 @@ select {
   flex: none;
 }
 
-/* Invisible, positioned, genuinely hit-testable placeholder over a tape
-   strip's own screen rect while its resize/delete popover is open — a tape
-   strip is canvas-painted, not a real element, so this stands in as the
-   "trigger" openAnchoredModal's toggle-on-repeat-tap logic needs (see
-   NotebookView.showTapePopover's own doc comment for the full reasoning). */
-.tape-popover-anchor {
-  position: fixed;
-  z-index: 56;
-  background: transparent;
-}
-.tape-popover {
-  gap: 2px;
-}
-.tape-popover__row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 12px;
-}
-.tape-popover__label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--on-surface-variant);
-  flex: none;
-  width: 44px;
-}
-.tape-popover__range {
-  flex: 1;
-  min-width: 0;
-}
-.tape-popover__value {
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  color: var(--on-surface-variant);
-  flex: none;
-  width: 28px;
-  text-align: right;
-}
 .menu__divider {
   height: 1px;
   margin: 6px 4px;
@@ -2464,7 +2543,7 @@ select {
 /* frosted, neutral instruments: the page shows through, the scales read in
    the ordinary text colours rather than an accent tint */
 .guide__body {
-  fill: rgba(255, 255, 255, 0.72);
+  fill: var(--guide-body);
   stroke: var(--outline);
   stroke-width: 1.5;
   pointer-events: auto;
@@ -2578,7 +2657,7 @@ select {
      opens, which is already a layout-heavy moment. The dim above was always
      doing nearly all of the visual work; 2px of blur under it is not worth
      making the compositor rasterize the page behind it to produce. */
-  background: rgba(4, 21, 52, 0.34);
+  background: var(--scrim);
 }
 .modal-card {
   width: 100%;
@@ -2587,7 +2666,7 @@ select {
   overflow-y: auto;
   background: var(--surface-c-lowest);
   border-radius: var(--r-xl);
-  box-shadow: 0 20px 60px -12px rgba(4, 21, 52, 0.4);
+  box-shadow: var(--sh-modal);
 }
 
 /* anchored variant: light-dismiss popover positioned next to an element */
@@ -2663,6 +2742,37 @@ select {
   display: flex;
   flex-direction: column;
   gap: 6px;
+}
+
+/* Settings sheet (library.ts openSettings): title + close, then a list of
+   label/control rows divided by hairlines — add a setting by adding a row. */
+.settings__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: -8px -8px 0 0; /* pull the 40px close button into the card's corner */
+}
+.settings__list {
+  display: flex;
+  flex-direction: column;
+}
+.settings__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+}
+.settings__row + .settings__row {
+  border-top: 1px solid var(--outline-variant);
+}
+.settings__label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--on-surface);
+}
+.settings__row .seg {
+  flex: 0 1 210px;
 }
 
 /* page manager: a wider, taller modal-card variant (the default .modal-card
@@ -2760,10 +2870,10 @@ select {
   position: fixed;
   border-radius: var(--r-lg);
   overflow: hidden;
-  background: #fff;
+  background: var(--thumb-bg);
   /* deliberately heavier than --sh-3: this one has to read as held above the
      modal card, not merely raised off the page */
-  box-shadow: 0 18px 40px -8px rgba(27, 42, 74, 0.45), 0 0 0 2px var(--primary);
+  box-shadow: var(--sh-ghost), 0 0 0 2px var(--primary);
   pointer-events: none;
   z-index: 120;
   transform: scale(1.06) rotate(-1.5deg);
@@ -2808,7 +2918,7 @@ select {
   display: block;
   aspect-ratio: 820 / 1060;
   border-radius: var(--r-lg);
-  background: #fff;
+  background: var(--thumb-bg);
   overflow: hidden;
   box-shadow: var(--sh-1);
   border: 1px solid var(--outline-variant);
@@ -2846,7 +2956,7 @@ select {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.85);
+  background: var(--badge-bg);
   border: 2px solid var(--primary);
   color: transparent;
   pointer-events: none;
@@ -2857,7 +2967,7 @@ select {
 }
 .pagemgr__card--selected .pagemgr__check {
   background: var(--primary);
-  color: #fff;
+  color: var(--on-primary);
 }
 .pagemgr__card--selected .pagemgr__thumb {
   border-color: var(--primary);
@@ -2958,6 +3068,28 @@ select {
   }
 }
 
+/* SecondaryPane.toast(): a brief, never-interactive notice above the dock but
+   below the AI panel and any modal. Opacity is driven inline for the fade. */
+.split-toast {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(32px + env(safe-area-inset-bottom));
+  z-index: 58;
+  pointer-events: none;
+  max-width: min(420px, 86vw);
+  padding: 10px 18px;
+  border-radius: 9999px;
+  background: var(--toast-bg);
+  color: var(--toast-fg);
+  font-size: 14px;
+  font-weight: 600;
+  text-align: center;
+  box-shadow: var(--sh-toast);
+  opacity: 0;
+  transition: opacity 0.18s ease;
+}
+
 .pane {
   flex: 0 0 40%;
   display: flex;
@@ -3034,8 +3166,8 @@ select {
   color: var(--primary);
 }
 .pane__close:hover:not(:disabled) {
-  background: rgba(220, 38, 38, 0.1);
-  color: #dc2626;
+  background: var(--danger-tint);
+  color: var(--danger);
 }
 
 /* The scroller's viewport (see page-scroller.ts). `touch-action: none` because
@@ -3046,7 +3178,7 @@ select {
   overflow: hidden;
   min-height: 0;
   touch-action: none;
-  background: var(--lib-bg, #f3f5f9);
+  background: var(--pane-stage-bg);
 }
 /* The single element the camera transform is written to — same
    `scale(zoom) translate(-x, -y)` / `transform-origin: 0 0` convention the
@@ -3066,7 +3198,7 @@ select {
 .pscroll-page {
   position: absolute;
   border-radius: 4px;
-  box-shadow: 0 1px 6px rgba(4, 21, 52, 0.18);
+  box-shadow: var(--sh-pscroll);
   overflow: hidden;
 }
 .pane__canvas {
@@ -3104,8 +3236,8 @@ select {
   align-items: center;
   gap: 12px;
   padding: 10px 16px;
-  background: var(--lib-accent, #2550eb);
-  color: #fff;
+  background: var(--lib-accent);
+  color: var(--lib-on-accent);
   font-size: 14px;
   font-weight: 600;
 }
@@ -3116,15 +3248,15 @@ select {
 .pick-banner__cancel {
   flex: none;
   padding: 6px 14px;
-  border: 1px solid rgba(255, 255, 255, 0.55);
+  border: 1px solid var(--lib-on-accent-line);
   border-radius: var(--r-full);
   background: transparent;
-  color: #fff;
+  color: var(--lib-on-accent);
   font: inherit;
   cursor: pointer;
 }
 .pick-banner__cancel:hover {
-  background: rgba(255, 255, 255, 0.16);
+  background: var(--lib-on-accent-hover);
 }
 /* the actions that are off while picking are disabled in JS (see
    mountLibrary); this just makes that legible rather than looking broken */

@@ -4,6 +4,7 @@ import { isStroke, nearPolyline, uid } from '../util';
 import { aabb, itemsFrame, nearConnector, pointInElement, type Frame } from './geom';
 import type { Op } from './page-canvas';
 import type { OverlayOptions } from './selection';
+import { uiColors } from './ui-colors';
 
 /**
  * What a page and a board have in common as a place items live on.
@@ -47,18 +48,13 @@ export interface ItemSurface {
   endTransform(frame: Frame | null): void;
   tapSelection(x: number, y: number): void;
 
-  // tape strips, driven by the notebook-level resize/delete popover
+  // tape strips
   isPeeled(id: string): boolean;
-  beginTapeResize(id: string): TapeElement | null;
-  previewTapeResize(id: string, w: number, h: number): void;
-  commitTapeResize(id: string): void;
-  tapeGeometry(id: string): { w: number; h: number } | null;
   deleteTape(id: string): void;
 
   /**
    * How to map a `Frame` in this surface's units onto the screen, for UI that
-   * floats in `document.body` (the selection callout, the tape popover's
-   * anchor). `rect`/`pw` feed `frameScreenBox` unchanged: screen = rect.left +
+   * floats in `document.body` (the selection callout). `rect`/`pw` feed `frameScreenBox` unchanged: screen = rect.left +
    * local * (rect.width / pw).
    *
    * A page returns its own live screen rect and its page width, so the scale
@@ -68,15 +64,6 @@ export interface ItemSurface {
    * surface isn't mounted and there is nothing to measure.
    */
   calloutBasis(): { rect: DOMRect; pw: number } | null;
-
-  /**
-   * The largest a tape strip may be dragged to in the resize popover, in this
-   * surface's own units. A page caps at its own size; a board has no extent,
-   * so it caps at what is currently on screen — which keeps the slider's range
-   * meaningful (you can always fill the view) without pretending to a limit
-   * that does not exist.
-   */
-  tapeSizeLimit(): { w: number; h: number };
 }
 
 /** The hooks a surface needs from NotebookView — the subset a board and a page both raise. */
@@ -88,8 +75,6 @@ export interface SurfaceHooks {
   onSelectionFrame: (s: ItemSurface, frame: Frame | null) => void;
   /** a lasso *drag* ended over empty space — the drawn lasso's own box, for a Paste-only callout */
   onEmptyLassoSelection: (s: ItemSurface, frame: Frame) => void;
-  /** a tap on an existing tape strip while the tape tool is active — opens its resize/delete popover */
-  onTapeTap: (s: ItemSurface, tapeId: string, frame: Frame) => void;
   isAiActive: () => boolean;
   /** A line entered or left its adjustable phase. Undo can drop such a line even with nothing on the history stack, so the button's enabled state has to track this as well as the stack. */
   onPendingLine: () => void;
@@ -337,7 +322,7 @@ export function strokeLassoPath(v: CanvasRenderingContext2D, path: number[][], c
   const z = zoom > 0 ? zoom : 1;
   v.setLineDash([6 / z, 4 / z]);
   v.lineWidth = 1.5 / z;
-  v.strokeStyle = 'rgba(37, 99, 235, 0.9)';
+  v.strokeStyle = uiColors().lasso;
   v.stroke();
   v.restore();
 }
@@ -445,8 +430,8 @@ export function paintLineHandles(v: CanvasRenderingContext2D, le: LineEdit, zoom
   const z = zoom > 0 ? zoom : 1;
   v.save();
   v.lineWidth = 2 / z;
-  v.strokeStyle = '#2563eb';
-  v.fillStyle = '#fff';
+  v.strokeStyle = uiColors().handleStroke;
+  v.fillStyle = uiColors().handleFill;
   for (const p of [le.a, le.b]) {
     v.beginPath();
     v.arc(p[0], p[1], LINE_HANDLE_R / z, 0, Math.PI * 2);

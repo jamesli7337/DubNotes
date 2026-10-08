@@ -4,7 +4,7 @@ import { itemBounds, rotateAround, unionRects, worldToScreen, type Camera, type 
 import type { GuideKind } from '../canvas/guide';
 import { BoardCanvas, mindMapEnabled } from '../canvas/board-canvas';
 import { cloneItems, type ItemSurface } from '../canvas/item-surface';
-import { PageCanvas, TAPE_MIN } from '../canvas/page-canvas';
+import { PageCanvas } from '../canvas/page-canvas';
 import type { Op } from '../canvas/page-canvas';
 import { SelectionOverlay } from '../canvas/selection';
 import { DEFAULT_PAPER, DPR, PAGE_W, pageH, pageW } from '../const';
@@ -42,7 +42,7 @@ import type {
 } from '../types';
 import { clamp, isStroke } from '../util';
 import { loadImageFile } from '../media';
-import { alertDialog, confirmDialog, openAnchoredModal, openModal, textPrompt, type Modal } from './dialog';
+import { alertDialog, confirmDialog, openAnchoredModal, openModal, textPrompt, type Modal, type PopoverDirection } from './dialog';
 import { blockGestures, el } from './dom';
 import { icon, type IconName } from './icon';
 import { IMAGE_ACCEPT, SecondaryPane } from './secondary-pane';
@@ -212,6 +212,8 @@ class NotebookView {
 
   /** Resting clearance above page 1, in screen px — see refreshTopClearance, which keeps it in step with the dock's height. */
   private topClearance = TOP_GAP;
+  /** Resting clearance below the last page, in screen px, when the dock is bottom-docked on a paged notebook — null otherwise, where `BOTTOM_CLEARANCE_VH` applies. */
+  private bottomClearance: number | null = null;
   /** Re-measures the dock once its open/close animation has finished — see dockHeightChanged. */
   private dockSettleTimer: ReturnType<typeof setTimeout> | null = null;
   /** `.nb-camera`: the single element the whole camera transform is applied to — every `.page-wrap` lives inside it. */
@@ -379,31 +381,11 @@ class NotebookView {
   /** The frame the callout is currently positioned against — re-placed (not re-shown) on scroll/resize, since neither changes the frame itself, only where it lands on screen. */
   private calloutFrame: Frame | null = null;
 
-  /**
-   * The tape resize/delete popover (see showTapePopover) — at most one open
-   * at a time, same as the selection callout. Unlike every other anchored
-   * popover in this app, a tape strip has no permanent DOM trigger to anchor
-   * to (it's canvas-painted, not a real element), so `tapePopoverAnchor` is
-   * one created on demand: an invisible, positioned, *actually hit-testable*
-   * div sitting over the strip's own screen rect for as long as its popover
-   * stays open — see showTapePopover's own doc comment for why that's what
-   * makes openAnchoredModal's toggle-on-repeat-tap behaviour work here too.
-   */
-  private tapePopoverAnchor: HTMLElement | null = null;
-  private tapePopoverModal: Modal | null = null;
-  private tapePopoverPc: ItemSurface | null = null;
-  private tapePopoverFrame: Frame | null = null;
-  private tapePopoverTapeId: string | null = null;
-
   /** Bound so the same reference can be added to and removed from `window` — see the scroll/resize wiring in buildChrome and its cleanup in onLeave. */
   private readonly repositionCallout = (): void => {
     if (this.calloutEl && this.calloutPc && this.calloutFrame) {
       const basis = this.calloutPc.calloutBasis();
       if (basis) this.positionCallout(this.calloutEl, this.calloutFrame, basis.rect, basis.pw);
-    }
-    if (this.tapePopoverAnchor && this.tapePopoverPc && this.tapePopoverFrame) {
-      const basis = this.tapePopoverPc.calloutBasis();
-      if (basis) this.positionTapeAnchor(this.tapePopoverAnchor, this.tapePopoverFrame, basis.rect, basis.pw);
     }
   };
 
@@ -415,6 +397,12 @@ class NotebookView {
     this.dragPreviewCanvas.height = h * DPR;
     this.dragPreviewCanvas.style.width = `${w}px`;
     this.dragPreviewCanvas.style.height = `${h}px`;
+  };
+
+  /** Repaints the chrome colours the canvases draw themselves (canvas/ui-colors.ts) on a theme switch — bound for add/remove on `window`, same as repositionCallout. */
+  private readonly onThemeChange = (): void => {
+    for (const id of this.mounted) this.pcByPage.get(id)?.themeChanged();
+    this.board?.invalidate();
   };
 
   private readonly onKey: (e: KeyboardEvent) => void;
@@ -512,8 +500,8 @@ class NotebookView {
       window.removeEventListener('pointerup', this.onAnyPointerUp, true);
       window.removeEventListener('pointercancel', this.onAnyPointerUp, true);
       window.removeEventListener('blur', this.onPointersLost);
+      window.removeEventListener('themechange', this.onThemeChange);
       this.hideSelectionCallout();
-      this.hideTapePopover();
       this.deactivateAll(); // commit an open text edit before the canvases go away
       for (const id of this.mounted) this.pcByPage.get(id)?.unmount();
       this.stopMomentum();
@@ -534,6 +522,7 @@ class NotebookView {
     window.addEventListener('pointerup', this.onAnyPointerUp, true);
     window.addEventListener('pointercancel', this.onAnyPointerUp, true);
     window.addEventListener('blur', this.onPointersLost);
+    window.addEventListener('themechange', this.onThemeChange);
   }
 
   // --------------------------------------------------------------- chrome
@@ -705,7 +694,8 @@ class NotebookView {
     this.toolsEl = el('div', { class: 'nb-dock nb-dock--collapsed' });
     this.toolsTopEl = el('div', { class: 'nb-dock__row nb-dock__row--tools' });
     this.toolsOptionsEl = el('div', { class: 'nb-dock__row nb-dock__row--options' });
-    this.toolsEl.append(this.toolsTopEl, this.toolsOptionsEl);
+    this.toolsEl.append(this.toolsTopEl, this.toolsOptionsEl, this.buildDockGrip());
+    this.toolsEl.classList.toggle('nb-dock--bottom', toolState.dockPosition === 'bottom');
     this.scrollEl = el('div', { class: 'nb-scroll' });
     // `.nb-split` is what now fills the space under the dock: `.nb-scroll` is
     // its (flex: 1) first child and the read-only secondary pane, when one is
@@ -858,6 +848,71 @@ class NotebookView {
     this.dragPreviewCtx?.clearRect(0, 0, this.dragPreviewCanvas.width, this.dragPreviewCanvas.height);
   }
 
+  /**
+   * The dock's drag handle. Touch/pen only: drag moves the dock vertically
+   * with the finger, and on release it snaps to whichever half of the viewport
+   * its centre is in. `toolState.dockPosition` is the only state; everything
+   * else (CSS class, clearances) is derived from it in `applyDockPosition`.
+   */
+  private buildDockGrip(): HTMLElement {
+    const grip = el('div', { class: 'nb-dock__grip', role: 'separator', 'aria-label': 'Move toolbar' });
+    grip.append(el('span', { class: 'nb-dock__grip-pill' }));
+    let activeId: number | null = null;
+    let startY = 0;
+    let startTop = 0;
+    const dock = this.toolsEl;
+
+    grip.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' || activeId !== null) return;
+      activeId = e.pointerId;
+      startY = e.clientY;
+      startTop = dock.getBoundingClientRect().top;
+      grip.setPointerCapture(e.pointerId);
+      dock.classList.add('nb-dock--dragging');
+      dock.style.top = `${startTop}px`;
+      e.preventDefault();
+      e.stopPropagation();
+    });
+    grip.addEventListener('pointermove', (e) => {
+      if (e.pointerId !== activeId) return;
+      const maxTop = window.innerHeight - dock.offsetHeight;
+      dock.style.top = `${clamp(startTop + e.clientY - startY, 0, Math.max(0, maxTop))}px`;
+    });
+    const end = (e: PointerEvent): void => {
+      if (e.pointerId !== activeId) return;
+      activeId = null;
+      const r = dock.getBoundingClientRect();
+      const next = r.top + r.height / 2 > window.innerHeight / 2 ? 'bottom' : 'top';
+      dock.classList.remove('nb-dock--dragging');
+      dock.style.top = '';
+      if (next !== toolState.dockPosition) {
+        toolState.dockPosition = next;
+        saveToolState();
+      }
+      this.applyDockPosition();
+    };
+    grip.addEventListener('pointerup', end);
+    grip.addEventListener('pointercancel', end);
+    return grip;
+  }
+
+  /** Popovers launched from a dock button open away from the edge the dock is docked to. */
+  private dockPopoverDirection(): PopoverDirection {
+    return toolState.dockPosition === 'bottom' ? 'above' : 'below';
+  }
+
+  /** Derives everything that depends on the dock's edge from `toolState.dockPosition`. */
+  private applyDockPosition(): void {
+    this.toolsEl.classList.toggle('nb-dock--bottom', toolState.dockPosition === 'bottom');
+    if (this.isBoard) {
+      // dockHeightChanged skips boards; they only need the clearances and thumb re-derived
+      this.refreshTopClearance();
+      this.layoutScrollbarThumb();
+      return;
+    }
+    this.dockHeightChanged();
+  }
+
   /** The least `camera.y` allowed: page 1's own top can be dragged down to at most this many *world* units below the viewport top — i.e. `TOP_CLEARANCE` screen px of resting clearance under the dock, at the current zoom. */
   private minCameraY(): number {
     return -this.topClearance / this.camera.zoom;
@@ -905,10 +960,12 @@ class NotebookView {
     }, 220);
   }
 
-  /** Re-derives the clearance and re-pins the camera if it is resting in the top band. */
+  /** Re-derives the clearances and re-pins the camera if it is resting in the top band, or against the bottom limit when the dock supplies the bottom clearance. */
   private settleTopClearance(): void {
+    const wasAtBottom = this.camera.y >= this.maxCameraY() - 0.5;
     this.refreshTopClearance();
     if (this.camera.y < 0) this.camera.y = this.minCameraY();
+    else if (wasAtBottom) this.camera.y = this.maxCameraY();
     const c = this.clampCamera(this.camera.x, this.camera.y);
     this.camera.x = c.x;
     this.camera.y = c.y;
@@ -918,17 +975,28 @@ class NotebookView {
 
   private refreshTopClearance(): void {
     const scrollTop = this.scrollEl.getBoundingClientRect().top;
-    const dockBottom = this.toolsEl.getBoundingClientRect().bottom;
+    const dockRect = this.toolsEl.getBoundingClientRect();
     const head = this.wrapById.values().next().value?.querySelector<HTMLElement>('.page-head');
     const headH = head ? head.offsetHeight : 0;
-    this.topClearance = Math.max(TOP_GAP, dockBottom - scrollTop + TOP_GAP - headH * this.camera.zoom);
+    if (toolState.dockPosition === 'bottom') {
+      // Mirror image: the dock is at the bottom, so it supplies the clearance
+      // below the last page and nothing sits over the top of page 1. A board
+      // keeps the viewport-fraction fallback, as it does for the top clearance.
+      this.topClearance = TOP_GAP;
+      this.bottomClearance = this.isBoard
+        ? null
+        : Math.max(TOP_GAP, this.scrollEl.getBoundingClientRect().bottom - dockRect.top + TOP_GAP);
+      return;
+    }
+    this.bottomClearance = null;
+    this.topClearance = Math.max(TOP_GAP, dockRect.bottom - scrollTop + TOP_GAP - headH * this.camera.zoom);
   }
 
-  /** The greatest `camera.y` allowed: the last page's own bottom can't be dragged more than `BOTTOM_CLEARANCE_VH` of screen height above the viewport's bottom. */
+  /** The greatest `camera.y` allowed: the last page's own bottom can't be dragged more than the bottom clearance above the viewport's bottom — the dock's own footprint when it is bottom-docked, else `BOTTOM_CLEARANCE_VH` of screen height. */
   private maxCameraY(): number {
     const viewH = this.scrollEl.clientHeight;
     const contentH = this.cameraEl.offsetHeight;
-    const bottomClearance = window.innerHeight * BOTTOM_CLEARANCE_VH;
+    const bottomClearance = this.bottomClearance ?? window.innerHeight * BOTTOM_CLEARANCE_VH;
     return Math.max(this.minCameraY(), contentH - (viewH - bottomClearance) / this.camera.zoom);
   }
 
@@ -2443,7 +2511,7 @@ class NotebookView {
       });
       menu.append(item);
     }
-    modal = openAnchoredModal(anchor, menu);
+    modal = openAnchoredModal(anchor, menu, { direction: this.dockPopoverDirection() });
   }
 
   /** Shows the ruler / protractor on the page in view, or hides it if it's already shown. */
@@ -2634,14 +2702,19 @@ class NotebookView {
         const seed = tool === 'pen' ? toolState.penColor : toolState.hiColor;
         const deleted = tool === 'pen' ? toolState.penDeletedPresets : toolState.hiDeletedPresets;
         let restored = false;
-        const hex = await pickColor(addBtn, seed === AUTO_COLOR ? '#2563eb' : seed, {
-          colors: deleted,
-          onRestore: (c) => {
-            restorePreset(tool, c);
-            saveToolState();
-            restored = true;
+        const hex = await pickColor(
+          addBtn,
+          seed === AUTO_COLOR ? '#2563eb' : seed,
+          {
+            colors: deleted,
+            onRestore: (c) => {
+              restorePreset(tool, c);
+              saveToolState();
+              restored = true;
+            },
           },
-        });
+          this.dockPopoverDirection()
+        );
         if (!hex) {
           if (restored) this.renderTools();
           return;
@@ -3190,8 +3263,16 @@ class NotebookView {
     const cw = callout.offsetWidth;
     const ch = callout.offsetHeight;
 
+    // the dock floats over the page at either edge — keep the callout out of
+    // its footprint by narrowing the vertical band it may occupy to the side
+    // of the dock the page content is on
+    const dock = this.toolsEl.getBoundingClientRect();
+    const dockOnTop = (dock.top + dock.bottom) / 2 < vh / 2;
+    const freeTop = dockOnTop ? Math.max(MARGIN, dock.bottom + MARGIN) : MARGIN;
+    const freeBottom = dockOnTop ? vh - MARGIN : Math.min(vh - MARGIN, dock.top - MARGIN);
+
     const spaceAbove = box.top - GAP - ch;
-    const below = spaceAbove < MARGIN;
+    const below = spaceAbove < freeTop;
     callout.classList.toggle('sel-callout--below', below);
 
     const top = below ? box.bottom + GAP : spaceAbove;
@@ -3204,7 +3285,7 @@ class NotebookView {
     const panelRight = document.querySelector('.ai-panel')?.getBoundingClientRect().right ?? -Infinity;
     const minLeft = Math.max(MARGIN, panelRight + MARGIN);
     left = Math.max(minLeft, Math.min(left, vw - cw - MARGIN));
-    const clampedTop = Math.max(MARGIN, Math.min(top, vh - ch - MARGIN));
+    const clampedTop = Math.max(freeTop, Math.min(top, freeBottom - ch));
 
     callout.style.left = `${Math.round(left)}px`;
     callout.style.top = `${Math.round(clampedTop)}px`;
@@ -3212,151 +3293,6 @@ class NotebookView {
     // callout itself got clamped sideways away from directly above it
     const arrowX = Math.max(12, Math.min((box.left + box.right) / 2 - left, cw - 12));
     callout.style.setProperty('--sel-callout-arrow-x', `${Math.round(arrowX)}px`);
-  }
-
-  // ------------------------------------------------------------ tape popover
-  /**
-   * Resize + delete popover for one tape strip — opened by a tap/hold while
-   * the tape tool itself is active (see PageCanvas.handleTapeTap/onTapeTap;
-   * every other tool's tap on the same strip still peels/covers it,
-   * unaffected by any of this). In addition to the existing lasso-based
-   * select/resize/delete, not a replacement for it.
-   *
-   * Every other anchored popover in this app (eraser mode, size slider, …)
-   * anchors to a real, permanent DOM button, which is what lets
-   * openAnchoredModal's own "second call for the same anchor closes it
-   * instead of opening another" toggle work — and also what exempts a repeat
-   * tap on that button from openModal's generic outside-tap dismiss (see its
-   * onOutside: it skips closing when the tap lands on the anchor itself,
-   * since the anchor's own click handler is already about to toggle it).
-   * A tape strip has neither: it's canvas-painted, not a real element, so
-   * there's nothing a second tap could land "on" for that exemption to
-   * apply — without it, a second tap would hit the canvas, get treated as
-   * outside, close the popover, and then this code would immediately reopen
-   * a fresh one in the same breath (net effect: it never appears to close).
-   *
-   * The fix is to give it a real anchor: `tapePopoverAnchor`, an invisible
-   * div positioned over the strip's own screen rect for as long as its
-   * popover is open. A second tap in that same spot now hits *it* — exempt
-   * from outside-dismiss, and its own click handler re-runs
-   * openAnchoredModal, which is what actually closes it. A tap on a
-   * *different* tape (or blank page) still reaches the canvas as normal,
-   * triggers the generic outside-dismiss for whatever was open, and this
-   * method then opens fresh for the new one.
-   */
-  private showTapePopover(pc: ItemSurface, tapeId: string, frame: Frame): void {
-    const basis = pc.calloutBasis();
-    if (!basis) return;
-    this.tapePopoverPc = pc;
-    this.tapePopoverFrame = frame;
-    this.tapePopoverTapeId = tapeId;
-
-    let anchor = this.tapePopoverAnchor;
-    if (!anchor) {
-      anchor = el('div', { class: 'tape-popover-anchor' });
-      document.body.append(anchor);
-      this.tapePopoverAnchor = anchor;
-      // the second-tap toggle path (see the doc comment above) — fires only
-      // when a real tap lands on this anchor, which only happens once it's
-      // actually positioned over the strip
-      anchor.addEventListener('click', () => this.openTapePopoverModal(pc, tapeId, anchor!));
-    }
-    this.positionTapeAnchor(anchor, frame, basis.rect, basis.pw);
-    this.openTapePopoverModal(pc, tapeId, anchor);
-  }
-
-  /** Opens (or, per openAnchoredModal's own toggle rule, closes) the popover for `anchor` — a null return there just means this call closed the existing one instead of opening; onClose below already settles the state either way. */
-  private openTapePopoverModal(pc: ItemSurface, tapeId: string, anchor: HTMLElement): void {
-    const modal = openAnchoredModal(anchor, this.buildTapePopoverPanel(pc, tapeId), {
-      onClose: () => {
-        if (this.tapePopoverTapeId !== tapeId) return; // a newer popover already replaced this one
-        this.tapePopoverModal = null;
-        anchor.remove();
-        this.tapePopoverAnchor = null;
-        this.tapePopoverPc = null;
-        this.tapePopoverFrame = null;
-        this.tapePopoverTapeId = null;
-      },
-    });
-    if (modal) this.tapePopoverModal = modal;
-  }
-
-  /** Closes the tape popover (if any) the proper way — through the Modal's own close(), so its backdrop/card are actually torn down rather than just this method's bookkeeping (leaving the real popover UI orphaned in the DOM, still catching clicks, is what plain field-nulling here used to do). onClose above does the rest of the state cleanup once close() runs it. */
-  private hideTapePopover(): void {
-    this.tapePopoverModal?.close();
-  }
-
-  /** Positions the invisible tape-popover anchor over a tape's own (rotation-aware) screen rect — same box math as positionCallout, just applied to the anchor's box instead of a centred pill. */
-  private positionTapeAnchor(anchor: HTMLElement, frame: Frame, pageRect: DOMRect, pw: number): void {
-    const box = frameScreenBox(frame, pageRect, pw);
-    anchor.style.left = `${Math.round(box.left)}px`;
-    anchor.style.top = `${Math.round(box.top)}px`;
-    anchor.style.width = `${Math.round(box.right - box.left)}px`;
-    anchor.style.height = `${Math.round(box.bottom - box.top)}px`;
-  }
-
-  /**
-   * Width/height sliders (live preview via pc.previewTapeResize, one undo
-   * step per drag/keypress session via pc.beginTapeResize/commitTapeResize)
-   * plus Delete — see showTapePopover.
-   */
-  private buildTapePopoverPanel(pc: ItemSurface, tapeId: string): HTMLElement {
-    const menu = el('div', { class: 'menu tape-popover', role: 'menu' });
-    const current = pc.tapeGeometry(tapeId);
-    if (!current) return menu;
-
-    let wInput!: HTMLInputElement;
-    let hInput!: HTMLInputElement;
-    const sizeRow = (label: string, value: number, max: number): { row: HTMLElement; input: HTMLInputElement } => {
-      const row = el('div', { class: 'tape-popover__row' });
-      row.append(el('span', { class: 'tape-popover__label', text: label }));
-      const input = el('input', {
-        type: 'range',
-        min: String(TAPE_MIN),
-        max: String(Math.max(Math.round(max), TAPE_MIN)),
-        step: '1',
-        value: String(Math.round(value)),
-        class: 'tape-popover__range',
-        'aria-label': `Tape ${label.toLowerCase()}`,
-      }) as HTMLInputElement;
-      const readout = el('span', { class: 'tape-popover__value', text: `${Math.round(value)}` });
-      // the first `input` of a drag/keypress arms the undo snapshot; `change`
-      // (fires once, on release — for a keyboard nudge, immediately) commits
-      // it as one step and re-arms for the next interaction
-      let dragging = false;
-      input.addEventListener('input', () => {
-        if (!dragging) {
-          pc.beginTapeResize(tapeId);
-          dragging = true;
-        }
-        readout.textContent = input.value;
-        pc.previewTapeResize(tapeId, Number(wInput.value), Number(hInput.value));
-      });
-      input.addEventListener('change', () => {
-        pc.commitTapeResize(tapeId);
-        dragging = false;
-      });
-      row.append(input, readout);
-      return { row, input };
-    };
-
-    const limit = pc.tapeSizeLimit();
-    const w = sizeRow('Width', current.w, limit.w);
-    const h = sizeRow('Height', current.h, limit.h);
-    wInput = w.input;
-    hInput = h.input;
-    menu.append(w.row, h.row);
-
-    menu.append(el('span', { class: 'menu__divider' }));
-    const del = el('button', { class: 'menu__item menu__item--icon danger', role: 'menuitem' });
-    del.append(icon('delete', 'sm'), el('span', { text: 'Delete' }));
-    del.addEventListener('click', () => {
-      pc.deleteTape(tapeId);
-      this.hideTapePopover();
-    });
-    menu.append(del);
-
-    return menu;
   }
 
   /** Finishes any text edit and drops any selection on every page — or on the board. */
@@ -3449,7 +3385,6 @@ class NotebookView {
       dot.style.width = `${d}px`;
       dot.style.height = isPen ? `${d}px` : `${Math.max(3, d * 0.5)}px`;
       dot.style.borderRadius = isPen ? '50%' : '2px';
-      dot.style.background = '#000';
       dot.style.opacity = isPen ? '1' : '0.5';
     };
     paintDot(sizeNow());
@@ -3459,6 +3394,7 @@ class NotebookView {
     btn.addEventListener('click', () => {
       const { panel, refreshTicks } = this.buildSizePanel(isPen, paintDot);
       this.sizePopover = openAnchoredModal(btn, panel, {
+        direction: this.dockPopoverDirection(),
         onReposition: refreshTicks, // build/rebuild ticks once mounted, and on resize/orientation
         onClose: () => {
           this.sizePopover = null;
@@ -3548,7 +3484,6 @@ class NotebookView {
           onSelection: (s, n) => this.onSelection(s, n),
           onSelectionFrame: (s, frame) => this.onSelectionFrame(s, frame),
           onEmptyLassoSelection: (s, frame) => this.showEmptyLassoCallout(s, frame),
-          onTapeTap: (s, tapeId, frame) => this.showTapePopover(s, tapeId, frame),
           isAiActive: () => this.aiMode.isActive(),
           onPendingLine: () => this.syncHistory(),
           showSelection: (s, frame, opts) => {
@@ -3663,7 +3598,6 @@ class NotebookView {
         onSelection: (s, n) => this.onSelection(s, n),
         onSelectionFrame: (s, frame) => this.onSelectionFrame(s, frame),
         onEmptyLassoSelection: (s, frame) => this.showEmptyLassoCallout(s, frame),
-        onTapeTap: (s, tapeId, frame) => this.showTapePopover(s, tapeId, frame),
         isAiActive: () => this.aiMode.isActive(),
         isAiInk: (itemId) => this.aiMode.isAiInk(page.id, itemId),
         onPendingLine: () => this.syncHistory(),
@@ -3705,7 +3639,6 @@ class NotebookView {
       this.overlay.hide();
       this.overlayPc = null;
     }
-    if (pc && this.tapePopoverPc === pc) this.hideTapePopover();
     if (id === this.guidePageId) this.guideKind = this.guidePageId = null;
     this.pcByPage.delete(id);
     this.wrapById.delete(id);
@@ -4344,11 +4277,7 @@ class NotebookView {
 
   /** While AI mode is active on the current page, Undo/Redo act on that
    * turn's own ephemeral ink stack instead of the notebook's normal
-   * content — see AiMode.undo/redo. Either way, a tape popover's sliders
-   * reflect a snapshot of one specific tape's geometry — undo/redo can
-   * change (or remove) it out from under the popover with no pointer event
-   * to trigger the usual outside-tap dismiss, so it's closed unconditionally
-   * here rather than risk it going stale. */
+   * content — see AiMode.undo/redo. */
   private undo(): void {
     // A line still in its adjustable phase is the newest thing the user did,
     // but it isn't in the store or on either stack yet — popping the stack
@@ -4356,13 +4285,11 @@ class NotebookView {
     // refresh() quietly committed the line on the way past. Drop it instead.
     if (this.cancelPendingLine()) return;
     if (this.currentPageId && this.aiMode.isActive()) {
-      if (this.aiMode.canUndo(this.currentPageId)) this.hideTapePopover();
       this.aiMode.undo(this.currentPageId);
       return;
     }
     const op = this.undoStack.pop();
     if (!op) return;
-    this.hideTapePopover();
     this.invert(op);
     this.redoStack.push(op);
     this.syncHistory();
@@ -4391,13 +4318,11 @@ class NotebookView {
 
   private redo(): void {
     if (this.currentPageId && this.aiMode.isActive()) {
-      if (this.aiMode.canRedo(this.currentPageId)) this.hideTapePopover();
       this.aiMode.redo(this.currentPageId);
       return;
     }
     const op = this.redoStack.pop();
     if (!op) return;
-    this.hideTapePopover();
     this.forward(op);
     this.undoStack.push(op);
     this.syncHistory();
@@ -4557,7 +4482,7 @@ const ERASER_MODES: Record<EraserMode, { label: string; sub: string }> = {
   partial: { label: 'Partial', sub: 'Removes only the parts you touch' },
 };
 
-/** A page-unit Frame's (rotation-aware) bounding box, in fixed screen px — shared by positionCallout and positionTapeAnchor. */
+/** A page-unit Frame's (rotation-aware) bounding box, in fixed screen px — used by positionCallout. */
 function frameScreenBox(frame: Frame, pageRect: DOMRect, pw: number): { left: number; top: number; right: number; bottom: number } {
   const scale = pageRect.width / pw;
   const cx = frame.x + frame.w / 2;

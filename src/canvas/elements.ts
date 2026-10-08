@@ -12,6 +12,7 @@ import type {
 } from '../types';
 import { resolveInkColor } from './freehand';
 import { bubbleRadius } from './geom';
+import { uiColors } from './ui-colors';
 
 /** Default strip colour for a new tape element. */
 export const TAPE_COLOR = '#fbbf24';
@@ -160,9 +161,9 @@ export function drawBackground(
   const bmp = backgroundBitmap(bg, onReady);
   if (!bmp) {
     if (bg.assetId && isPdfPageFailed(bg.assetId, bg.page)) {
-      ctx.fillStyle = '#e3e1da';
+      ctx.fillStyle = uiColors().placeholderBg;
       ctx.fillRect(0, 0, w, h);
-      ctx.fillStyle = '#79766c';
+      ctx.fillStyle = uiColors().placeholderText;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.font = textFont(22);

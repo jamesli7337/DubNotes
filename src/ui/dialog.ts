@@ -12,6 +12,9 @@ export interface Modal {
   close: () => void;
 }
 
+/** Which side of its anchor an anchored popover opens on. */
+export type PopoverDirection = 'below' | 'above';
+
 export function openModal(
   content: HTMLElement,
   opts: {
@@ -22,9 +25,11 @@ export function openModal(
     onReposition?: () => void;
     /** extra class on the card, e.g. for a wider/full-height variant (see .modal-card--pages) */
     cardClass?: string;
+    /** anchored only: which side of the anchor to open on. Default: below, flipping above if it doesn't fit. */
+    direction?: PopoverDirection;
   } = {}
 ): Modal {
-  const { onClose, dismissable = true, anchor, onReposition, cardClass } = opts;
+  const { onClose, dismissable = true, anchor, onReposition, cardClass, direction } = opts;
 
   const backdrop = document.createElement('div');
   backdrop.className = anchor ? 'modal-backdrop modal-backdrop--anchored' : 'modal-backdrop';
@@ -80,7 +85,7 @@ export function openModal(
   };
   const reflow = (): void => {
     if (closed || !anchor) return;
-    placeByAnchor(card, anchor);
+    placeByAnchor(card, anchor, direction);
     onReposition?.();
   };
 
@@ -129,7 +134,7 @@ const anchoredModals = new WeakMap<HTMLElement, Modal>();
 export function openAnchoredModal(
   anchor: HTMLElement,
   content: HTMLElement,
-  opts: { onClose?: () => void; onReposition?: () => void } = {}
+  opts: { onClose?: () => void; onReposition?: () => void; direction?: PopoverDirection } = {}
 ): Modal | null {
   const existing = anchoredModals.get(anchor);
   if (existing) {
@@ -148,8 +153,11 @@ export function openAnchoredModal(
   return modal;
 }
 
-/** Positions `card` (fixed) just below `anchor`, flipping above / clamping to the viewport. */
-function placeByAnchor(card: HTMLElement, anchor: HTMLElement): void {
+/**
+ * Positions `card` (fixed) just below `anchor`, flipping above / clamping to the viewport.
+ * An explicit `direction` picks that side first instead, flipping to the other only if it doesn't fit.
+ */
+function placeByAnchor(card: HTMLElement, anchor: HTMLElement, direction: PopoverDirection = 'below'): void {
   const a = anchor.getBoundingClientRect();
   const m = 8;
   const vw = document.documentElement.clientWidth;
@@ -161,7 +169,9 @@ function placeByAnchor(card: HTMLElement, anchor: HTMLElement): void {
   left = Math.max(m, Math.min(left, vw - cw - m));
 
   let top = a.bottom + m;
-  if (top + ch > vh - m && a.top - m - ch >= m) top = a.top - m - ch;
+  if (direction === 'above') {
+    if (a.top - m - ch >= m || top + ch > vh - m) top = a.top - m - ch;
+  } else if (top + ch > vh - m && a.top - m - ch >= m) top = a.top - m - ch;
   top = Math.max(m, Math.min(top, vh - ch - m));
 
   card.style.left = `${Math.round(left)}px`;

@@ -92,6 +92,7 @@ import {
   type SurfaceHooks,
 } from './item-surface';
 import { drawTemplate } from './templates';
+import { uiColors } from './ui-colors';
 
 /** Undo-able edits a page can produce. Page add/delete is handled by NotebookView. */
 export type Op =
@@ -297,8 +298,6 @@ export class PageCanvas implements ItemSurface {
   private readonly peeled = new Set<string>();
   /** tape under a press that may turn into a peel/cover tap */
   private tapeHit: string | null = null;
-  /** a tape's geometry snapshot while its popover's resize sliders are being dragged — see beginTapeResize/commitTapeResize */
-  private tapeResizeOrig: TapeElement | null = null;
   /** shape under a Shapes-tool press: a tap selects it, a drag places a new shape over it */
   private shapeHit: string | null = null;
   /** a finger resting on a tape: becomes a peel/cover tap if it lifts without moving */
@@ -414,11 +413,6 @@ export class PageCanvas implements ItemSurface {
   /** This mounted page's own screen rect — for external UI (the lasso selection callout) anchored against a Frame from onSelectionFrame. */
   pageRect(): DOMRect | null {
     return this.host?.getBoundingClientRect() ?? null;
-  }
-
-  /** See ItemSurface.tapeSizeLimit — a page caps a strip at its own size. */
-  tapeSizeLimit(): { w: number; h: number } {
-    return { w: this.pw, h: this.ph };
   }
 
   /** See ItemSurface.calloutBasis. A page's own rect already carries the camera (it lives inside the transformed layer), so page units scale by rect.width / pw exactly. */
@@ -866,6 +860,7 @@ export class PageCanvas implements ItemSurface {
       const entersExisting =
         kind === 'lasso' ||
         (kind === 'shapes' && this.topShapeAt(pt[0], pt[1]) !== null) ||
+        (kind === 'tape' && this.topTapeAt(pt[0], pt[1]) !== null) ||
         (kind === 'text' && this.topTextAt(pt[0], pt[1]) !== null);
       if (!entersExisting) {
         this.mode = 'dismiss';
@@ -1498,8 +1493,8 @@ export class PageCanvas implements ItemSurface {
     const z = this.zoom();
     v.save();
     v.lineWidth = 2 / z;
-    v.strokeStyle = '#2563eb';
-    v.fillStyle = '#fff';
+    v.strokeStyle = uiColors().handleStroke;
+    v.fillStyle = uiColors().handleFill;
     const grip = shapeRotateGrip(se.fit, z, { w: this.pw, h: this.ph });
     v.lineWidth = 1.5 / z;
     v.beginPath(); // the stem, from the outline out to the grip dot
@@ -1840,61 +1835,20 @@ export class PageCanvas implements ItemSurface {
 
   /**
    * A tap/hold resolved on an existing tape strip: every tool but the tape
-   * tool itself still peels/covers it exactly as before (unaffected by the
-   * popover below); the tape tool instead offers resize + delete, since a
-   * tap there can no longer mean "start a new strip" (that only fires when
-   * the press lands on empty page — see topTapeAt's caller in onDown).
+   * tool itself still peels/covers it; the tape tool instead selects it
+   * (shared handles + callout), since a tap there can no longer mean "start
+   * a new strip" (that only fires when the press lands on empty page — see
+   * topTapeAt's caller in onDown).
    */
   private handleTapeTap(id: string): void {
     if (toolState.kind !== 'tape') {
       this.toggleTape(id);
       return;
     }
-    const frame = this.tapeFrame(id);
-    if (frame) this.hooks.onTapeTap(this, id, frame);
+    this.setSelection([id]);
   }
 
-  private getTape(id: string): TapeElement | undefined {
-    return store.elementsOf(this.page.id).find((e): e is TapeElement => e.kind === 'tape' && e.id === id);
-  }
-
-  private tapeFrame(id: string): Frame | null {
-    const t = this.getTape(id);
-    return t ? { x: t.x, y: t.y, w: t.w, h: t.h, rot: t.rotation } : null;
-  }
-
-  /** Snapshots a tape's current geometry before a popover resize gesture, for one undo step once it finishes (see commitTapeResize). */
-  beginTapeResize(id: string): TapeElement | null {
-    const t = this.getTape(id);
-    this.tapeResizeOrig = t ? { ...t } : null;
-    return this.tapeResizeOrig;
-  }
-
-  /** Live preview while a resize slider is being dragged — repaints immediately, no undo step yet. */
-  previewTapeResize(id: string, w: number, h: number): void {
-    const t = this.getTape(id);
-    if (!t) return;
-    store.replaceItems(this.page.id, [{ ...t, w: Math.max(TAPE_MIN, w), h: Math.max(TAPE_MIN, h) }]);
-    this.rebuild();
-  }
-
-  /** Commits a finished resize gesture as one undo step, against the snapshot from beginTapeResize. */
-  commitTapeResize(id: string): void {
-    const before = this.tapeResizeOrig;
-    this.tapeResizeOrig = null;
-    if (!before) return;
-    const after = this.getTape(id);
-    if (!after || (after.w === before.w && after.h === before.h)) return;
-    this.hooks.onOp({ kind: 'replace-items', pageId: this.page.id, before: [before], after: [after] });
-  }
-
-  /** A tape strip's current width/height (page units), for the popover's resize sliders — null if it no longer exists. */
-  tapeGeometry(id: string): { w: number; h: number } | null {
-    const t = this.getTape(id);
-    return t ? { w: t.w, h: t.h } : null;
-  }
-
-  /** Deletes one tape strip directly by id (the popover's Delete), independent of the lasso selection. */
+  /** Deletes one tape strip directly by id, independent of the lasso selection. */
   deleteTape(id: string): void {
     const removed = store.removeItems(this.page.id, new Set([id]));
     if (!removed.length) return;
@@ -2408,6 +2362,11 @@ export class PageCanvas implements ItemSurface {
   paperChanged(): void {
     this.rebuild();
     this.syncEditor();
+  }
+
+  /** Called on `themechange`: repaint the chrome colours (ui-colors.ts) baked into the cache, keeping any eraser dimming; rebuild reschedules the view layer's overlays too. */
+  themeChanged(): void {
+    this.rebuild(this.lastDim);
   }
 
   /** Builds a copy of `el` for another page/position; used by paste and duplicate. */

@@ -1,7 +1,7 @@
 import { AUTO_COLOR } from '../canvas/freehand';
 import { el } from './dom';
 import { icon } from './icon';
-import { openAnchoredModal, type Modal } from './dialog';
+import { openAnchoredModal, type Modal, type PopoverDirection } from './dialog';
 
 /** Deleted presets offered back at the top of the picker (see buildSwatches' "+" handler) — clicking one restores it instead of opening the hue/sat editor. */
 export interface RestorableColors {
@@ -62,7 +62,12 @@ export function rgbToHsv(r: number, g: number, b: number): [number, number, numb
  * hex when "Add colour" is pressed, or null when dismissed. Anchored to the
  * dock button that opened it.
  */
-export function pickColor(anchor: HTMLElement, initial: string, restorable?: RestorableColors): Promise<string | null> {
+export function pickColor(
+  anchor: HTMLElement,
+  initial: string,
+  restorable?: RestorableColors,
+  direction?: PopoverDirection
+): Promise<string | null> {
   return new Promise((resolve) => {
     const start = hexToRgb(initial) ?? [37, 99, 235];
     let [h, s, v] = rgbToHsv(...start);
@@ -194,7 +199,7 @@ export function pickColor(anchor: HTMLElement, initial: string, restorable?: Res
     panel.append(svWrap, hue, row, add);
     paintSquare();
     sync();
-    modal = openAnchoredModal(anchor, panel, { onClose: () => finish(null) });
+    modal = openAnchoredModal(anchor, panel, { onClose: () => finish(null), direction });
     // a repeat tap on the same "add colour" button while its picker is open
     // closes the existing one (openAnchoredModal above) rather than opening a
     // second — that existing picker's own onClose settles its promise, but

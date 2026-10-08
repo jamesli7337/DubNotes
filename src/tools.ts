@@ -107,7 +107,11 @@ interface ToolState {
   hiDeletedPresets: string[];
   /** The dock's tool buttons in on-screen order — drag-to-reorder writes this. */
   toolOrder: ToolKind[];
+  /** Which screen edge the dock is docked to. The single source of truth for dock placement. */
+  dockPosition: DockPosition;
 }
+
+export type DockPosition = 'top' | 'bottom';
 
 const KEY = 'noteapp.tools';
 const DEFAULTS: ToolState = {
@@ -125,6 +129,7 @@ const DEFAULTS: ToolState = {
   penDeletedPresets: [],
   hiDeletedPresets: [],
   toolOrder: [...TOOL_ORDER],
+  dockPosition: 'top',
 };
 
 const HEX = /^#[0-9a-f]{6}$/i;
@@ -289,6 +294,7 @@ function load(): ToolState {
   st.penDeletedPresets = cleanDeletedPresets(st.penDeletedPresets, 'pen');
   st.hiDeletedPresets = cleanDeletedPresets(st.hiDeletedPresets, 'highlighter');
   st.toolOrder = cleanToolOrder(st.toolOrder);
+  if (st.dockPosition !== 'top' && st.dockPosition !== 'bottom') st.dockPosition = DEFAULTS.dockPosition;
   if (!st.penSwatches.includes(st.penColor)) st.penColor = st.penSwatches[0];
   if (!st.hiSwatches.includes(st.hiColor)) st.hiColor = st.hiSwatches[0];
   if (!st.penSwatches.includes(st.textColor)) st.textColor = st.penSwatches[0];

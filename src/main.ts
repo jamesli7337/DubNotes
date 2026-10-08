@@ -1,4 +1,5 @@
 import './styles.css';
+import './theme';
 import { sweepOrphanedAssets } from './db';
 import { importFile, takeSharedFile } from './import-file';
 import { store } from './store';
