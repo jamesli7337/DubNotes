@@ -218,12 +218,16 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     ],
   });
 
+  const requestStart = Date.now();
+  let attemptStart = requestStart;
+  const attemptMs: number[] = []; // per attempt, failed ones then the successful one
   let upstream: Response | null = null;
   let model: string = MODELS[0];
   // one per failed try: for the error message, and whether it was quota exhaustion
   const attempts: { label: string; quota: boolean }[] = [];
   for (const m of MODELS) {
     model = m;
+    attemptStart = Date.now();
     try {
       upstream = await fetch(`${modelUrl(m)}?key=${apiKey}`, {
         method: 'POST',
@@ -245,6 +249,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
         (info.quotaIds.length ? ` quotaIds=${info.quotaIds.join(',')}` : '') +
         ` message=${JSON.stringify(info.message ?? '')}`
     );
+    attemptMs.push(Date.now() - attemptStart);
     attempts.push({ label: `${m} ${upstream.status}`, quota: info.quotaExhausted });
     if (!FALLBACK_STATUSES.has(upstream.status)) break; // a real error, not capacity: no fallback
   }
@@ -279,6 +284,22 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     return;
   }
 
+  const elapsedMs = Date.now() - attemptStart;
+  attemptMs.push(elapsedMs);
+  const usage = { model, elapsedMs, ...readTokenCounts(data) };
+  console.log(
+    JSON.stringify({
+      model,
+      fallback: model !== MODELS[0],
+      elapsedMs,
+      totalElapsedMs: Date.now() - requestStart,
+      attemptMs,
+      ...readTokenCounts(data),
+      pages: pages.length,
+      bodyChars: upstreamBody.length,
+    })
+  );
+
   // checked before the text: a truncated reply is half a JSON object, and a
   // blocked one may have no text at all — either would otherwise surface as
   // the generic "unreadable"/"no text" error below
@@ -305,6 +326,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     text: reply.answer,
     transcript: reply.transcript,
     model,
+    usage,
     ...(wantTitle && reply.title ? { title: reply.title } : {}),
   });
 }
@@ -457,6 +479,23 @@ function finishReasonCode(data: unknown): ReplyErrorCode | null {
   if (reason === 'SAFETY') return 'safety';
   if (reason === 'RECITATION') return 'recitation';
   return null;
+}
+
+/** The four token counts from a response's `usageMetadata`; null for any that's absent. */
+function readTokenCounts(data: unknown): {
+  promptTokenCount: number | null;
+  candidatesTokenCount: number | null;
+  thoughtsTokenCount: number | null;
+  totalTokenCount: number | null;
+} {
+  const u = (data as { usageMetadata?: Record<string, unknown> } | null)?.usageMetadata;
+  const n = (v: unknown): number | null => (typeof v === 'number' ? v : null);
+  return {
+    promptTokenCount: n(u?.promptTokenCount),
+    candidatesTokenCount: n(u?.candidatesTokenCount),
+    thoughtsTokenCount: n(u?.thoughtsTokenCount),
+    totalTokenCount: n(u?.totalTokenCount),
+  };
 }
 
 /** Pulls the reply text out of a generateContent response, defensively. */
