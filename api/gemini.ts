@@ -60,6 +60,12 @@ const modelUrl = (model: string): string =>
 /** Upstream statuses that mean "this model can't take it right now" rather than "this request is wrong". */
 const FALLBACK_STATUSES = new Set([503, 429]);
 
+/** When every attempt of a request failed with 503, the whole sequence is run
+ * once more after this pause — unless more than RETRY_DEADLINE_MS have already
+ * elapsed, which keeps the total under vercel.json's maxDuration. */
+const RETRY_DELAY_MS = 2_500;
+const RETRY_DEADLINE_MS = 25_000;
+
 /** Server-side caps on `history`, a little above the client's own budget
  * (ai-mode.ts's HISTORY_CHAR_BUDGET) so a well-behaved client is never
  * trimmed here; oldest turn pairs are dropped first. */
@@ -224,34 +230,47 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
   let upstream: Response | null = null;
   let model: string = MODELS[0];
   // one per failed try: for the error message, and whether it was quota exhaustion
-  const attempts: { label: string; quota: boolean }[] = [];
-  for (const m of MODELS) {
-    model = m;
-    attemptStart = Date.now();
-    try {
-      upstream = await fetch(`${modelUrl(m)}?key=${apiKey}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: upstreamBody,
-      });
-    } catch (err) {
-      // the request URL carries the API key — logged as the error's name and
-      // message only, with any key=… that might appear in them redacted
-      const why = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
-      console.error(`Gemini attempt failed: model=${m} network error — ${why.replace(/key=[^&\s]+/g, 'key=…')}`);
-      res.status(502).json({ error: 'Could not reach the AI service.' });
-      return;
+  const attempts: { label: string; quota: boolean; status: number }[] = [];
+  let retried = false;
+  // At most two rounds of the primary-then-fallback sequence; the second only
+  // if the first failed entirely on 503s (see RETRY_* below).
+  for (let round = 0; round < 2; round++) {
+    attempts.length = 0; // the error message below describes the final round only
+    for (const m of MODELS) {
+      model = m;
+      attemptStart = Date.now();
+      try {
+        upstream = await fetch(`${modelUrl(m)}?key=${apiKey}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: upstreamBody,
+        });
+      } catch (err) {
+        // the request URL carries the API key — logged as the error's name and
+        // message only, with any key=… that might appear in them redacted
+        const why = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+        console.error(`Gemini attempt failed: model=${m} network error — ${why.replace(/key=[^&\s]+/g, 'key=…')}`);
+        res.status(502).json({ error: 'Could not reach the AI service.' });
+        return;
+      }
+      if (upstream.ok) break;
+      const info = await readUpstreamError(upstream);
+      console.error(
+        `Gemini attempt failed: model=${m} http=${upstream.status} status=${info.status ?? '-'}` +
+          (info.quotaIds.length ? ` quotaIds=${info.quotaIds.join(',')}` : '') +
+          ` message=${JSON.stringify(info.message ?? '')}`
+      );
+      attemptMs.push(Date.now() - attemptStart);
+      attempts.push({ label: `${m} ${upstream.status}`, quota: info.quotaExhausted, status: upstream.status });
+      if (!FALLBACK_STATUSES.has(upstream.status)) break; // a real error, not capacity: no fallback
     }
-    if (upstream.ok) break;
-    const info = await readUpstreamError(upstream);
-    console.error(
-      `Gemini attempt failed: model=${m} http=${upstream.status} status=${info.status ?? '-'}` +
-        (info.quotaIds.length ? ` quotaIds=${info.quotaIds.join(',')}` : '') +
-        ` message=${JSON.stringify(info.message ?? '')}`
-    );
-    attemptMs.push(Date.now() - attemptStart);
-    attempts.push({ label: `${m} ${upstream.status}`, quota: info.quotaExhausted });
-    if (!FALLBACK_STATUSES.has(upstream.status)) break; // a real error, not capacity: no fallback
+    if (upstream?.ok) break;
+    // retry only a round where every attempt was a 503, and only while there's
+    // time left under the function's maxDuration
+    const allOverloaded = attempts.length > 0 && attempts.every((a) => a.status === 503);
+    if (round > 0 || !allOverloaded || Date.now() - requestStart > RETRY_DEADLINE_MS) break;
+    retried = true;
+    await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
   }
 
   if (!upstream?.ok) {
@@ -291,6 +310,7 @@ export default async function handler(req: ApiRequest, res: ApiResponse): Promis
     JSON.stringify({
       model,
       fallback: model !== MODELS[0],
+      retried,
       elapsedMs,
       totalElapsedMs: Date.now() - requestStart,
       attemptMs,

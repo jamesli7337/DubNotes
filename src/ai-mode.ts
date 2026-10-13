@@ -151,6 +151,9 @@ async function questionThumbnail(imgs: TurnImage[]): Promise<string> {
   return c.toDataURL('image/jpeg', 0.8);
 }
 
+/** The failure messages (gemini-client.ts) worth a Retry button: couldn't reach the AI, or overloaded. */
+const RETRYABLE_ERROR = /reach the AI|overloaded right now/;
+
 /** One turn's worth of conversation, shown in the panel. The persisted shape
  * (`AiConversationEntry`) plus a transient in-memory-only flag — an entry is
  * never written to IndexedDB while still pending; only once resolved. */
@@ -196,6 +199,8 @@ export class AiMode {
   private capturing = false;
   /** The pages a turn in flight was sent from, so only their status shows "thinking". */
   private sendingPageIds = new Set<string>();
+  /** The most recent send's exact request body and its turn entry, kept in memory only (never persisted) so a retryable failure can resend it as-is. Dropped when a new send starts. */
+  private lastSend: { body: object; entry: ConversationEntry } | null = null;
   private readonly pages = new Map<string, AiPageState>();
   /**
    * AI mode's own undo/redo history: one for the whole notebook, like
@@ -830,6 +835,7 @@ export class AiMode {
     }
 
     this.sending = true;
+    this.lastSend = null;
     this.sendingPageIds = new Set(turn.map((t) => t.page.id));
     for (const id of this.sendingPageIds) this.applyVisual(id);
 
@@ -927,6 +933,7 @@ export class AiMode {
       pending: true,
     };
     this.unsaved.add(entry);
+    this.lastSend = { body, entry };
     this.openPanel();
     this.renderConversation();
 
@@ -951,18 +958,7 @@ export class AiMode {
     }
     this.forgetHistory(sentPages);
 
-    let text: string;
-    let transcript = '';
-    let model = '';
-    let title = '';
-    let isError = false;
-    try {
-      ({ text, transcript, model, title, isError } = await callGemini(body));
-    } catch (err) {
-      console.error('AI mode send failed:', err);
-      text = "DubNotes AI error: Couldn't reach the AI, check your internet connection.";
-      isError = true;
-    }
+    const { text, transcript, model, title, isError } = await this.askGemini(body);
 
     this.endSending();
 
@@ -972,6 +968,52 @@ export class AiMode {
     entry.thumbnail = thumbnail;
     if (!isError && transcript) entry.transcript = transcript;
     if (!isError && model) entry.model = model;
+    if (!isError) this.lastSend = null; // nothing left to retry
+    this.renderConversation();
+    void this.persistTurn(entry, title);
+  }
+
+  /** One request to the proxy; a thrown error becomes the same "couldn't reach" error result callGemini itself gives. */
+  private async askGemini(body: object): Promise<Awaited<ReturnType<typeof callGemini>>> {
+    try {
+      return await callGemini(body);
+    } catch (err) {
+      console.error('AI mode send failed:', err);
+      return {
+        text: "DubNotes AI error: Couldn't reach the AI, check your internet connection.",
+        transcript: '',
+        model: '',
+        title: '',
+        isError: true,
+      };
+    }
+  }
+
+  /**
+   * Resends the most recent send's stored request body for its failed entry —
+   * no recapture, no store/ink/history changes. The entry goes back to the
+   * pending placeholder, then resolves and is saved exactly like a normal
+   * reply (same id, so the saved failure is overwritten).
+   */
+  private async retryLast(): Promise<void> {
+    const last = this.lastSend;
+    if (!last || this.sending || last.entry.pending || !last.entry.isError) return;
+    const { body, entry } = last;
+    this.sending = true;
+    entry.pending = true;
+    entry.isError = false;
+    entry.text = '';
+    this.renderConversation();
+
+    const { text, transcript, model, title, isError } = await this.askGemini(body);
+
+    this.sending = false;
+    entry.pending = false;
+    entry.text = text;
+    entry.isError = isError;
+    if (!isError && transcript) entry.transcript = transcript;
+    if (!isError && model) entry.model = model;
+    if (!isError) this.lastSend = null;
     this.renderConversation();
     void this.persistTurn(entry, title);
   }
@@ -1040,8 +1082,21 @@ export class AiMode {
         'ai-panel__reply' + (entry.isError ? ' ai-panel__reply--error' : '') + (entry.pending ? ' ai-panel__reply--pending' : '');
       const replyEl = el('div', { class: cls });
       if (entry.pending) replyEl.textContent = 'DubNotes AI is thinking…';
-      else if (entry.isError) replyEl.textContent = entry.text; // an app-generated message, not Gemini markdown/LaTeX
-      else renderAiReply(replyEl, entry.text);
+      else if (entry.isError) {
+        replyEl.textContent = entry.text; // an app-generated message, not Gemini markdown/LaTeX
+        // only the latest send's failure, only while nothing else is in flight, only if it's one a resend could fix
+        if (this.lastSend?.entry === entry && !this.sending && RETRYABLE_ERROR.test(entry.text)) {
+          const retryBtn = el('button', { class: 'mode-btn', text: 'Retry' });
+          retryBtn.addEventListener('click', () => {
+            retryBtn.disabled = true;
+            void this.retryLast();
+          });
+          const wrap = el('div');
+          wrap.style.marginTop = '8px';
+          wrap.append(retryBtn);
+          replyEl.append(wrap);
+        }
+      } else renderAiReply(replyEl, entry.text);
       row.append(replyEl);
       // which model answered — the server may have fallen back from its primary
       if (!entry.pending && !entry.isError && entry.model) row.append(el('div', { class: 'ai-panel__model', text: entry.model }));
