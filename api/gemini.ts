@@ -54,7 +54,7 @@ interface ApiResponse {
  * input, JSON-schema output and multi-turn `contents`. This is the only retry
  * anywhere: the client (gemini-client.ts) makes one request and doesn't retry.
  */
-const MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash'] as const;
+const MODELS = ['gemini-3.6-flash', 'gemini-3.5-flash', 'gemini-3.1-flash-lite'] as const;
 const modelUrl = (model: string): string =>
   `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;
 /** Upstream statuses that mean "this model can't take it right now" rather than "this request is wrong". */
